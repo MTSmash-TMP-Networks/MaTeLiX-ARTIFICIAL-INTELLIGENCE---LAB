@@ -1,5 +1,8 @@
 # MaTeLiX AI Lab (Trainer & Inference Server)
 
+<img width="1940" height="811" alt="Matelix" src="https://github.com/user-attachments/assets/23873d32-74ef-4640-b4c5-f24fb40b738c" />
+
+
 Ein lokales **FastAPI**-Lab für **Fine-Tuning** (Full / LoRA) und **Inference** inkl. Web-UI-Fallback, Live-Logs, Training-Status, Live-Preview sowie einer **OpenAI-kompatiblen API** (`/v1/*`).
 
 > Datei: `matelix_lab_server.py`  
