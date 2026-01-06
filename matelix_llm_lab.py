@@ -1,12 +1,18 @@
 #!/usr/bin/env python3
 # matelix_lab_server.py
-# --- MaTeLiX AI Trainer & Inference (stabilisierte, bereinigte Version) ---
+# Copyright 2026 TMP-SYSTEM-SERVICE GmbH
 #
-# Fixes eingebaut:
-#   (1) Slicing-Syntax: "\:" -> ":" (sonst SyntaxError)
-#   (2) Robustere System-Message Behandlung: System wird als normale Message (role="system") in messages geprepended.
-#       -> kein tokenizer.apply_chat_template(..., system=...) mehr nötig (versionsrobuster).
-#   (4) stop(): running wird NICHT mehr sofort auf False gesetzt, sondern erst wenn der Train-Thread wirklich beendet ist.
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
 from __future__ import annotations
 
