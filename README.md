@@ -55,7 +55,7 @@ Ein lokales **FastAPI**-Lab für **Fine-Tuning** (Full / LoRA) und **Inference**
 │     ├─ (model files)
 │     └─ (tokenizer files)
 └─ static/
-   └─ index.html   (optional eigene UI)
+   └─ index.html
 ````
 
 Wenn `./static/index.html` fehlt, wird automatisch eine kleine Fallback-Seite erzeugt.
@@ -64,7 +64,7 @@ Wenn `./static/index.html` fehlt, wird automatisch eine kleine Fallback-Seite er
 
 ## Voraussetzungen
 
-* Python 3.10+ empfohlen
+* Python 3.11+ empfohlen
 * PyTorch (CUDA optional)
 * NVIDIA-Setup optional: `nvidia-smi` wird genutzt, wenn verfügbar
 
