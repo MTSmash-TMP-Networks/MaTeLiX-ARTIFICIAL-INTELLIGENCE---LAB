@@ -332,7 +332,7 @@ Dieses Projekt ist unter der **Apache License 2.0** lizenziert – siehe `LICENS
 
 ---
 
-## Roadmap (optional)
+## Roadmap
 
 * [ ] UI Dashboard (Training, Logs, Preview, Inference)
 * [ ] Multi-GPU / Distributed Training
