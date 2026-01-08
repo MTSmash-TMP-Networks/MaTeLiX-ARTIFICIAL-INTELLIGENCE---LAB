@@ -649,10 +649,31 @@ def estimate_avg_tokens(
 ) -> int:
     total = 0
     count = 0
-    if template_mode in ("chat", "dialogplus"):
-        it = dialog_iter(csv_path, template_mode=template_mode)
-    else:
-        it = column_iter(csv_path, column_name=column_name)
+
+    if template_mode == "chat":
+        it_pairs = chat_block_iter(csv_path, shuffle_threads=False)
+        for i, (p, a) in enumerate(it_pairs):
+            ids = tokenizer(p + a, add_special_tokens=False)["input_ids"]
+            if ids:
+                total += len(ids)
+                count += 1
+            if mode == "sample" and samples and (i + 1 >= samples):
+                break
+        return max(1, total // max(1, count))
+
+    if template_mode == "dialogplus":
+        it_pairs = dialogplus_block_iter(csv_path, shuffle_threads=False)
+        for i, (p, a) in enumerate(it_pairs):
+            ids = tokenizer(p + a, add_special_tokens=False)["input_ids"]
+            if ids:
+                total += len(ids)
+                count += 1
+            if mode == "sample" and samples and (i + 1 >= samples):
+                break
+        return max(1, total // max(1, count))
+
+    # plaintext / column
+    it = column_iter(csv_path, column_name=column_name)
     for i, text in enumerate(it):
         ids = tokenizer(text, add_special_tokens=False)["input_ids"]
         if ids:
@@ -663,10 +684,11 @@ def estimate_avg_tokens(
     return max(1, total // max(1, count))
 
 def count_training_units(csv_path: str, template_mode: str, column_name: str) -> int:
-    if template_mode in ("chat", "dialogplus"):
-        return sum(1 for _ in dialog_iter(csv_path, template_mode=template_mode))
-    else:
-        return sum(1 for _ in column_iter(csv_path, column_name=column_name))
+    if template_mode == "chat":
+        return sum(1 for _ in chat_block_iter(csv_path, shuffle_threads=False))
+    if template_mode == "dialogplus":
+        return sum(1 for _ in dialogplus_block_iter(csv_path, shuffle_threads=False))
+    return sum(1 for _ in column_iter(csv_path, column_name=column_name))
 
 def estimate_steps_per_epoch(
     num_units: int,
@@ -834,6 +856,114 @@ def dialogplus_block_iter(csv_path: str, shuffle_threads: bool = False) -> Itera
             block_a = "".join(prompt_lines)
             block_b = target_text + "\n</s>"
             yield block_a, block_b
+
+# ----------------------------
+# NEU: chat_block_iter(...) => JEDE Antwort als eigenes Sample im "chat"-Format
+# ----------------------------
+def chat_block_iter(csv_path: str, shuffle_threads: bool = False) -> Iterator[Tuple[str, str]]:
+    """
+    Liefert (prompt_text, answer_text) pro Assistentin-Antwort, im 'chat'-Format:
+      prompt: <s> [System?] (User/Assistant turns...) <|Assistentin|>
+      answer:  {target_asst}\n</s>
+
+    Damit wird JEDE Antwort trainiert (nicht nur die letzte Konversation).
+    """
+    with open(csv_path, "r", encoding="utf-8") as f:
+        reader = csv.DictReader(f)
+        rows: List[Dict[str, Any]] = []
+        for idx, row in enumerate(reader):
+            row["_rowidx"] = idx
+            row["id"] = _normalize_id(row.get("id", ""))
+            row["parent_id"] = _normalize_id(row.get("parent_id", ""))
+            rows.append(row)
+
+    id2row = {r["id"]: r for r in rows if r.get("id")}
+
+    candidates = [r for r in rows if (r.get("Assistentin") or "").strip() and r.get("id")]
+    if not candidates:
+        return
+
+    from functools import lru_cache
+
+    @lru_cache(maxsize=None)
+    def root_and_depth(rid: str) -> Tuple[str, int]:
+        depth = 0
+        cur = id2row.get(rid)
+        if not cur:
+            return ("", 0)
+        while True:
+            pid = cur.get("parent_id", "")
+            if not pid or pid not in id2row:
+                return (cur["id"], depth)
+            cur = id2row[pid]
+            depth += 1
+
+    threads: Dict[str, List[Tuple[int, int, Dict[str, Any]]]] = {}
+    for r in candidates:
+        rid = r.get("id", "")
+        root_id, depth = root_and_depth(rid)
+        threads.setdefault(root_id, []).append((depth, int(r["_rowidx"]), r))
+
+    for root_id in list(threads.keys()):
+        threads[root_id].sort(key=lambda t: (t[0], t[1]))
+
+    order = list(threads.keys())
+    if shuffle_threads:
+        random.shuffle(order)
+
+    for root_id in order:
+        for _, _, target in threads[root_id]:
+            chain: List[Dict[str, Any]] = []
+            cur = target
+            seen = set()
+            while cur.get("id") and cur["id"] not in seen:
+                seen.add(cur["id"])
+                chain.append(cur)
+                pid = cur.get("parent_id", "")
+                if pid and pid in id2row:
+                    cur = id2row[pid]
+                else:
+                    break
+            chain.reverse()
+            if not chain:
+                continue
+
+            target_idx = len(chain) - 1
+            target_text = (chain[target_idx].get("Assistentin") or "").strip()
+            if not target_text:
+                continue
+
+            system_text = (chain[0].get("system") or "").strip()
+
+            parts: List[str] = []
+            parts.append("<s>\n")
+            if system_text:
+                parts.append("<|System|>\n")
+                parts.append(system_text.strip())
+                parts.append("\n")
+
+            for j in range(target_idx + 1):
+                turn = chain[j]
+                user = (turn.get("Benutzer") or "").strip()
+                ctx = (turn.get("Kontext") or "").strip()
+                asst = (turn.get("Assistentin") or "").strip()
+
+                if user:
+                    parts.append("<|Benutzer|>\n")
+                    parts.append(f"{ctx}\n{user}".strip() if ctx else user)
+                    parts.append("\n")
+
+                if j < target_idx and asst:
+                    parts.append("<|Assistentin|>\n")
+                    parts.append(asst)
+                    parts.append("\n")
+
+                if j == target_idx:
+                    parts.append("<|Assistentin|>\n")
+
+            prompt_text = "".join(parts)
+            answer_text = target_text + "\n</s>"
+            yield prompt_text, answer_text
 
 # ----------------------------
 # LoRA target detection & Utils
@@ -1078,9 +1208,96 @@ def build_chunk_dataset(
     *,
     preview_callback=None,
 ) -> List[Dict[str, Any]]:
-    # Erzeuge aus allen Texten ein klassisches Block-Dataset (CausalLM):
-    # input_ids = block, labels = block, attention_mask = 1s
-    # (Optional) sort_by_length, shuffle
+    """
+    Baut ein CausalLM-Dataset mit Answer-Only Loss:
+      input_ids = prompt_ids + answer_ids
+      labels    = [-100]*len(prompt_ids) + answer_ids
+
+    WICHTIG: Bei chat/dialogplus wird JEDE Assistentin-Antwort trainiert,
+    weil wir pro Assistentin-Message ein Sample erzeugen (block_iter).
+
+    Zusätzlich: Samples werden auf chunk_size gepadded (left padding),
+    damit per_device_train_batch_size > 1 stabil funktioniert.
+    """
+    chunk = int(cfg.chunk_size)
+    pad_id = tokenizer.pad_token_id
+    if pad_id is None:
+        pad_id = tokenizer.eos_token_id if tokenizer.eos_token_id is not None else 0
+
+    dataset: List[Dict[str, Any]] = []
+
+    def pad_left(seq: List[int], target_len: int, pad_value: int) -> List[int]:
+        if len(seq) >= target_len:
+            return seq[-target_len:]
+        return [pad_value] * (target_len - len(seq)) + seq
+
+    def pad_left_mask(length: int, target_len: int) -> List[int]:
+        if length >= target_len:
+            return [1] * target_len
+        return [0] * (target_len - length) + [1] * length
+
+    def pad_left_labels(labels: List[int], target_len: int) -> List[int]:
+        if len(labels) >= target_len:
+            return labels[-target_len:]
+        return [-100] * (target_len - len(labels)) + labels
+
+    def add_sequence(prompt_text: str, answer_text: str):
+        prompt_ids = tokenizer(prompt_text, add_special_tokens=False)["input_ids"]
+        answer_ids = tokenizer(answer_text, add_special_tokens=False)["input_ids"]
+        if not prompt_ids and not answer_ids:
+            return
+
+        input_ids_full = list(prompt_ids) + list(answer_ids)
+        labels_full = ([-100] * len(prompt_ids)) + list(answer_ids)
+
+        # Preview: zeige das erste Sample (voller prompt+answer Text)
+        if callable(preview_callback) and not dataset:
+            try:
+                preview_callback((prompt_text + answer_text)[:20000])
+            except Exception:
+                pass
+
+        # in Blöcke schneiden (labels aligned) + padding auf chunk_size
+        for i in range(0, len(input_ids_full), chunk):
+            block_in = input_ids_full[i:i + chunk]
+            block_lb = labels_full[i:i + chunk]
+            if len(block_in) < 2:
+                continue
+
+            attn = pad_left_mask(len(block_in), chunk)
+            block_in_p = pad_left(block_in, chunk, pad_id)
+            block_lb_p = pad_left_labels(block_lb, chunk)
+
+            dataset.append(
+                {
+                    "input_ids": block_in_p,
+                    "attention_mask": attn,
+                    "labels": block_lb_p,
+                }
+            )
+
+    # ---------
+    # Dialog-Modi: pro Antwort (prompt, answer) erzeugen
+    # ---------
+    if cfg.template_mode == "dialogplus":
+        pairs = list(dialogplus_block_iter(csv_path, shuffle_threads=bool(cfg.shuffle)))
+        if cfg.sort_by_length:
+            pairs.sort(key=lambda pa: len(tokenizer(pa[0] + pa[1], add_special_tokens=False)["input_ids"]))
+        for prompt_text, answer_text in pairs:
+            add_sequence(prompt_text, answer_text)
+        return dataset
+
+    if cfg.template_mode == "chat":
+        pairs = list(chat_block_iter(csv_path, shuffle_threads=bool(cfg.shuffle)))
+        if cfg.sort_by_length:
+            pairs.sort(key=lambda pa: len(tokenizer(pa[0] + pa[1], add_special_tokens=False)["input_ids"]))
+        for prompt_text, answer_text in pairs:
+            add_sequence(prompt_text, answer_text)
+        return dataset
+
+    # ---------
+    # Column/Plaintext-Modus: wie vorher (alles wird trainiert)
+    # ---------
     texts = list(_iter_texts_for_training(cfg, limit=None))
     if cfg.shuffle:
         random.shuffle(texts)
@@ -1094,30 +1311,31 @@ def build_chunk_dataset(
     if cfg.sort_by_length:
         encs.sort(key=lambda x: len(x[0]))
 
-    chunk = int(cfg.chunk_size)
-    dataset: List[Dict[str, Any]] = []
-
-    # Optional Live-Preview: zeige erstes Sample (Text)
     if encs and callable(preview_callback):
         try:
             preview_callback(encs[0][1])
         except Exception:
             pass
 
+    # plaintext: labels=input_ids (kein maskieren)
     for ids, _txt in encs:
-        # Schneide in Blöcke
         for i in range(0, len(ids), chunk):
             block = ids[i:i + chunk]
             if len(block) < 2:
                 continue
-            attn = [1] * len(block)
+
+            attn = pad_left_mask(len(block), chunk)
+            block_in_p = pad_left(block, chunk, pad_id)
+            block_lb_p = pad_left_labels(block.copy(), chunk)  # labels == input_ids, padding => -100
+
             dataset.append(
                 {
-                    "input_ids": block,
+                    "input_ids": block_in_p,
                     "attention_mask": attn,
-                    "labels": block.copy(),
+                    "labels": block_lb_p,
                 }
             )
+
     return dataset
 
 # ----------------------------
@@ -1187,7 +1405,6 @@ class TrainingManager:
         # FIX (4): nicht sofort running=False setzen; das passiert im Train-Thread im finally.
         self.stop_event.set()
         with self.state.lock:
-            # optional Status-Hinweis
             self.state.eta = "stopping"
         self.state.log.append("Stop-Signal gesetzt. Training wird beendet …")
         return {"msg": "Stop-Signal gesendet"}
@@ -1361,7 +1578,7 @@ class TrainingManager:
                     self.state.last_preview_full = s
                     self.state.last_preview = s[:4000]
 
-            self.state.log.append("Erzeuge klassisches Trainings-Dataset (nicht-streaming) …")
+            self.state.log.append("Erzeuge Trainings-Dataset (Answer-Only-Loss; JEDE Antwort) …")
             dataset = build_chunk_dataset(cfg.csv_path, tokenizer, cfg, preview_callback=preview_cb)
             self.state.log.append(f"Dataset-Größe: {len(dataset)} Samples")
 
