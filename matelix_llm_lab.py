@@ -14,6 +14,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+#!/usr/bin/env python3
+# matelix_lab_server_fixed.py
+
 from __future__ import annotations
 
 import asyncio
@@ -1660,7 +1663,10 @@ def _prepare_inputs(tokenizer, messages: List[Dict[str, Any]], system: Optional[
     eos_id = tokenizer.eos_token_id or tokenizer.convert_tokens_to_ids("</s>") or pad_id
 
     input_ids = enc["input_ids"]
-    attention_mask = enc.get("attention_mask") or (input_ids != pad_id).long()
+    attention_mask = enc.get("attention_mask", None)
+    if attention_mask is None:
+        attention_mask = (input_ids != pad_id).long()
+
 
     if input_ids.dim() == 1:
         input_ids = input_ids.unsqueeze(0)
