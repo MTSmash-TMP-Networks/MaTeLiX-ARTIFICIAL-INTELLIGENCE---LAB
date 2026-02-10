@@ -31,36 +31,42 @@ import time
 import traceback
 import uuid
 from collections import Counter, deque
+from dataclasses import dataclass
+from functools import lru_cache
 from pathlib import Path
 from typing import Any, Dict, Iterable, Iterator, List, Optional, Tuple, Union
 
 import psutil
 import torch
 from fastapi import (
-    FastAPI,
+    Body,
     Depends,
+    FastAPI,
     Header,
     HTTPException,
     Request,
     WebSocket,
     WebSocketDisconnect,
-    Body,
 )
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import (
+    FileResponse,
     HTMLResponse,
     JSONResponse,
     StreamingResponse,
-    FileResponse,
 )
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, model_validator
 from tokenizers import AddedToken
 
 # ----------------------------
+# Environment
+# ----------------------------
+os.environ.setdefault("TOKENIZERS_PARALLELISM", "true")
+
+# ----------------------------
 # Globale Settings
 # ----------------------------
-os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
 csv.field_size_limit(1024 * 1024 * 128)
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -72,16 +78,13 @@ TRAINING_OUT_DIR.mkdir(parents=True, exist_ok=True)
 DATASETS_DIR.mkdir(parents=True, exist_ok=True)
 STATIC_DIR.mkdir(parents=True, exist_ok=True)
 
-# WICHTIG: Sicherheits-Voreinstellung
 HF_TRUST_REMOTE_CODE = False
-
-# OpenAI-kompatible API-Key (optional)
 OPENAI_COMPAT_API_KEY = "matelix-local-dev-key"
 
 # ----------------------------
 # FastAPI app
 # ----------------------------
-app = FastAPI(title="MaTeLiX AI Lab", version="4.3-tokenbudget")
+app = FastAPI(title="MaTeLiX AI Lab", version="5.0-chunked-dataset")
 
 app.add_middleware(
     CORSMiddleware,
@@ -95,69 +98,38 @@ app.mount("/training_outputs", StaticFiles(directory=str(TRAINING_OUT_DIR)), nam
 app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
 # ----------------------------
-# Minimal UI Fallback
+# Minimal UI
 # ----------------------------
 DEFAULT_INDEX_HTML = """<!DOCTYPE html>
 <html lang="de">
 <head>
   <meta charset="utf-8"/>
-  <title>MaTeLiX ARTIFICIAL INTELLIGENCE - LAB</title>
+  <title>MaTeLiX LAB</title>
   <style>
-    body {
-      margin:0;
-      background:#07110c;
-      color:#c8ffdd;
-      font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Arial,sans-serif;
-      display:flex;
-      align-items:center;
-      justify-content:center;
-      height:100vh;
-    }
-    .card {
-      background:#0f1f17;
-      border:1px solid #28ff96;
-      border-radius:16px;
-      padding:2rem 2.5rem;
-      box-shadow:0 0 30px #18ff7c33;
-      max-width:480px;
-      text-align:center;
-    }
-    h1 {
-      margin-top:0;
-      margin-bottom:0.5rem;
-      color:#28ff96;
-      letter-spacing:0.12em;
-      font-size:1.4rem;
-      text-transform:uppercase;
-    }
-    p {
-      margin:0.2rem 0;
-      line-height:1.4;
-    }
-    code {
-      background:#06140e;
-      border-radius:6px;
-      padding:0.2rem 0.4rem;
-      border:1px solid #20ff83;
-      font-size:0.9rem;
-    }
+    body { margin:0; background:#07110c; color:#c8ffdd; font-family:Arial,sans-serif;
+           display:flex; align-items:center; justify-content:center; height:100vh; }
+    .card { background:#0f1f17; border:1px solid #28ff96; border-radius:16px;
+            padding:2rem 2.5rem; max-width:520px; text-align:center; }
+    h1 { margin:0 0 0.5rem 0; color:#28ff96; letter-spacing:0.08em; font-size:1.2rem; }
+    code { background:#06140e; border-radius:6px; padding:0.2rem 0.4rem; border:1px solid #20ff83; }
   </style>
 </head>
 <body>
   <div class="card">
     <h1>MaTeLiX LAB Backend läuft</h1>
-    <p>Lege deine eigene UI unter <code>./static/index.html</code> ab,</p>
-    <p>dann wird sie automatisch hier ausgeliefert.</p>
+    <p>Lege deine UI unter <code>./static/index.html</code> ab.</p>
   </div>
 </body>
 </html>
 """
+
 
 def _ensure_index_html() -> Path:
     p = STATIC_DIR / "index.html"
     if not p.exists():
         p.write_text(DEFAULT_INDEX_HTML, encoding="utf-8")
     return p
+
 
 # ----------------------------
 # Thread-safe LogStore
@@ -222,13 +194,19 @@ class LogStore:
             data = list(self._lines)[start:]
             return data, current_last
 
+
 # ----------------------------
 # RoPE / YaRN config cleanup
 # ----------------------------
 _ALLOWED_YARN_KEYS = {
-    "type", "factor", "original_max_position_embeddings",
-    "low_freq_factor", "high_freq_factor", "finetuned",
+    "type",
+    "factor",
+    "original_max_position_embeddings",
+    "low_freq_factor",
+    "high_freq_factor",
+    "finetuned",
 }
+
 
 def _normalize_and_clean_rope(d: Dict[str, Any]) -> Dict[str, Any]:
     d = dict(d or {})
@@ -244,7 +222,7 @@ def _normalize_and_clean_rope(d: Dict[str, Any]) -> Dict[str, Any]:
         d["rope_scaling"] = {k: v for k, v in rs.items() if v is not None}
 
     if isinstance(d.get("rope_scaling"), dict):
-        clean = {}
+        clean: Dict[str, Any] = {}
         for k, v in d["rope_scaling"].items():
             if k in _ALLOWED_YARN_KEYS:
                 clean[k] = v
@@ -269,8 +247,10 @@ def _normalize_and_clean_rope(d: Dict[str, Any]) -> Dict[str, Any]:
     _strip_truncate(d)
     return d
 
+
 def patch_local_config_json_if_exists(model_dir: str) -> None:
     from transformers import AutoConfig
+
     cfg_path = Path(model_dir) / "config.json"
     if not cfg_path.exists():
         return
@@ -281,15 +261,18 @@ def patch_local_config_json_if_exists(model_dir: str) -> None:
     except Exception:
         pass
 
+
 def load_clean_config(model_dir: str):
     from transformers import AutoConfig
+
     raw = AutoConfig.from_pretrained(model_dir, trust_remote_code=HF_TRUST_REMOTE_CODE)
     d = _normalize_and_clean_rope(raw.to_dict())
     cls = raw.__class__
     return cls(**d)
 
+
 # ----------------------------
-# System / hardware helpers
+# Hardware helpers
 # ----------------------------
 def get_hardware_info() -> Dict[str, Any]:
     try:
@@ -309,6 +292,7 @@ def get_hardware_info() -> Dict[str, Any]:
     except Exception:
         return {"cuda": False, "mps": False, "num_cuda": 0, "gpus": [], "num_cpus": os.cpu_count() or 1}
 
+
 def _query_nvidia_smi() -> List[Dict[str, Any]]:
     if not torch.cuda.is_available():
         return []
@@ -325,18 +309,11 @@ def _query_nvidia_smi() -> List[Dict[str, Any]]:
         infos: List[Dict[str, Any]] = []
         for idx, line in enumerate(lines):
             util, mem_total, mem_used, name = [s.strip() for s in line.split(",")]
-            infos.append(
-                {
-                    "id": idx,
-                    "name": name,
-                    "util": int(util),
-                    "mem_total": int(mem_total),
-                    "mem_used": int(mem_used),
-                }
-            )
+            infos.append({"id": idx, "name": name, "util": int(util), "mem_total": int(mem_total), "mem_used": int(mem_used)})
         return infos
     except Exception:
         return []
+
 
 def get_system_status() -> Dict[str, Any]:
     mem = psutil.virtual_memory()
@@ -358,14 +335,12 @@ def get_system_status() -> Dict[str, Any]:
         "num_cuda": num_cuda,
     }
 
+
 # ----------------------------
 # Token / N-Gram helpers
 # ----------------------------
 def is_code_ngram(text: str) -> bool:
-    code_keywords = [
-        "function", "for", "while", "if", "else", "elif", "def", "class", "return",
-        "const", "let", "var", "try", "catch", "=>",
-    ]
+    code_keywords = ["function", "for", "while", "if", "else", "elif", "def", "class", "return", "const", "let", "var", "try", "catch", "=>"]
     code_chars = set("(){}[]=;.,<>:+-*/%\"'|\\&!^#@")
     if any(word in text for word in code_keywords):
         return True
@@ -377,6 +352,7 @@ def is_code_ngram(text: str) -> bool:
         return True
     return False
 
+
 def is_probably_code_text(t: str) -> bool:
     if not t:
         return False
@@ -386,11 +362,9 @@ def is_probably_code_text(t: str) -> bool:
     ratio = sum(1 for c in t if c in code_chars) / max(1, len(t))
     if ratio > 0.07:
         return True
-    kw = (
-        "def ", "class ", "function ", "=>", "import ", "from ", "return ",
-        "if (", "for (", "while (", "try:", "except:", "catch (",
-    )
+    kw = ("def ", "class ", "function ", "=>", "import ", "from ", "return ", "if (", "for (", "while (", "try:", "except:", "catch (")
     return any(k in t for k in kw)
+
 
 def decode_ngram_text(tokenizer, ids: Tuple[int, ...]) -> str:
     try:
@@ -398,6 +372,7 @@ def decode_ngram_text(tokenizer, ids: Tuple[int, ...]) -> str:
     except TypeError:
         s = tokenizer.decode(list(ids))
     return (s or "").rstrip()
+
 
 def find_frequent_ngrams_diverse(
     tokenizer,
@@ -416,10 +391,8 @@ def find_frequent_ngrams_diverse(
     max_ngram_code: Optional[int] = None,
 ) -> List[Tuple[int, ...]]:
     import heapq
-    special_tokens = {
-        "<|System|>", "<|Benutzer|>", "<|Assistentin|>",
-        "<s>", "</s>", "<pad>", "<unk>", "<|pad|>",
-    }
+
+    special_tokens = {"<|System|>", "<|Benutzer|>", "<|Assistentin|>", "<s>", "</s>", "<pad>", "<unk>", "<|pad|>"}
     if getattr(tokenizer, "additional_special_tokens", None):
         special_tokens |= set(tokenizer.additional_special_tokens or [])
     if getattr(tokenizer, "pad_token", None):
@@ -447,7 +420,7 @@ def find_frequent_ngrams_diverse(
         if not ids:
             continue
         if len(ids) > int(max_tokens_per_text):
-            ids = ids[:int(max_tokens_per_text)]
+            ids = ids[: int(max_tokens_per_text)]
         L = len(ids)
         if L < 2:
             continue
@@ -458,23 +431,20 @@ def find_frequent_ngrams_diverse(
             lengths = sorted(set(lengths))
         else:
             lengths = list(range(2, min(max_ngram_text, L) + 1))
+
         for n in lengths:
             step = 1
             if code_heavy and n >= 16:
                 step = max(1, n // 8)
             for i in range(0, L - n + 1, step):
-                c[tuple(ids[i:i + n])] += 1
+                c[tuple(ids[i : i + n])] += 1
 
     if not c:
         return []
 
     M = max(1, int(top_k) * max(1, int(preselect_factor)))
     by_count = c.most_common(M)
-    by_gain = heapq.nlargest(
-        M,
-        c.items(),
-        key=lambda kv: kv[1] * max(1, (len(kv[0]) - 1)),
-    )
+    by_gain = heapq.nlargest(M, c.items(), key=lambda kv: kv[1] * max(1, (len(kv[0]) - 1)))
 
     cand_map: Dict[Tuple[int, ...], int] = {}
     for ng, cnt in list(by_count) + list(by_gain):
@@ -501,14 +471,9 @@ def find_frequent_ngrams_diverse(
                 continue
             if klartext.count(" ") < (int(min_words) - 1):
                 continue
-            if klartext.strip() == "":
-                continue
         gain = float(count) * float(max(1, (len(ngram) - 1)))
         score = gain * (float(code_boost) if code_like else 1.0)
-        if code_like:
-            scored_code.append((ngram, klartext, score))
-        else:
-            scored_text.append((ngram, klartext, score))
+        (scored_code if code_like else scored_text).append((ngram, klartext, score))
 
     scored_code.sort(key=lambda x: x[2], reverse=True)
     scored_text.sort(key=lambda x: x[2], reverse=True)
@@ -519,12 +484,11 @@ def find_frequent_ngrams_diverse(
 
     def accept(candidate: str, pool: List[str], is_code: bool) -> bool:
         for t in pool:
-            if (
-                similarity(candidate, t, is_code) > float(similarity_thresh)
-                or candidate.rstrip(".").strip() == t.rstrip(".").strip()
-                or candidate in t
-                or t in candidate
-            ):
+            if similarity(candidate, t, is_code) > float(similarity_thresh):
+                return False
+            if candidate.rstrip(".").strip() == t.rstrip(".").strip():
+                return False
+            if candidate in t or t in candidate:
                 return False
         return True
 
@@ -553,12 +517,14 @@ def find_frequent_ngrams_diverse(
             if len(ids) > 1:
                 diverse.insert(0, tuple(ids))
 
-    return diverse[:int(top_k)]
+    return diverse[: int(top_k)]
+
 
 def add_ngram_tokens_and_init_embeddings(tokenizer, model, ngram_list: List[Tuple[int, ...]]) -> Dict[str, int]:
     orig_vocab = tokenizer.get_vocab()
     texts: List[Tuple[str, Tuple[int, ...]]] = []
     seen = set()
+
     for ng in ngram_list:
         try:
             t = decode_ngram_text(tokenizer, ng)
@@ -595,10 +561,12 @@ def add_ngram_tokens_and_init_embeddings(tokenizer, model, ngram_list: List[Tupl
 
     return {"added": int(added), "updated": int(updated)}
 
+
 def maybe_load_ngrams_from_map(model_dir: str, tokenizer, model) -> Dict[str, int]:
     map_path = Path(model_dir) / "ngram_token_map.json"
     if not map_path.exists():
         return {"found": 0, "added": 0, "updated": 0}
+
     try:
         nmap = json.loads(map_path.read_text(encoding="utf-8")) or {}
     except Exception:
@@ -635,69 +603,10 @@ def maybe_load_ngrams_from_map(model_dir: str, tokenizer, model) -> Dict[str, in
 
     return {"found": 1, "added": int(added), "updated": int(updated)}
 
+
 # ----------------------------
-# Dataset iterators (CSV)
+# Dataset: CSV -> (prompt, answer)
 # ----------------------------
-def estimate_avg_tokens(
-    csv_path: str,
-    tokenizer,
-    template_mode: str,
-    column_name: str,
-    *,
-    mode: str = "sample",
-    samples: int = 100,
-) -> int:
-    total = 0
-    count = 0
-
-    if template_mode == "chat":
-        it_pairs = chat_block_iter(csv_path, shuffle_threads=False)
-        for i, (p, a) in enumerate(it_pairs):
-            ids = tokenizer(p + a, add_special_tokens=False)["input_ids"]
-            if ids:
-                total += len(ids)
-                count += 1
-            if mode == "sample" and samples and (i + 1 >= samples):
-                break
-        return max(1, total // max(1, count))
-
-    if template_mode == "dialogplus":
-        it_pairs = dialogplus_block_iter(csv_path, shuffle_threads=False)
-        for i, (p, a) in enumerate(it_pairs):
-            ids = tokenizer(p + a, add_special_tokens=False)["input_ids"]
-            if ids:
-                total += len(ids)
-                count += 1
-            if mode == "sample" and samples and (i + 1 >= samples):
-                break
-        return max(1, total // max(1, count))
-
-    # plaintext / column
-    it = column_iter(csv_path, column_name=column_name)
-    for i, text in enumerate(it):
-        ids = tokenizer(text, add_special_tokens=False)["input_ids"]
-        if ids:
-            total += len(ids)
-            count += 1
-        if mode == "sample" and samples and (i + 1 >= samples):
-            break
-    return max(1, total // max(1, count))
-
-def count_training_units(csv_path: str, template_mode: str, column_name: str) -> int:
-    if template_mode == "chat":
-        return sum(1 for _ in chat_block_iter(csv_path, shuffle_threads=False))
-    if template_mode == "dialogplus":
-        return sum(1 for _ in dialogplus_block_iter(csv_path, shuffle_threads=False))
-    return sum(1 for _ in column_iter(csv_path, column_name=column_name))
-
-def estimate_steps_per_epoch(
-    num_units: int,
-    avg_tokens_per_unit: int,
-    tokens_per_step: int,
-) -> int:
-    total_tokens = num_units * avg_tokens_per_unit
-    return max(1, total_tokens // tokens_per_step)
-
 def _normalize_id(val: Any) -> str:
     if val is None:
         return ""
@@ -706,77 +615,70 @@ def _normalize_id(val: Any) -> str:
         s = s[:-2]
     return s
 
-def dialog_iter(csv_path: str, template_mode: str = "chat") -> Iterator[str]:
-    with open(csv_path, "r", encoding="utf-8") as f:
-        reader = csv.DictReader(f)
-        rows: List[Dict[str, Any]] = []
-        for row in reader:
-            row["id"] = _normalize_id(row.get("id", ""))
-            row["parent_id"] = _normalize_id(row.get("parent_id", ""))
-            rows.append(row)
-    id2row = {r["id"]: r for r in rows if r.get("id")}
-    child_ids = {r["parent_id"] for r in rows if r.get("parent_id")}
-    leafs = [r for r in rows if r.get("id") and r["id"] not in child_ids]
-    for leaf in leafs:
-        dialog: List[Dict[str, Any]] = []
-        cur = leaf
-        seen = set()
-        while cur.get("id") and cur["id"] not in seen:
-            seen.add(cur["id"])
-            dialog.append(cur)
-            pid = cur.get("parent_id")
-            if pid and pid in id2row:
-                cur = id2row[pid]
-            else:
-                break
-        dialog.reverse()
-        if template_mode == "chat":
-            lines = ["<s>"]
-            sys_msg = (dialog[0].get("system") or "").strip()
-            if sys_msg:
-                lines += ["<|System|>", sys_msg]
-            for turn in dialog:
-                user = (turn.get("Benutzer") or "").strip()
-                kontext = (turn.get("Kontext") or "").strip()
-                assistant = (turn.get("Assistentin") or "").strip()
-                if user:
-                    lines.append("<|Benutzer|>")
-                    lines.append(f"{kontext}\n{user}".strip() if kontext else user)
-                if assistant:
-                    lines.append("<|Assistentin|>")
-                    lines.append(assistant)
-            lines.append("</s>")
-            yield "\n".join(lines)
-        elif template_mode == "dialogplus":
-            lines = []
-            sys_msg = (dialog[0].get("system") or "").strip()
-            if sys_msg:
-                lines += ["<|System|>", sys_msg, "</s>"]
-            for turn in dialog:
-                user = (turn.get("Benutzer") or "").strip()
-                kontext = (turn.get("Kontext") or "").strip()
-                assistant = (turn.get("Assistentin") or "").strip()
-                if user:
-                    lines.append("<|Benutzer|>")
-                    lines.append(f"{kontext}\n{user}".strip() if kontext else user)
-                    lines.append("</s>")
-                if assistant:
-                    lines.append("<|Assistentin|>")
-                    lines.append(assistant)
-                    lines.append("</s>")
-            yield "\n".join(lines)
-        else:
-            text = (leaf.get("text") or "").strip()
-            if text:
-                yield f"<s>\n{text}\n</s>"
 
-def column_iter(csv_path: str, column_name: str = "text") -> Iterator[str]:
-    with open(csv_path, "r", encoding="utf-8") as f:
-        reader = csv.DictReader(f)
-        for row in reader:
-            txt = (row.get(column_name) or "").strip()
-            if txt:
-                yield txt
+def _row_to_messages(row: Dict[str, Any]) -> List[Tuple[str, str]]:
+    msgs: List[Tuple[str, str]] = []
+    user = (row.get("Benutzer") or "").strip()
+    ctx = (row.get("Kontext") or "").strip()
+    asst = (row.get("Assistentin") or "").strip()
+
+    if user:
+        content = f"{ctx}\n{user}".strip() if ctx else user
+        msgs.append(("user", content))
+    if asst:
+        msgs.append(("assistant", asst))
+    return msgs
+
+
+def _build_chain_to_root(target: Dict[str, Any], id2row: Dict[str, Dict[str, Any]]) -> List[Dict[str, Any]]:
+    chain: List[Dict[str, Any]] = []
+    cur = target
+    seen = set()
+    while cur.get("id") and cur["id"] not in seen:
+        seen.add(cur["id"])
+        chain.append(cur)
+        pid = cur.get("parent_id", "")
+        if pid and pid in id2row:
+            cur = id2row[pid]
+        else:
+            break
+    chain.reverse()
+    return chain
+
+
+def _chain_to_message_list(chain: List[Dict[str, Any]]) -> Tuple[str, List[Tuple[str, str]]]:
+    system_text = (chain[0].get("system") or "").strip() if chain else ""
+    messages: List[Tuple[str, str]] = []
+    for row in chain:
+        messages.extend(_row_to_messages(row))
+    return system_text, messages
+
+
+def _render_chat_prompt(system_text: str, history: List[Tuple[str, str]]) -> str:
+    parts: List[str] = ["<s>\n"]
+    if system_text:
+        parts += ["<|System|>\n", system_text, "\n"]
+    for role, content in history:
+        if role == "user":
+            parts += ["<|Benutzer|>\n", content, "\n"]
+        elif role == "assistant":
+            parts += ["<|Assistentin|>\n", content, "\n"]
+    parts += ["<|Assistentin|>\n"]
+    return "".join(parts)
+
+
+def _render_dialogplus_prompt(system_text: str, history: List[Tuple[str, str]]) -> str:
+    parts: List[str] = []
+    if system_text:
+        parts += ["<|System|>\n", system_text, "\n</s>\n"]
+    for role, content in history:
+        if role == "user":
+            parts += ["<|Benutzer|>\n", content, "\n</s>\n"]
+        elif role == "assistant":
+            parts += ["<|Assistentin|>\n", content, "\n</s>\n"]
+    parts += ["<|Assistentin|>\n"]
+    return "".join(parts)
+
 
 def dialogplus_block_iter(csv_path: str, shuffle_threads: bool = False) -> Iterator[Tuple[str, str]]:
     with open(csv_path, "r", encoding="utf-8") as f:
@@ -787,11 +689,12 @@ def dialogplus_block_iter(csv_path: str, shuffle_threads: bool = False) -> Itera
             row["id"] = _normalize_id(row.get("id", ""))
             row["parent_id"] = _normalize_id(row.get("parent_id", ""))
             rows.append(row)
+
     id2row = {r["id"]: r for r in rows if r.get("id")}
-    candidates = [r for r in rows if (r.get("Assistentin") or "").strip() and r.get("id")]
+    candidates = [r for r in rows if r.get("id") and (r.get("Assistentin") or "").strip()]
     if not candidates:
         return
-    from functools import lru_cache
+
     @lru_cache(maxsize=None)
     def root_and_depth(rid: str) -> Tuple[str, int]:
         depth = 0
@@ -804,70 +707,35 @@ def dialogplus_block_iter(csv_path: str, shuffle_threads: bool = False) -> Itera
                 return (cur["id"], depth)
             cur = id2row[pid]
             depth += 1
+
     threads: Dict[str, List[Tuple[int, int, Dict[str, Any]]]] = {}
     for r in candidates:
-        rid = r.get("id", "")
-        root_id, depth = root_and_depth(rid)
+        root_id, depth = root_and_depth(r["id"])
         threads.setdefault(root_id, []).append((depth, int(r["_rowidx"]), r))
+
     for root_id in list(threads.keys()):
         threads[root_id].sort(key=lambda t: (t[0], t[1]))
+
     order = list(threads.keys())
     if shuffle_threads:
         random.shuffle(order)
+
     for root_id in order:
-        for _, _, target in threads[root_id]:
-            chain: List[Dict[str, Any]] = []
-            cur = target
-            seen = set()
-            while cur.get("id") and cur["id"] not in seen:
-                seen.add(cur["id"])
-                chain.append(cur)
-                pid = cur.get("parent_id", "")
-                if pid and pid in id2row:
-                    cur = id2row[pid]
-                else:
-                    break
-            chain.reverse()
+        for _, __, target in threads[root_id]:
+            chain = _build_chain_to_root(target, id2row)
             if not chain:
                 continue
-            target_idx = len(chain) - 1
-            target_text = (chain[target_idx].get("Assistentin") or "").strip()
+            system_text, messages = _chain_to_message_list(chain)
+            if not messages or messages[-1][0] != "assistant":
+                continue
+            target_text = messages[-1][1].strip()
             if not target_text:
                 continue
-            system_text = (chain[0].get("system") or "").strip()
-            prompt_lines: List[str] = []
-            if system_text:
-                prompt_lines += ["<|System|>\n", system_text, "\n</s>"]
-            for j in range(target_idx + 1):
-                turn = chain[j]
-                user = (turn.get("Benutzer") or "").strip()
-                ctx = (turn.get("Kontext") or "").strip()
-                asst = (turn.get("Assistentin") or "").strip()
-                if user:
-                    prompt_lines.append("\n<|Benutzer|>\n")
-                    prompt_lines.append(f"{ctx}\n{user}".strip() if ctx else user)
-                    prompt_lines.append("\n</s>")
-                if j < target_idx and asst:
-                    prompt_lines.append("\n<|Assistentin|>\n")
-                    prompt_lines.append(asst)
-                    prompt_lines.append("\n</s>")
-                if j == target_idx:
-                    prompt_lines.append("\n<|Assistentin|>\n")
-            block_a = "".join(prompt_lines)
-            block_b = target_text + "\n</s>"
-            yield block_a, block_b
+            history = messages[:-1]
+            yield _render_dialogplus_prompt(system_text, history), (target_text + "\n</s>")
 
-# ----------------------------
-# NEU: chat_block_iter(...) => JEDE Antwort als eigenes Sample im "chat"-Format
-# ----------------------------
+
 def chat_block_iter(csv_path: str, shuffle_threads: bool = False) -> Iterator[Tuple[str, str]]:
-    """
-    Liefert (prompt_text, answer_text) pro Assistentin-Antwort, im 'chat'-Format:
-      prompt: <s> [System?] (User/Assistant turns...) <|Assistentin|>
-      answer:  {target_asst}\n</s>
-
-    Damit wird JEDE Antwort trainiert (nicht nur die letzte Konversation).
-    """
     with open(csv_path, "r", encoding="utf-8") as f:
         reader = csv.DictReader(f)
         rows: List[Dict[str, Any]] = []
@@ -878,12 +746,9 @@ def chat_block_iter(csv_path: str, shuffle_threads: bool = False) -> Iterator[Tu
             rows.append(row)
 
     id2row = {r["id"]: r for r in rows if r.get("id")}
-
-    candidates = [r for r in rows if (r.get("Assistentin") or "").strip() and r.get("id")]
+    candidates = [r for r in rows if r.get("id") and (r.get("Assistentin") or "").strip()]
     if not candidates:
         return
-
-    from functools import lru_cache
 
     @lru_cache(maxsize=None)
     def root_and_depth(rid: str) -> Tuple[str, int]:
@@ -900,8 +765,7 @@ def chat_block_iter(csv_path: str, shuffle_threads: bool = False) -> Iterator[Tu
 
     threads: Dict[str, List[Tuple[int, int, Dict[str, Any]]]] = {}
     for r in candidates:
-        rid = r.get("id", "")
-        root_id, depth = root_and_depth(rid)
+        root_id, depth = root_and_depth(r["id"])
         threads.setdefault(root_id, []).append((depth, int(r["_rowidx"]), r))
 
     for root_id in list(threads.keys()):
@@ -912,58 +776,123 @@ def chat_block_iter(csv_path: str, shuffle_threads: bool = False) -> Iterator[Tu
         random.shuffle(order)
 
     for root_id in order:
-        for _, _, target in threads[root_id]:
-            chain: List[Dict[str, Any]] = []
-            cur = target
-            seen = set()
-            while cur.get("id") and cur["id"] not in seen:
-                seen.add(cur["id"])
-                chain.append(cur)
-                pid = cur.get("parent_id", "")
-                if pid and pid in id2row:
-                    cur = id2row[pid]
-                else:
-                    break
-            chain.reverse()
+        for _, __, target in threads[root_id]:
+            chain = _build_chain_to_root(target, id2row)
             if not chain:
                 continue
-
-            target_idx = len(chain) - 1
-            target_text = (chain[target_idx].get("Assistentin") or "").strip()
+            system_text, messages = _chain_to_message_list(chain)
+            if not messages or messages[-1][0] != "assistant":
+                continue
+            target_text = messages[-1][1].strip()
             if not target_text:
                 continue
+            history = messages[:-1]
+            yield _render_chat_prompt(system_text, history), (target_text + "\n</s>")
 
-            system_text = (chain[0].get("system") or "").strip()
 
-            parts: List[str] = []
-            parts.append("<s>\n")
-            if system_text:
-                parts.append("<|System|>\n")
-                parts.append(system_text.strip())
-                parts.append("\n")
+def iter_chunked_training_blocks(
+    csv_path: str,
+    tokenizer,
+    *,
+    template_mode: str,
+    shuffle: bool,
+    sort_by_length: bool,
+    chunk_size: int,
+    pairs_per_block: int = 10_000,
+    preview_callback=None,
+) -> Iterator[List[Dict[str, Any]]]:
+    """
+    Liefert blockweise ein gepaddetes Dataset:
+      - input_ids: links gepadded auf chunk_size
+      - attention_mask: 0 für pad links, 1 für tokens
+      - labels:
+          * template_mode == "chat": FULL-LOSS -> labels == input_ids (Padding links = -100)
+          * template_mode == "dialogplus": ANSWER-ONLY -> Prompt = -100, Answer = token ids (Padding links = -100)
+    """
+    chunk_len = int(chunk_size)
+    pad_id = tokenizer.pad_token_id
+    if pad_id is None:
+        pad_id = tokenizer.eos_token_id if tokenizer.eos_token_id is not None else 0
+    pad_id = int(pad_id)
 
-            for j in range(target_idx + 1):
-                turn = chain[j]
-                user = (turn.get("Benutzer") or "").strip()
-                ctx = (turn.get("Kontext") or "").strip()
-                asst = (turn.get("Assistentin") or "").strip()
+    def pad_left(seq: List[int], target_len: int, pad_value: int) -> List[int]:
+        if len(seq) >= target_len:
+            return seq[-target_len:]
+        return [pad_value] * (target_len - len(seq)) + seq
 
-                if user:
-                    parts.append("<|Benutzer|>\n")
-                    parts.append(f"{ctx}\n{user}".strip() if ctx else user)
-                    parts.append("\n")
+    def pad_left_mask(length: int, target_len: int) -> List[int]:
+        if length >= target_len:
+            return [1] * target_len
+        return [0] * (target_len - length) + [1] * length
 
-                if j < target_idx and asst:
-                    parts.append("<|Assistentin|>\n")
-                    parts.append(asst)
-                    parts.append("\n")
+    def pad_left_labels(labels: List[int], target_len: int) -> List[int]:
+        if len(labels) >= target_len:
+            return labels[-target_len:]
+        return [-100] * (target_len - len(labels)) + labels
 
-                if j == target_idx:
-                    parts.append("<|Assistentin|>\n")
+    preview_done = False
 
-            prompt_text = "".join(parts)
-            answer_text = target_text + "\n</s>"
-            yield prompt_text, answer_text
+    def add_pair(dataset_block: List[Dict[str, Any]], prompt_text: str, answer_text: str) -> None:
+        nonlocal preview_done
+
+        prompt_ids = tokenizer(prompt_text, add_special_tokens=False)["input_ids"]
+        answer_ids = tokenizer(answer_text, add_special_tokens=False)["input_ids"]
+        if not prompt_ids and not answer_ids:
+            return
+
+        if callable(preview_callback) and not preview_done:
+            try:
+                preview_callback((prompt_text + answer_text)[:20000])
+            except Exception:
+                pass
+            preview_done = True
+
+        input_ids_full = list(prompt_ids) + list(answer_ids)
+
+        if template_mode == "dialogplus":
+            labels_full = ([-100] * len(prompt_ids)) + list(answer_ids)
+        else:
+            labels_full = list(input_ids_full)
+
+        for i in range(0, len(input_ids_full), chunk_len):
+            block_in = input_ids_full[i : i + chunk_len]
+            block_lb = labels_full[i : i + chunk_len]
+            if len(block_in) < 2:
+                continue
+            dataset_block.append(
+                {
+                    "input_ids": pad_left(block_in, chunk_len, pad_id),
+                    "attention_mask": pad_left_mask(len(block_in), chunk_len),
+                    "labels": pad_left_labels(block_lb, chunk_len),
+                }
+            )
+
+    if template_mode == "chat":
+        pair_iter = chat_block_iter(csv_path, shuffle_threads=shuffle)
+    elif template_mode == "dialogplus":
+        pair_iter = dialogplus_block_iter(csv_path, shuffle_threads=shuffle)
+    else:
+        raise ValueError("template_mode muss chat oder dialogplus sein.")
+
+    buf: List[Tuple[str, str]] = []
+    for p, a in pair_iter:
+        buf.append((p, a))
+        if len(buf) >= int(pairs_per_block):
+            if sort_by_length:
+                buf.sort(key=lambda pa: len(tokenizer(pa[0] + pa[1], add_special_tokens=False)["input_ids"]))
+            dataset_block: List[Dict[str, Any]] = []
+            for pp, aa in buf:
+                add_pair(dataset_block, pp, aa)
+            yield dataset_block
+            buf = []
+
+    if buf:
+        if sort_by_length:
+            buf.sort(key=lambda pa: len(tokenizer(pa[0] + pa[1], add_special_tokens=False)["input_ids"]))
+        dataset_block = []
+        for pp, aa in buf:
+            add_pair(dataset_block, pp, aa)
+        yield dataset_block
 
 # ----------------------------
 # LoRA target detection & Utils
@@ -984,10 +913,12 @@ def detect_lora_targets(model) -> List[str]:
                     break
     return sorted(found)
 
+
 def count_model_parameters(model) -> Tuple[int, int]:
     total = sum(p.numel() for p in model.parameters())
     trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
     return int(total), int(trainable)
+
 
 def _empty_device_caches() -> None:
     try:
@@ -1008,6 +939,7 @@ def _empty_device_caches() -> None:
     except Exception:
         pass
 
+
 def unload_torch_objects(*objs: Any) -> None:
     for obj in objs:
         try:
@@ -1025,6 +957,7 @@ def unload_torch_objects(*objs: Any) -> None:
     gc.collect()
     _empty_device_caches()
 
+
 def get_new_output_dir(model_name: str, base_dir: Optional[Path] = None) -> Path:
     now = time.strftime("%Y-%m-%d_%H-%M-%S")
     base = base_dir or TRAINING_OUT_DIR
@@ -1032,14 +965,17 @@ def get_new_output_dir(model_name: str, base_dir: Optional[Path] = None) -> Path
     out.mkdir(parents=True, exist_ok=True)
     return out
 
+
 # ----------------------------
-# Tokenizer-Setup (zentral)
+# Tokenizer Setup
 # ----------------------------
 def prepare_tokenizer_for_matelix(tokenizer) -> bool:
     need_resize = False
+
     if tokenizer.pad_token_id is None or tokenizer.pad_token_id == tokenizer.eos_token_id:
         tokenizer.add_special_tokens({"pad_token": "<|pad|>"})
         need_resize = True
+
     role_tokens = [
         AddedToken("<|System|>", single_word=False, lstrip=False, rstrip=False, normalized=False, special=False),
         AddedToken("<|Benutzer|>", single_word=False, lstrip=False, rstrip=False, normalized=False, special=False),
@@ -1047,9 +983,9 @@ def prepare_tokenizer_for_matelix(tokenizer) -> bool:
     ]
     if tokenizer.add_tokens(role_tokens):
         need_resize = True
+
     tokenizer.padding_side = "left"
 
-    # FIX (2): Template erwartet kein separates "system" mehr, sondern role="system" in messages.
     if not getattr(tokenizer, "chat_template", None):
         tokenizer.chat_template = """{{ bos_token }}
 {% for message in messages %}
@@ -1063,7 +999,9 @@ def prepare_tokenizer_for_matelix(tokenizer) -> bool:
 {% endfor %}
 {% if add_generation_prompt %}<|Assistentin|>
 {% else %}</s>{% endif %}"""
+
     return need_resize
+
 
 # ----------------------------
 # Training configuration
@@ -1071,29 +1009,42 @@ def prepare_tokenizer_for_matelix(tokenizer) -> bool:
 class TrainConfig(BaseModel):
     model_dir: str = Field(..., description="HF repo id oder lokaler Pfad")
     csv_path: str = Field(..., description="CSV dataset path")
+
     device: str = Field(default="auto", description="auto|cpu|cuda|mps")
     train_mode: str = Field(default="full", description="full|lora")
+
     learning_rate: float = 4e-4
     lr_schedule: str = "linear"
+
     per_device_train_batch_size: int = 1
     gradient_accumulation_steps: int = 7
     num_train_epochs: float = 3.0
     max_steps: Optional[int] = None
+
     chunk_size: int = 1024
     max_seq_length: Optional[int] = None
 
-    @model_validator(mode="after")
-    def _sync_max_seq_length(self):
-        if self.max_seq_length is not None:
-            self.chunk_size = int(self.max_seq_length)
-        return self
-
-    template_mode: str = "chat"
-    column_name: str = "text"
-    lora_r: int = 8
-    lora_alpha: int = 16
+    template_mode: str = "chat"  # chat|dialogplus
     shuffle: bool = False
     sort_by_length: bool = True
+
+    # chunked dataset
+    pairs_per_block: int = 10_000
+
+    # LoRA
+    lora_r: int = 8
+    lora_alpha: int = 16
+    merge_lora_on_save: bool = True
+
+    # precision & misc
+    precision_mode: str = "auto"  # auto|fp32|fp16|bf16
+    gradient_checkpointing: bool = False
+    save_dir: Optional[str] = None
+    dataloader_num_workers: int = 0
+    max_grad_norm: float = 1.0
+    weight_decay: float = 0.01
+
+    # ngrams
     use_ngrams: bool = False
     ngram_max: int = 12
     ngram_top_k: int = 1500
@@ -1107,81 +1058,58 @@ class TrainConfig(BaseModel):
     ngram_min_count: int = 2
     ngram_max_token_chars: int = 384
     ngram_max_tokens_per_text: int = 4096
-    precision_mode: str = "auto"
-    gradient_checkpointing: bool = False
-    save_dir: Optional[str] = None
-    merge_lora_on_save: bool = True
-    dataloader_num_workers: int = 0
-    max_grad_norm: float = 1.0
-    weight_decay: float = 0.01
+
+    @model_validator(mode="after")
+    def _sync_max_seq_length(self):
+        if self.max_seq_length is not None:
+            self.chunk_size = int(self.max_seq_length)
+        return self
+
 
 # ----------------------------
-# Minimal missing helpers (damit Datei komplett lauffähig ist)
+# Ngram optimization (light)
 # ----------------------------
-def _iter_texts_for_training(cfg: TrainConfig, limit: Optional[int] = None) -> Iterator[str]:
-    if cfg.template_mode in ("chat", "dialogplus"):
-        it = dialog_iter(cfg.csv_path, template_mode=cfg.template_mode)
-    else:
-        it = column_iter(cfg.csv_path, column_name=cfg.column_name)
-    for i, t in enumerate(it):
-        if limit is not None and i >= int(limit):
-            break
-        yield t
-
 def optimize_tokenizer_ngrams(
     tokenizer,
     csv_path: str,
     *,
-    model_dir: str,
     template_mode: str,
-    column_name: str,
-    chunk_size: int,
     max_ngram: int,
     top_k: int,
     min_chars: int,
     min_words: int,
     max_samples: int,
-    budgeted: bool,
-    target_fit: float,
-    eval_samples: int,
-    add_batch: int,
     min_count: int,
     max_token_chars: int,
     max_tokens_per_text: int,
     log_fn=None,
 ) -> List[Tuple[int, ...]]:
-    # NOTE: In deinem Paste waren die Funktionen nicht enthalten; hier eine konservative Implementierung,
-    #       die dein vorhandenes N-Gram-Scoring nutzt.
-    # "budgeted" / "target_fit" / "eval_samples" werden hier bewusst leichtgewichtig behandelt.
     def log(s: str):
         if callable(log_fn):
             log_fn(s)
 
-    log("Lese Trainings-Texte für N-Gramme …")
+    # Für Ngrams nutzen wir die lineare Dialog-Repräsentation (einfacher):
     texts: List[str] = []
     with open(csv_path, "r", encoding="utf-8") as f:
         reader = csv.DictReader(f)
-        if template_mode in ("chat", "dialogplus"):
-            # Für Dialog-Modi nutzen wir den bestehenden Iterator (liest Datei nochmal).
-            pass
-
-    if template_mode in ("chat", "dialogplus"):
-        for t in dialog_iter(csv_path, template_mode=template_mode):
-            texts.append(t)
-            if len(texts) >= int(max_samples):
+        for i, row in enumerate(reader):
+            if i >= int(max_samples):
                 break
-    else:
-        for t in column_iter(csv_path, column_name=column_name):
-            texts.append(t)
-            if len(texts) >= int(max_samples):
-                break
+            # sehr simple: concat Spalten (für ngram scanning ausreichend)
+            sys_ = (row.get("system") or "").strip()
+            u = (row.get("Benutzer") or "").strip()
+            k = (row.get("Kontext") or "").strip()
+            a = (row.get("Assistentin") or "").strip()
+            t = "\n".join([x for x in [sys_, k, u, a] if x])
+            if t:
+                texts.append(t)
 
     if not texts:
         log("Keine Texte gefunden für N-Gramme.")
         return []
 
     log(f"Scanne N-Gramme (max_ngram={max_ngram}, top_k={top_k}) …")
-    ngrams = find_frequent_ngrams_diverse(
+    return find_frequent_ngrams_diverse(
         tokenizer,
         texts,
         max_ngram=int(max_ngram),
@@ -1193,150 +1121,6 @@ def optimize_tokenizer_ngrams(
         max_tokens_per_text=int(max_tokens_per_text),
     )
 
-    if not budgeted:
-        return ngrams
-
-    # sehr leichte "Budget"-Heuristik: nimm so viele, wie top_k vorgibt (bereits passiert),
-    # optional könnte man eval-basierte Auswahl machen.
-    log(f"Budgeted Auswahl aktiv (target_fit={target_fit}) -> behalte {len(ngrams)} Kandidaten.")
-    return ngrams
-
-def build_chunk_dataset(
-    csv_path: str,
-    tokenizer,
-    cfg: TrainConfig,
-    *,
-    preview_callback=None,
-) -> List[Dict[str, Any]]:
-    """
-    Baut ein CausalLM-Dataset mit Answer-Only Loss:
-      input_ids = prompt_ids + answer_ids
-      labels    = [-100]*len(prompt_ids) + answer_ids
-
-    WICHTIG: Bei chat/dialogplus wird JEDE Assistentin-Antwort trainiert,
-    weil wir pro Assistentin-Message ein Sample erzeugen (block_iter).
-
-    Zusätzlich: Samples werden auf chunk_size gepadded (left padding),
-    damit per_device_train_batch_size > 1 stabil funktioniert.
-    """
-    chunk = int(cfg.chunk_size)
-    pad_id = tokenizer.pad_token_id
-    if pad_id is None:
-        pad_id = tokenizer.eos_token_id if tokenizer.eos_token_id is not None else 0
-
-    dataset: List[Dict[str, Any]] = []
-
-    def pad_left(seq: List[int], target_len: int, pad_value: int) -> List[int]:
-        if len(seq) >= target_len:
-            return seq[-target_len:]
-        return [pad_value] * (target_len - len(seq)) + seq
-
-    def pad_left_mask(length: int, target_len: int) -> List[int]:
-        if length >= target_len:
-            return [1] * target_len
-        return [0] * (target_len - length) + [1] * length
-
-    def pad_left_labels(labels: List[int], target_len: int) -> List[int]:
-        if len(labels) >= target_len:
-            return labels[-target_len:]
-        return [-100] * (target_len - len(labels)) + labels
-
-    def add_sequence(prompt_text: str, answer_text: str):
-        prompt_ids = tokenizer(prompt_text, add_special_tokens=False)["input_ids"]
-        answer_ids = tokenizer(answer_text, add_special_tokens=False)["input_ids"]
-        if not prompt_ids and not answer_ids:
-            return
-
-        input_ids_full = list(prompt_ids) + list(answer_ids)
-        labels_full = ([-100] * len(prompt_ids)) + list(answer_ids)
-
-        # Preview: zeige das erste Sample (voller prompt+answer Text)
-        if callable(preview_callback) and not dataset:
-            try:
-                preview_callback((prompt_text + answer_text)[:20000])
-            except Exception:
-                pass
-
-        # in Blöcke schneiden (labels aligned) + padding auf chunk_size
-        for i in range(0, len(input_ids_full), chunk):
-            block_in = input_ids_full[i:i + chunk]
-            block_lb = labels_full[i:i + chunk]
-            if len(block_in) < 2:
-                continue
-
-            attn = pad_left_mask(len(block_in), chunk)
-            block_in_p = pad_left(block_in, chunk, pad_id)
-            block_lb_p = pad_left_labels(block_lb, chunk)
-
-            dataset.append(
-                {
-                    "input_ids": block_in_p,
-                    "attention_mask": attn,
-                    "labels": block_lb_p,
-                }
-            )
-
-    # ---------
-    # Dialog-Modi: pro Antwort (prompt, answer) erzeugen
-    # ---------
-    if cfg.template_mode == "dialogplus":
-        pairs = list(dialogplus_block_iter(csv_path, shuffle_threads=bool(cfg.shuffle)))
-        if cfg.sort_by_length:
-            pairs.sort(key=lambda pa: len(tokenizer(pa[0] + pa[1], add_special_tokens=False)["input_ids"]))
-        for prompt_text, answer_text in pairs:
-            add_sequence(prompt_text, answer_text)
-        return dataset
-
-    if cfg.template_mode == "chat":
-        pairs = list(chat_block_iter(csv_path, shuffle_threads=bool(cfg.shuffle)))
-        if cfg.sort_by_length:
-            pairs.sort(key=lambda pa: len(tokenizer(pa[0] + pa[1], add_special_tokens=False)["input_ids"]))
-        for prompt_text, answer_text in pairs:
-            add_sequence(prompt_text, answer_text)
-        return dataset
-
-    # ---------
-    # Column/Plaintext-Modus: wie vorher (alles wird trainiert)
-    # ---------
-    texts = list(_iter_texts_for_training(cfg, limit=None))
-    if cfg.shuffle:
-        random.shuffle(texts)
-
-    encs: List[Tuple[List[int], str]] = []
-    for t in texts:
-        ids = tokenizer(t, add_special_tokens=False)["input_ids"]
-        if ids:
-            encs.append((ids, t))
-
-    if cfg.sort_by_length:
-        encs.sort(key=lambda x: len(x[0]))
-
-    if encs and callable(preview_callback):
-        try:
-            preview_callback(encs[0][1])
-        except Exception:
-            pass
-
-    # plaintext: labels=input_ids (kein maskieren)
-    for ids, _txt in encs:
-        for i in range(0, len(ids), chunk):
-            block = ids[i:i + chunk]
-            if len(block) < 2:
-                continue
-
-            attn = pad_left_mask(len(block), chunk)
-            block_in_p = pad_left(block, chunk, pad_id)
-            block_lb_p = pad_left_labels(block.copy(), chunk)  # labels == input_ids, padding => -100
-
-            dataset.append(
-                {
-                    "input_ids": block_in_p,
-                    "attention_mask": attn,
-                    "labels": block_lb_p,
-                }
-            )
-
-    return dataset
 
 # ----------------------------
 # Global state (Training)
@@ -1371,7 +1155,9 @@ class TrainingState:
                 "save_dir": self.save_dir,
             }
 
+
 TRAIN_STATE = TrainingState()
+
 
 class TrainingManager:
     def __init__(self, state: TrainingState) -> None:
@@ -1396,13 +1182,13 @@ class TrainingManager:
             self.state.save_dir = None
             self.state.log.clear()
             self.state.log.append("Training gestartet.")
+
         self.stop_event.clear()
         self.thread = threading.Thread(target=self._train_thread, args=(cfg,), daemon=True)
         self.thread.start()
         return {"msg": "Training gestartet", "running": True}
 
     def stop(self) -> Dict[str, Any]:
-        # FIX (4): nicht sofort running=False setzen; das passiert im Train-Thread im finally.
         self.stop_event.set()
         with self.state.lock:
             self.state.eta = "stopping"
@@ -1413,35 +1199,30 @@ class TrainingManager:
         trainer = None
         model = None
         tokenizer = None
-        dataset = None
         adapter_injected = False
+
         try:
             from transformers import (
-                AutoTokenizer,
                 AutoModelForCausalLM,
+                AutoTokenizer,
                 Trainer,
-                TrainingArguments,
                 TrainerCallback,
+                TrainingArguments,
                 default_data_collator,
             )
-            import inspect
 
             model_name = Path(cfg.model_dir.rstrip("/")).name or "Model"
             base_out = Path(cfg.save_dir).expanduser() if (cfg.save_dir and cfg.save_dir.strip()) else TRAINING_OUT_DIR
-            outdir = get_new_output_dir(model_name=model_name, base_dir=base_out)
-            save_dir = outdir
+            save_dir = get_new_output_dir(model_name=model_name, base_dir=base_out)
             save_dir.mkdir(parents=True, exist_ok=True)
+
             with self.state.lock:
                 self.state.save_dir = str(save_dir)
+
             self.state.log.set_file(str(save_dir / "training.log"))
             self.state.log.append(f"Logfile: {save_dir / 'training.log'}")
 
-            train_cfg_path = save_dir / "train_config.json"
-            train_cfg_path.write_text(
-                json.dumps(cfg.model_dump(), indent=2, ensure_ascii=False),
-                encoding="utf-8",
-            )
-            self.state.log.append(f"Trainings-Config: {train_cfg_path}")
+            (save_dir / "train_config.json").write_text(json.dumps(cfg.model_dump(), indent=2, ensure_ascii=False), encoding="utf-8")
 
             device = self._select_device(cfg.device)
             self.state.log.append(f"Device: {device.type.upper()} (requested={cfg.device})")
@@ -1449,33 +1230,25 @@ class TrainingManager:
             tokenizer = AutoTokenizer.from_pretrained(cfg.model_dir, trust_remote_code=HF_TRUST_REMOTE_CODE)
             need_resize = prepare_tokenizer_for_matelix(tokenizer)
 
+            # optional ngrams
             ngram_list: List[Tuple[int, ...]] = []
             if cfg.use_ngrams:
-                self.state.log.append(
-                    f"N-Gramm-Optimierung aktiv (budgeted={cfg.ngram_budgeted}, max_samples={cfg.ngram_max_samples}) …"
-                )
+                self.state.log.append("N-Gramm-Optimierung aktiv …")
                 ngram_list = optimize_tokenizer_ngrams(
                     tokenizer,
                     cfg.csv_path,
-                    model_dir=cfg.model_dir,
                     template_mode=cfg.template_mode,
-                    column_name=cfg.column_name,
-                    chunk_size=int(cfg.chunk_size),
                     max_ngram=cfg.ngram_max,
                     top_k=cfg.ngram_top_k,
                     min_chars=cfg.ngram_min_chars,
                     min_words=cfg.ngram_min_words,
                     max_samples=cfg.ngram_max_samples,
-                    budgeted=bool(cfg.ngram_budgeted),
-                    target_fit=float(cfg.ngram_target_fit),
-                    eval_samples=int(cfg.ngram_eval_samples),
-                    add_batch=int(cfg.ngram_add_batch),
-                    min_count=int(cfg.ngram_min_count),
-                    max_token_chars=int(cfg.ngram_max_token_chars),
-                    max_tokens_per_text=int(cfg.ngram_max_tokens_per_text),
+                    min_count=cfg.ngram_min_count,
+                    max_token_chars=cfg.ngram_max_token_chars,
+                    max_tokens_per_text=cfg.ngram_max_tokens_per_text,
                     log_fn=self.state.log.append,
                 )
-                self.state.log.append(f"N-Gramm (selected): {len(ngram_list)}")
+                self.state.log.append(f"N-Gramm selected: {len(ngram_list)}")
                 if ngram_list:
                     need_resize = True
 
@@ -1492,6 +1265,7 @@ class TrainingManager:
                 torch_dtype=load_dtype,
                 low_cpu_mem_usage=True,
             )
+
             if device.type in ("cpu", "mps") or cfg.precision_mode.lower() == "fp32":
                 model = model.to(torch.float32)
 
@@ -1501,17 +1275,15 @@ class TrainingManager:
 
             if cfg.use_ngrams and ngram_list:
                 res = add_ngram_tokens_and_init_embeddings(tokenizer, model, ngram_list)
-                self.state.log.append(f"N-Gramm Embeddings gesetzt: added={res['added']} updated={res['updated']}")
+                self.state.log.append(f"N-Gramm Embeddings: added={res['added']} updated={res['updated']}")
+
                 try:
                     phrase_map: Dict[str, int] = {}
                     for ng in ngram_list:
-                        text = decode_ngram_text(tokenizer, ng)
-                        if text and text not in phrase_map:
-                            phrase_map[text] = 1
-                    (save_dir / "ngram_token_map.json").write_text(
-                        json.dumps(phrase_map, ensure_ascii=False, indent=2),
-                        encoding="utf-8",
-                    )
+                        txt = decode_ngram_text(tokenizer, ng)
+                        if txt and txt not in phrase_map:
+                            phrase_map[txt] = 1
+                    (save_dir / "ngram_token_map.json").write_text(json.dumps(phrase_map, ensure_ascii=False, indent=2), encoding="utf-8")
                 except Exception:
                     pass
 
@@ -1523,13 +1295,13 @@ class TrainingManager:
             train_mode = cfg.train_mode.lower().strip()
             if train_mode == "lora":
                 try:
-                    from peft import LoraConfig, get_peft_model, TaskType
+                    from peft import LoraConfig, TaskType, get_peft_model
+
                     detected = detect_lora_targets(model)
                     self.state.log.append(f"[LoRA] Detected targets: {detected or '—'}")
                     preferred = [t for t in detected if t in {"q_proj", "k_proj", "v_proj", "o_proj"}]
-                    target_modules: Union[str, List[str]] = (
-                        sorted(set(preferred)) if preferred else (sorted(set(detected)) if detected else "all-linear")
-                    )
+                    target_modules: Union[str, List[str]] = sorted(set(preferred)) if preferred else (sorted(set(detected)) if detected else "all-linear")
+
                     lcfg = LoraConfig(
                         r=int(cfg.lora_r),
                         lora_alpha=int(cfg.lora_alpha),
@@ -1541,14 +1313,8 @@ class TrainingManager:
                     )
                     model = get_peft_model(model, lcfg)
                     total, trainable = count_model_parameters(model)
-                    num_trainable_tensors = sum(1 for p in model.parameters() if p.requires_grad)
-                    adapter_injected = trainable > 0 and num_trainable_tensors > 0
-                    self.state.log.append(
-                        f"[LoRA] enabled. total={total:,} trainable={trainable:,} tensors_with_grad={num_trainable_tensors}"
-                    )
-                    if not adapter_injected:
-                        self.state.log.append("[LoRA][WARN] Keine trainierbaren Parameter -> falle zurück auf full.")
-                        train_mode = "full"
+                    adapter_injected = trainable > 0
+                    self.state.log.append(f"[LoRA] enabled. total={total:,} trainable={trainable:,}")
                 except Exception as e:
                     self.state.log.append(f"[LoRA][FAIL] {e} -> full")
                     self.state.log.append(traceback.format_exc())
@@ -1560,12 +1326,13 @@ class TrainingManager:
                 total, trainable = count_model_parameters(model)
                 self.state.log.append(f"[FULL] total={total:,} trainable={trainable:,}")
 
+            # gradient checkpointing
             try:
                 if cfg.gradient_checkpointing and device.type == "cuda":
                     model.gradient_checkpointing_enable()
                     if hasattr(model, "enable_input_require_grads"):
                         model.enable_input_require_grads()
-                    self.state.log.append("Gradient Checkpointing: ON (cuda)")
+                    self.state.log.append("Gradient Checkpointing: ON")
                 else:
                     if hasattr(model, "gradient_checkpointing_disable"):
                         model.gradient_checkpointing_disable()
@@ -1578,9 +1345,33 @@ class TrainingManager:
                     self.state.last_preview_full = s
                     self.state.last_preview = s[:4000]
 
-            self.state.log.append("Erzeuge Trainings-Dataset (Answer-Only-Loss; JEDE Antwort) …")
-            dataset = build_chunk_dataset(cfg.csv_path, tokenizer, cfg, preview_callback=preview_cb)
-            self.state.log.append(f"Dataset-Größe: {len(dataset)} Samples")
+            # TrainingArguments
+            num_train_epochs = float(cfg.num_train_epochs or 1.0)
+            ta_kwargs: Dict[str, Any] = dict(
+                output_dir=str(save_dir),
+                per_device_train_batch_size=int(cfg.per_device_train_batch_size),
+                gradient_accumulation_steps=int(cfg.gradient_accumulation_steps),
+                num_train_epochs=num_train_epochs,
+                save_strategy="epoch",
+                logging_strategy="steps",
+                logging_steps=1,
+                logging_first_step=True,
+                report_to="none",
+                lr_scheduler_type=str(cfg.lr_schedule),
+                learning_rate=float(cfg.learning_rate),
+                dataloader_num_workers=0,
+                optim="adamw_torch",
+                fp16=bool(fp16),
+                bf16=bool(bf16),
+                dataloader_pin_memory=(device.type == "cuda"),
+                disable_tqdm=False,
+                max_grad_norm=float(cfg.max_grad_norm),
+                weight_decay=float(cfg.weight_decay),
+            )
+            if isinstance(cfg.max_steps, int) and cfg.max_steps > 0:
+                ta_kwargs["max_steps"] = int(cfg.max_steps)
+
+            training_args = TrainingArguments(**ta_kwargs)
 
             self_outer = self
 
@@ -1595,100 +1386,32 @@ class TrainingManager:
                     self.t0 = time.time()
 
                 def on_log(self, args, state, control, logs=None, **kwargs):
-                    if logs is None:
+                    if not logs:
                         return
                     step = int(getattr(state, "global_step", 0) or 0)
                     loss = logs.get("loss")
                     lr = logs.get("learning_rate")
+
                     with self_outer.state.lock:
                         self_outer.state.step = step
                         self_outer.state.loss = float(loss) if loss is not None else None
                         self_outer.state.learning_rate = float(lr) if lr is not None else None
+
                         bs = int(getattr(args, "per_device_train_batch_size", 1) or 1)
                         ga = int(getattr(args, "gradient_accumulation_steps", 1) or 1)
                         world = int(getattr(args, "world_size", 1) or 1)
                         tps = int(cfg.chunk_size) * bs * ga * world
                         self_outer.state.tokens_per_step = tps
                         self_outer.state.total_tokens = step * tps
-                        elapsed = time.time() - self.t0
-                        if step > 0 and self_outer.state.tokens_per_step:
-                            tokens_done = self_outer.state.total_tokens
-                            steps_per_epoch = max(1, len(dataset) // max(1, (bs * ga)))
-                            total_steps = int(cfg.num_train_epochs * steps_per_epoch)
-                            tokens_total = total_steps * self_outer.state.tokens_per_step
-                            tokens_left = max(0, tokens_total - tokens_done)
-                            tps_real = tokens_done / elapsed if elapsed > 0 else 0
-                            eta_s = int(tokens_left / tps_real) if tps_real > 0 else 0
-                            self_outer.state.eta = time.strftime("%H:%M:%S", time.gmtime(eta_s))
-                        else:
-                            self_outer.state.eta = "00:00:00"
+
                     if loss is not None:
-                        self_outer.state.log.append(
-                            f"Step {step} | Loss: {float(loss):.6f} | LR: {lr}"
-                        )
-
-            num_train_epochs = float(cfg.num_train_epochs or 1.0)
-            ta_kwargs = dict(
-                output_dir=str(save_dir),
-                per_device_train_batch_size=int(cfg.per_device_train_batch_size),
-                gradient_accumulation_steps=int(cfg.gradient_accumulation_steps),
-                num_train_epochs=num_train_epochs,
-                save_strategy="epoch",
-                logging_strategy="steps",
-                logging_steps=1,
-                logging_first_step=True,
-                report_to="none",
-                lr_scheduler_type=str(cfg.lr_schedule),
-                learning_rate=float(cfg.learning_rate),
-                dataloader_num_workers=int(cfg.dataloader_num_workers),
-                optim="adamw_torch",
-                fp16=fp16,
-                bf16=bf16,
-                dataloader_pin_memory=(device.type == "cuda"),
-                disable_tqdm=False,
-                max_grad_norm=float(cfg.max_grad_norm),
-                weight_decay=float(cfg.weight_decay),
-            )
-            if isinstance(cfg.max_steps, int) and cfg.max_steps > 0:
-                ta_kwargs["max_steps"] = int(cfg.max_steps)
-
-            import inspect
-            if "save_safetensors" in inspect.signature(TrainingArguments).parameters:
-                ta_kwargs["save_safetensors"] = True
-
-            if int(ta_kwargs.get("dataloader_num_workers", 0)) != 0:
-                self.state.log.append(
-                    "Hinweis: dataloader_num_workers > 0 deaktiviert (auf 0 gesetzt) damit Livepreview pro Batch funktioniert."
-                )
-                ta_kwargs["dataloader_num_workers"] = 0
-
-            training_args = TrainingArguments(**ta_kwargs)
-
-            self.state.log.append("[DEBUG] Forward/Backward-Check …")
-            if len(dataset) == 0:
-                raise RuntimeError("Kein Trainingssample gefunden (Dataset leer).")
-            one = dataset[0]
-            batch_dbg = {
-                "input_ids": torch.tensor(one["input_ids"], device=device, dtype=torch.long).unsqueeze(0),
-                "attention_mask": torch.tensor(one["attention_mask"], device=device, dtype=torch.long).unsqueeze(0),
-                "labels": torch.tensor(one["labels"], device=device, dtype=torch.long).unsqueeze(0),
-            }
-            trainable_cnt = sum(1 for p in model.parameters() if p.requires_grad)
-            if trainable_cnt == 0:
-                raise RuntimeError("Keine trainierbaren Parameter (LoRA targets? train_mode?).")
-            out_dbg = model(**batch_dbg)
-            loss_dbg = out_dbg.loss
-            self.state.log.append(f"[DEBUG] Loss={float(loss_dbg):.6f}, requires_grad={loss_dbg.requires_grad}")
-            if not loss_dbg.requires_grad:
-                raise RuntimeError("Loss requires_grad=False -> Parameter eingefroren oder LoRA nicht getroffen.")
-            loss_dbg.backward()
-            self.state.log.append("[DEBUG] Backward OK")
+                        self_outer.state.log.append(f"Step {step} | Loss: {float(loss):.6f} | LR: {lr}")
 
             class PreviewCollator:
-                def __init__(self, base_collator, tokenizer, state: TrainingState, max_chars: int = 4000):
+                def __init__(self, base_collator, tokenizer_, state_: TrainingState, max_chars: int = 4000):
                     self.base = base_collator
-                    self.tok = tokenizer
-                    self.state = state
+                    self.tok = tokenizer_
+                    self.state = state_
                     self.max_chars = max_chars
 
                 def __call__(self, features):
@@ -1698,28 +1421,79 @@ class TrainingManager:
                         if input_ids is not None:
                             ids0_full = input_ids[0].tolist()
                             text_full = self.tok.decode(ids0_full, skip_special_tokens=False)
-                            text_short = text_full[:self.max_chars]
                             with self.state.lock:
                                 self.state.last_preview_full = text_full
-                                self.state.last_preview = text_short
+                                self.state.last_preview = text_full[: self.max_chars]
                     except Exception:
                         pass
                     return batch
 
-            from transformers import default_data_collator
             preview_collator = PreviewCollator(default_data_collator, tokenizer, self.state)
 
-            from transformers import Trainer
             trainer = Trainer(
                 model=model,
                 args=training_args,
-                train_dataset=dataset,
+                train_dataset=[],  # placeholder
                 data_collator=preview_collator,
                 callbacks=[WebUICallback(), StopCallback()],
             )
-            self.state.log.append("Trainer.train() startet …")
-            trainer.train()
+
+            # -------------------------
+            # CHUNKED TRAINING LOOP
+            # -------------------------
+            self.state.log.append("Chunked Dataset Build + Training startet …")
+
+            trained_any = False
+            block_iter = iter_chunked_training_blocks(
+                cfg.csv_path,
+                tokenizer,
+                template_mode=cfg.template_mode,
+                shuffle=bool(cfg.shuffle),
+                sort_by_length=bool(cfg.sort_by_length),
+                chunk_size=int(cfg.chunk_size),
+                pairs_per_block=int(cfg.pairs_per_block),
+                preview_callback=preview_cb,
+            )
+
+            for block_idx, dataset_block in enumerate(block_iter, start=1):
+                if self.stop_event.is_set():
+                    self.state.log.append("Stop erkannt -> beende.")
+                    break
+
+                self.state.log.append(f"[CHUNK] Block {block_idx}: {len(dataset_block)} Samples")
+
+                if not dataset_block:
+                    continue
+
+                # einmaliger Debug-Check
+                if not trained_any:
+                    one = dataset_block[0]
+                    batch_dbg = {
+                        "input_ids": torch.tensor(one["input_ids"], device=device, dtype=torch.long).unsqueeze(0),
+                        "attention_mask": torch.tensor(one["attention_mask"], device=device, dtype=torch.long).unsqueeze(0),
+                        "labels": torch.tensor(one["labels"], device=device, dtype=torch.long).unsqueeze(0),
+                    }
+                    out_dbg = model(**batch_dbg)
+                    loss_dbg = out_dbg.loss
+                    self.state.log.append(f"[DEBUG] Loss={float(loss_dbg):.6f}, requires_grad={loss_dbg.requires_grad}")
+                    if not loss_dbg.requires_grad:
+                        raise RuntimeError("Loss requires_grad=False -> keine trainierbaren Parameter aktiv.")
+                    loss_dbg.backward()
+                    self.state.log.append("[DEBUG] Backward OK")
+
+                trainer.train_dataset = dataset_block
+                trainer.train(resume_from_checkpoint=False)
+                trained_any = True
+
+                gc.collect()
+                _empty_device_caches()
+
+            if not trained_any:
+                raise RuntimeError("Kein Trainingssample gefunden (alle Blöcke leer).")
+
             self.state.log.append("Training abgeschlossen.")
+
+            # Save
             self.state.log.append(f"Speichere Modell nach: {save_dir}")
 
             final_model = trainer.model
@@ -1761,13 +1535,15 @@ class TrainingManager:
                         model.to("cpu")
                     except Exception:
                         pass
-                unload_torch_objects(trainer, model, tokenizer, dataset)
+                unload_torch_objects(trainer, model, tokenizer)
             except Exception:
                 pass
+
             with self.state.lock:
                 self.state.running = False
                 if self.stop_event.is_set():
                     self.state.eta = ""
+
             self.state.log.append("Training beendet.")
 
     @staticmethod
@@ -1803,6 +1579,7 @@ class TrainingManager:
             return torch.bfloat16, False, True
         return torch.float16, True, False
 
+
 TRAIN_MANAGER = TrainingManager(TRAIN_STATE)
 
 # ----------------------------
@@ -1820,12 +1597,14 @@ class ChatRequest(BaseModel):
     repetition_penalty: float = 1.05
     do_sample: bool = True
 
+
 class SafeLogitsProcessor:
     def __call__(self, input_ids, scores):
         if not torch.isfinite(scores).all():
             scores = scores.clone()
             scores[~torch.isfinite(scores)] = -1e9
         return torch.clamp(scores, min=-1e9, max=1e9)
+
 
 def _preferred_device_name(req: Optional[str] = None) -> str:
     r = (req or "").strip().lower()
@@ -1837,6 +1616,7 @@ def _preferred_device_name(req: Optional[str] = None) -> str:
         return "mps"
     return "cpu"
 
+
 def _get_device(name: str) -> torch.device:
     if name == "cuda" and torch.cuda.is_available():
         return torch.device("cuda")
@@ -1844,8 +1624,8 @@ def _get_device(name: str) -> torch.device:
         return torch.device("mps")
     return torch.device("cpu")
 
+
 def _prepare_inputs(tokenizer, messages: List[Dict[str, Any]], system: Optional[str], device: torch.device):
-    # FIX (2): System wird als normale Message in messages geprepended.
     msgs = list(messages or [])
     if msgs and isinstance(msgs[-1], dict):
         if msgs[-1].get("role") == "assistant" and not (msgs[-1].get("content") or "").strip():
@@ -1855,15 +1635,9 @@ def _prepare_inputs(tokenizer, messages: List[Dict[str, Any]], system: Optional[
         msgs = [{"role": "system", "content": system.strip()}] + msgs
 
     if hasattr(tokenizer, "apply_chat_template"):
-        enc = tokenizer.apply_chat_template(
-            msgs,
-            tokenize=True,
-            add_generation_prompt=True,
-            return_tensors="pt",
-        )
+        enc = tokenizer.apply_chat_template(msgs, tokenize=True, add_generation_prompt=True, return_tensors="pt")
     else:
-        parts = []
-        # Fallback: manuell, inkl. System
+        parts: List[str] = []
         for m in msgs:
             role = (m.get("role") or "").strip().lower()
             content = (m.get("content") or "").strip()
@@ -1882,22 +1656,18 @@ def _prepare_inputs(tokenizer, messages: List[Dict[str, Any]], system: Optional[
     pad_id = tokenizer.pad_token_id
     if pad_id is None or pad_id == tokenizer.eos_token_id:
         pad_id = tokenizer.unk_token_id if tokenizer.unk_token_id is not None else (tokenizer.eos_token_id or 0)
+
     eos_id = tokenizer.eos_token_id or tokenizer.convert_tokens_to_ids("</s>") or pad_id
 
-    if isinstance(enc, dict) or hasattr(enc, "input_ids"):
-        input_ids = enc["input_ids"]
-        if "attention_mask" in enc:
-            attention_mask = enc["attention_mask"]
-        else:
-            attention_mask = (input_ids != pad_id).long()
-    else:
-        input_ids = enc
-        attention_mask = (input_ids != pad_id).long()
+    input_ids = enc["input_ids"]
+    attention_mask = enc.get("attention_mask") or (input_ids != pad_id).long()
 
     if input_ids.dim() == 1:
         input_ids = input_ids.unsqueeze(0)
         attention_mask = attention_mask.unsqueeze(0)
+
     return input_ids.to(device), attention_mask.to(device), int(pad_id), int(eos_id)
+
 
 def sanitize_sampling_args(
     *,
@@ -1914,6 +1684,7 @@ def sanitize_sampling_args(
     p = 1.0 if top_p is None else float(top_p)
     k = 50 if top_k is None else int(top_k)
     rp = 1.05 if repetition_penalty is None else float(repetition_penalty)
+
     if t <= 0.0:
         safe = {
             "max_new_tokens": max(1, int(max_new_tokens)),
@@ -1938,8 +1709,11 @@ def sanitize_sampling_args(
             "pad_token_id": pad_id,
             "eos_token_id": eos_id,
         }
+
     from transformers import LogitsProcessorList
+
     return safe, LogitsProcessorList([SafeLogitsProcessor()])
+
 
 class InferenceSession:
     def __init__(self):
@@ -1949,7 +1723,9 @@ class InferenceSession:
         self.tokenizer = None
         self.model = None
 
+
 INFER = InferenceSession()
+
 
 def unload_inference() -> Dict[str, Any]:
     with INFER.lock:
@@ -1960,17 +1736,23 @@ def unload_inference() -> Dict[str, Any]:
         INFER.model = None
     return {"msg": "Inferenz-Modell entladen."}
 
+
 def load_inference_model(model_dir: str, device_name: str = "auto") -> Dict[str, Any]:
-    from transformers import AutoTokenizer, AutoModelForCausalLM
+    from transformers import AutoModelForCausalLM, AutoTokenizer
+
     dev_name = _preferred_device_name(device_name)
     dev = _get_device(dev_name)
+
     with INFER.lock:
         if INFER.loaded_dir and (INFER.loaded_dir != model_dir or (INFER.device and INFER.device.type != dev.type)):
             unload_inference()
+
         tok = AutoTokenizer.from_pretrained(model_dir, trust_remote_code=HF_TRUST_REMOTE_CODE)
         need_resize = prepare_tokenizer_for_matelix(tok)
+
         patch_local_config_json_if_exists(model_dir)
         clean_cfg = load_clean_config(model_dir)
+
         dtype = torch.float16 if dev.type == "cuda" else None
         mdl = AutoModelForCausalLM.from_pretrained(
             model_dir,
@@ -1979,33 +1761,45 @@ def load_inference_model(model_dir: str, device_name: str = "auto") -> Dict[str,
             torch_dtype=dtype,
             low_cpu_mem_usage=True,
         )
+
         if dev.type == "mps":
             mdl = mdl.to(torch.float32)
+
         ng = maybe_load_ngrams_from_map(model_dir, tok, mdl)
         if (ng.get("added", 0) or ng.get("updated", 0)) and not need_resize:
             need_resize = True
+
         if need_resize and hasattr(mdl, "resize_token_embeddings"):
             mdl.resize_token_embeddings(len(tok))
+
         if hasattr(mdl, "config"):
             mdl.config.use_cache = True
+
         mdl.to(dev)
         mdl.eval()
+
         INFER.loaded_dir = model_dir
         INFER.device = dev
         INFER.tokenizer = tok
         INFER.model = mdl
+
     return {"msg": f"Modell geladen: {model_dir} auf {dev.type.upper()}"}
+
 
 def ensure_model_loaded(model_dir: Optional[str], device_name: Optional[str]):
     mdl_dir = model_dir or INFER.loaded_dir
     if not mdl_dir:
         raise RuntimeError("Kein Inferenz-Modell geladen. Nutze /load_inference oder gib model_dir an.")
+
     dev_name = _preferred_device_name(device_name or (INFER.device.type if INFER.device else "auto"))
     target_dev = _get_device(dev_name)
+
     if INFER.loaded_dir != mdl_dir or (INFER.device and INFER.device.type != target_dev.type):
         load_inference_model(mdl_dir, dev_name)
+
     with INFER.lock:
         return mdl_dir, INFER.tokenizer, INFER.model, INFER.device
+
 
 # ----------------------------
 # API endpoints: training
@@ -2014,9 +1808,11 @@ def ensure_model_loaded(model_dir: Optional[str], device_name: Optional[str]):
 def api_hardware():
     return get_hardware_info()
 
+
 @app.get("/sysstatus")
 def api_sysstatus():
     return get_system_status()
+
 
 @app.get("/trainings")
 def api_trainings():
@@ -2028,22 +1824,15 @@ def api_trainings():
         if not d.is_dir():
             continue
         train_cfg = d / "train_config.json"
-        model_cfg = d / "config.json"
-        cfg_obj: Dict[str, Any] = {}
-        if train_cfg.exists():
-            try:
-                cfg_obj = json.loads(train_cfg.read_text(encoding="utf-8"))
-            except Exception:
-                cfg_obj = {}
-        elif model_cfg.exists():
-            try:
-                cfg_obj = json.loads(model_cfg.read_text(encoding="utf-8"))
-            except Exception:
-                cfg_obj = {}
-        else:
+        if not train_cfg.exists():
             continue
+        try:
+            cfg_obj = json.loads(train_cfg.read_text(encoding="utf-8"))
+        except Exception:
+            cfg_obj = {}
         trainings.append({"folder": d.name, "config": cfg_obj})
     return trainings
+
 
 @app.get("/available_models")
 def api_available_models():
@@ -2051,11 +1840,13 @@ def api_available_models():
         return []
     return sorted([p.name for p in TRAINING_OUT_DIR.iterdir() if p.is_dir()])
 
+
 @app.get("/available_datasets")
 def api_available_datasets():
     if not DATASETS_DIR.exists():
         return []
     return sorted([p.name for p in DATASETS_DIR.iterdir() if p.is_file() and p.suffix.lower() == ".csv"])
+
 
 @app.post("/start")
 def api_start_training(cfg: TrainConfig):
@@ -2064,25 +1855,27 @@ def api_start_training(cfg: TrainConfig):
         return JSONResponse(res, status_code=400)
     return res
 
+
 @app.post("/stop")
 def api_stop_training():
     return TRAIN_MANAGER.stop()
+
 
 @app.get("/status")
 def api_status():
     return TRAIN_STATE.snapshot()
 
+
 @app.get("/logs")
 def api_logs():
     return {"log": TRAIN_STATE.log.tail(200)}
 
+
 @app.get("/livepreview")
 def api_livepreview():
     with TRAIN_STATE.lock:
-        return {
-            "preview": TRAIN_STATE.last_preview,
-            "preview_full": TRAIN_STATE.last_preview_full,
-        }
+        return {"preview": TRAIN_STATE.last_preview, "preview_full": TRAIN_STATE.last_preview_full}
+
 
 @app.websocket("/ws/logs")
 async def ws_logs(websocket: WebSocket):
@@ -2097,6 +1890,7 @@ async def ws_logs(websocket: WebSocket):
             await asyncio.sleep(1.0)
     except WebSocketDisconnect:
         return
+
 
 # ----------------------------
 # API endpoints: inference
@@ -2115,9 +1909,11 @@ def api_load_inference(cfg: Dict[str, Any] | None = Body(default=None)):
     except Exception as e:
         return JSONResponse({"error": f"{e.__class__.__name__}: {e}"}, status_code=500)
 
+
 @app.post("/unload_inference")
 def api_unload_inference():
     return unload_inference()
+
 
 @app.post("/chat")
 def api_chat(req: ChatRequest):
@@ -2127,8 +1923,10 @@ def api_chat(req: ChatRequest):
         return JSONResponse({"error": str(e)}, status_code=400)
     except Exception as e:
         return JSONResponse({"error": f"{e.__class__.__name__}: {e}"}, status_code=500)
+
     if tok is None or mdl is None or dev is None:
         return JSONResponse({"error": "Inference model not loaded."}, status_code=500)
+
     input_ids, attention_mask, pad_id, eos_id = _prepare_inputs(tok, req.messages, req.system, dev)
     gen_kwargs, logits_processor = sanitize_sampling_args(
         max_new_tokens=req.max_new_tokens,
@@ -2140,6 +1938,7 @@ def api_chat(req: ChatRequest):
         pad_id=pad_id,
         eos_id=eos_id,
     )
+
     with torch.no_grad():
         out = mdl.generate(
             input_ids=input_ids,
@@ -2149,22 +1948,27 @@ def api_chat(req: ChatRequest):
             num_return_sequences=1,
             **gen_kwargs,
         )
+
     seq = out.sequences if hasattr(out, "sequences") else out
-    generated = seq[0, input_ids.shape[-1]:]
+    generated = seq[0, input_ids.shape[-1] :]
     text = tok.decode(generated, skip_special_tokens=True)
     return {"model_dir": model_dir, "response": text.strip()}
+
 
 @app.post("/chat_stream")
 def api_chat_stream(req: ChatRequest):
     from transformers import TextIteratorStreamer
+
     try:
         model_dir, tok, mdl, dev = ensure_model_loaded(req.model_dir, req.device)
     except RuntimeError as e:
         return JSONResponse({"error": str(e)}, status_code=400)
     except Exception as e:
         return JSONResponse({"error": f"{e.__class__.__name__}: {e}"}, status_code=500)
+
     if tok is None or mdl is None or dev is None:
         return JSONResponse({"error": "Inference model not loaded."}, status_code=500)
+
     input_ids, attention_mask, pad_id, eos_id = _prepare_inputs(tok, req.messages, req.system, dev)
     gen_kwargs, logits_processor = sanitize_sampling_args(
         max_new_tokens=req.max_new_tokens,
@@ -2176,6 +1980,7 @@ def api_chat_stream(req: ChatRequest):
         pad_id=pad_id,
         eos_id=eos_id,
     )
+
     streamer = TextIteratorStreamer(tok, skip_prompt=True, skip_special_tokens=True)
     thread = threading.Thread(
         target=mdl.generate,
@@ -2205,6 +2010,7 @@ def api_chat_stream(req: ChatRequest):
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
 
+
 # ----------------------------
 # OpenAI-kompatible API (/v1/*)
 # ----------------------------
@@ -2217,22 +2023,18 @@ def _auth_dependency(authorization: Optional[str] = Header(default=None)):
             raise HTTPException(status_code=401, detail="Invalid API key")
     return True
 
+
 def _oai_error(message: str, status_code: int = 400, code: Optional[str] = None):
     return JSONResponse(
         status_code=status_code,
-        content={
-            "error": {
-                "message": message,
-                "type": "invalid_request_error",
-                "param": None,
-                "code": code,
-            }
-        },
+        content={"error": {"message": message, "type": "invalid_request_error", "param": None, "code": code}},
     )
+
 
 class OAIChatMessage(BaseModel):
     role: str
     content: str
+
 
 class OAIChatRequest(BaseModel):
     model: Optional[str] = None
@@ -2243,13 +2045,10 @@ class OAIChatRequest(BaseModel):
     max_tokens: Optional[int] = 256
     stream: Optional[bool] = False
     stop: Optional[Union[str, List[str]]] = None
-    presence_penalty: Optional[float] = 0.0
-    frequency_penalty: Optional[float] = 0.0
     repetition_penalty: Optional[float] = 1.05
     do_sample: Optional[bool] = None
-    seed: Optional[int] = None
     device: Optional[str] = None
-    user: Optional[str] = None
+
 
 class OAICompletionRequest(BaseModel):
     model: Optional[str] = None
@@ -2260,19 +2059,17 @@ class OAICompletionRequest(BaseModel):
     max_tokens: Optional[int] = 256
     stream: Optional[bool] = False
     stop: Optional[Union[str, List[str]]] = None
-    presence_penalty: Optional[float] = 0.0
-    frequency_penalty: Optional[float] = 0.0
     repetition_penalty: Optional[float] = 1.05
     do_sample: Optional[bool] = None
-    seed: Optional[int] = None
     device: Optional[str] = None
-    user: Optional[str] = None
+
 
 def _extract_system(msgs: List[OAIChatMessage]) -> Optional[str]:
     for m in msgs:
         if m.role.strip().lower() == "system":
             return m.content
     return None
+
 
 def _messages_to_hf(msgs: List[OAIChatMessage]) -> List[Dict[str, str]]:
     out = []
@@ -2281,6 +2078,7 @@ def _messages_to_hf(msgs: List[OAIChatMessage]) -> List[Dict[str, str]]:
         if r in ("user", "assistant"):
             out.append({"role": r, "content": m.content})
     return out
+
 
 @app.get("/v1/models", dependencies=[Depends(_auth_dependency)])
 def oai_models():
@@ -2293,18 +2091,8 @@ def oai_models():
         path = str(TRAINING_OUT_DIR / m)
         if path not in models:
             models.append(path)
-    static = [
-        "MTSmash/EvaGPT-446M-MaTeLiX-AI-Pretrained",
-        "MTSmash/EvaGPT-446M-MaTeLiX-AI-for-Pretraining",
-        "MTSmash/EvaGPT-OSSxLlamaTok-DE-0.44B",
-    ]
-    for s in static:
-        if s not in models:
-            models.append(s)
-    return {
-        "object": "list",
-        "data": [{"id": mid, "object": "model", "created": 0, "owned_by": "owner"} for mid in models],
-    }
+    return {"object": "list", "data": [{"id": mid, "object": "model", "created": 0, "owned_by": "owner"} for mid in models]}
+
 
 @app.post("/v1/chat/completions", dependencies=[Depends(_auth_dependency)])
 def oai_chat(req: OAIChatRequest):
@@ -2495,20 +2283,22 @@ def oai_completions(req: OAICompletionRequest):
         "usage": last_usage or {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
     }
 
+
 # ----------------------------
-# Root: serve static/index.html
+# Root
 # ----------------------------
 @app.get("/", response_class=HTMLResponse)
 def root(_: Request):
     p = _ensure_index_html()
     return FileResponse(str(p))
 
+
 # ----------------------------
 # Main
 # ----------------------------
 if __name__ == "__main__":
-    import webbrowser
     import uvicorn
+    import webbrowser
 
     def _open_browser():
         time.sleep(1)
