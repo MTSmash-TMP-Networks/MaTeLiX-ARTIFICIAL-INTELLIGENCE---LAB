@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# matelix_lab_server.py
+# matelix_llm_lab.py
 # Copyright 2026 TMP-SYSTEM-SERVICE GmbH
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -15,7 +15,7 @@
 # limitations under the License.
 
 #!/usr/bin/env python3
-# matelix_lab.py
+# matelix_llm_lab.py
 
 from __future__ import annotations
 
