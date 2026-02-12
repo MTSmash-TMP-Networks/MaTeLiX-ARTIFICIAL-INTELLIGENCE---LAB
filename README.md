@@ -5,7 +5,7 @@
 
 Ein lokales **FastAPI**-Lab für **Fine-Tuning** (Full / LoRA) und **Inference** inkl. Web-UI-Fallback, Live-Logs, Training-Status, Live-Preview sowie einer **OpenAI-kompatiblen API** (`/v1/*`).
 
-> Datei: `matelix_lab_server.py`  
+> Datei: `matelix_llm_lab.py`  
 > Standard-Port: `8002`
 
 ---
