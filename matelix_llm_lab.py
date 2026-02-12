@@ -15,7 +15,7 @@
 # limitations under the License.
 
 #!/usr/bin/env python3
-# matelix_lab_server_fixed.py
+# matelix_lab.py
 
 from __future__ import annotations
 
@@ -658,14 +658,14 @@ def _chain_to_message_list(chain: List[Dict[str, Any]]) -> Tuple[str, List[Tuple
 
 
 def _render_chat_prompt(system_text: str, history: List[Tuple[str, str]]) -> str:
-    parts: List[str] = ["<s>\n"]
+    parts: List[str] = []
     if system_text:
-        parts += ["<|System|>\n", system_text, "\n"]
+        parts += ["<|System|>\n", system_text, "\n</s>\n"]
     for role, content in history:
         if role == "user":
-            parts += ["<|Benutzer|>\n", content, "\n"]
+            parts += ["<|Benutzer|>\n", content, "\n</s>\n"]
         elif role == "assistant":
-            parts += ["<|Assistentin|>\n", content, "\n"]
+            parts += ["<|Assistentin|>\n", content, "\n</s>\n"]
     parts += ["<|Assistentin|>\n"]
     return "".join(parts)
 
@@ -857,18 +857,79 @@ def iter_chunked_training_blocks(
         else:
             labels_full = list(input_ids_full)
 
-        for i in range(0, len(input_ids_full), chunk_len):
-            block_in = input_ids_full[i : i + chunk_len]
-            block_lb = labels_full[i : i + chunk_len]
-            if len(block_in) < 2:
-                continue
-            dataset_block.append(
-                {
-                    "input_ids": pad_left(block_in, chunk_len, pad_id),
-                    "attention_mask": pad_left_mask(len(block_in), chunk_len),
-                    "labels": pad_left_labels(block_lb, chunk_len),
-                }
-            )
+        L = len(input_ids_full)
+        if L < 2:
+            return
+
+    # -----------------------------
+    # Dynamisches Windowing:
+    # - chat: Sliding Window, letztes Fenster enthält immer das Ende
+    #         (keine "Restfenster", und i.d.R. kein Padding, weil Fenster exakt chunk_len)
+    # - dialogplus: klassisch ohne Overlap (falls noch genutzt)
+    # -----------------------------
+        if template_mode == "chat":
+        # Dynamischer Overlap (nicht zu stark):
+        # z.B. bei chunk_len=1024 -> min_overlap=128
+            min_overlap = min(192, max(32, chunk_len // 8))
+            step = max(1, chunk_len - min_overlap)
+
+            if L <= chunk_len:
+            # Nur ein Fenster -> links padding (sonst geht's nicht ohne variable Längen)
+                dataset_block.append(
+                    {
+                        "input_ids": pad_left(input_ids_full, chunk_len, pad_id),
+                        "attention_mask": pad_left_mask(L, chunk_len),
+                        "labels": pad_left_labels(labels_full, chunk_len),
+                    }
+                )
+                return
+
+        # Startpositionen so erzeugen, dass:
+        # - wir nach vorne "sliden"
+        # - und das letzte Fenster garantiert am Ende anliegt
+            starts: List[int] = []
+            pos = 0
+            while pos + chunk_len < L:
+                starts.append(pos)
+                pos += step
+
+            last_start = max(0, L - chunk_len)
+            if not starts or starts[-1] != last_start:
+                starts.append(last_start)
+
+        # Fenster sind hier immer exakt chunk_len lang -> kein Padding nötig
+            for start in starts:
+                end = start + chunk_len
+                block_in = input_ids_full[start:end]
+                block_lb = labels_full[start:end]
+
+                if len(block_in) < 2:
+                    continue
+    
+                dataset_block.append(
+                    {
+                        "input_ids": block_in,                 # exakt chunk_len
+                        "attention_mask": [1] * len(block_in), # exakt chunk_len
+                        "labels": block_lb,                    # exakt chunk_len
+                    }
+                )
+
+        else:
+        # dialogplus (oder andere Modi): keine Überlappung, klassisch chunk_len
+            for i in range(0, L, chunk_len):
+                block_in = input_ids_full[i : i + chunk_len]
+                block_lb = labels_full[i : i + chunk_len]
+                if len(block_in) < 2:
+                    continue
+
+                dataset_block.append(
+                    {
+                        "input_ids": pad_left(block_in, chunk_len, pad_id),
+                        "attention_mask": pad_left_mask(len(block_in), chunk_len),
+                        "labels": pad_left_labels(block_lb, chunk_len),
+                    }
+                )
+
 
     if template_mode == "chat":
         pair_iter = chat_block_iter(csv_path, shuffle_threads=shuffle)
@@ -990,18 +1051,26 @@ def prepare_tokenizer_for_matelix(tokenizer) -> bool:
     tokenizer.padding_side = "left"
 
     if not getattr(tokenizer, "chat_template", None):
-        tokenizer.chat_template = """{{ bos_token }}
-{% for message in messages %}
-{% if message.role == 'system' %}<|System|>
+        tokenizer.chat_template = """{% for message in messages %}
+{% if message.role == 'system' -%}
+<|System|>
 {{ message.content }}
-{% elif message.role == 'user' %}<|Benutzer|>
+</s>
+{% elif message.role == 'user' -%}
+<|Benutzer|>
 {{ message.content }}
-{% elif message.role == 'assistant' %}<|Assistentin|>
+</s>
+{% elif message.role == 'assistant' -%}
+<|Assistentin|>
 {{ message.content }}
+</s>
 {% endif %}
 {% endfor %}
-{% if add_generation_prompt %}<|Assistentin|>
-{% else %}</s>{% endif %}"""
+{% if add_generation_prompt -%}
+<|Assistentin|>
+{% endif %}
+"""
+
 
     return need_resize
 
@@ -1408,7 +1477,7 @@ class TrainingManager:
                         self_outer.state.total_tokens = step * tps
 
                     if loss is not None:
-                        self_outer.state.log.append(f"Step {step} | Loss: {float(loss):.6f} | LR: {lr}")
+                        self_outer.state.log.append(f"Step {step} | Loss: {float(loss):.6f} | LR: {lr} | GradAccum: {args.gradient_accumulation_steps}")
 
             class PreviewCollator:
                 def __init__(self, base_collator, tokenizer_, state_: TrainingState, max_chars: int = 4000):
@@ -1422,14 +1491,19 @@ class TrainingManager:
                     try:
                         input_ids = batch.get("input_ids")
                         if input_ids is not None:
-                            ids0_full = input_ids[0].tolist()
-                            text_full = self.tok.decode(ids0_full, skip_special_tokens=False)
+                            # Zeige ALLE Samples im Batch!
+                            texts = []
+                            for ids in input_ids:
+                                text = self.tok.decode(ids.tolist(), skip_special_tokens=False)
+                                texts.append(text)
+                            preview_text = "\n\n---\n\n".join(texts)
                             with self.state.lock:
-                                self.state.last_preview_full = text_full
-                                self.state.last_preview = text_full[: self.max_chars]
+                                self.state.last_preview_full = preview_text
+                                self.state.last_preview = preview_text[: self.max_chars]
                     except Exception:
                         pass
                     return batch
+
 
             preview_collator = PreviewCollator(default_data_collator, tokenizer, self.state)
 
