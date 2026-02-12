@@ -951,7 +951,7 @@ def iter_chunked_training_blocks(
             buf = []
 
     if buf:
-        if sort_by_length:
+        if sort_by_length and not shuffle:
             buf.sort(key=lambda pa: len(tokenizer(pa[0] + pa[1], add_special_tokens=False)["input_ids"]))
         dataset_block = []
         for pp, aa in buf:
