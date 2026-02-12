@@ -48,7 +48,7 @@ Ein lokales **FastAPI**-Lab für **Fine-Tuning** (Full / LoRA) und **Inference**
 
 ```txt
 .
-├─ matelix_lab_server.py
+├─ matelix_llm_lab.py
 ├─ datasets/
 │  └─ your_dataset.csv
 ├─ training_outputs/
@@ -98,7 +98,7 @@ pip install peft   # optional (nur wenn du LoRA nutzen willst)
 ## Start
 
 ```bash
-python matelix_lab_server.py
+python matelix_llm_lab.py
 ```
 
 Dann im Browser öffnen:
