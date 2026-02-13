@@ -385,7 +385,7 @@ def find_frequent_ngrams_diverse(
     min_chars: int = 32,
     min_words: int = 4,
     code_boost: float = 2.0,
-    similarity_thresh: float = 0.89,
+    similarity_thresh: float = 0.98,
     preselect_factor: int = 5,
     code_phrases_extra: Optional[List[str]] = None,
     min_count: int = 2,
@@ -485,6 +485,22 @@ def find_frequent_ngrams_diverse(
     chosen_code: List[str] = []
     chosen_text: List[str] = []
 
+    def high_token_overlap(a: str, b: str, thresh: float = 0.8) -> bool:
+        a_tokens = a.split()
+        b_tokens = b.split()
+        min_len = min(len(a_tokens), len(b_tokens))
+        if min_len == 0:
+            return False
+        # Prüfe, ob die letzten (oder ersten) N Tokens gleich sind
+        overlap = sum(1 for x, y in zip(a_tokens[-min_len:], b_tokens[-min_len:]) if x == y)
+        if overlap / min_len >= thresh:
+            return True
+        overlap = sum(1 for x, y in zip(a_tokens[:min_len], b_tokens[:min_len]) if x == y)
+        if overlap / min_len >= thresh:
+            return True
+        return False
+
+
     def accept(candidate: str, pool: List[str], is_code: bool) -> bool:
         for t in pool:
             if similarity(candidate, t, is_code) > float(similarity_thresh):
@@ -493,7 +509,13 @@ def find_frequent_ngrams_diverse(
                 return False
             if candidate in t or t in candidate:
                 return False
+            if candidate.replace(" ", "") in t.replace(" ", "") or t.replace(" ", "") in candidate.replace(" ", ""):
+                return False
+            # NEU: Hoher Token-Overlap (z.B. 80%)
+            if high_token_overlap(candidate, t, thresh=0.8):
+                return False
         return True
+
 
     for ng, txt, _ in scored_code:
         if accept(txt, chosen_code, True):
@@ -510,11 +532,42 @@ def find_frequent_ngrams_diverse(
             if len(diverse) >= int(top_k):
                 break
 
+    # --- Maximal/Closed Phrases (Token-Subsequenz) ---
+    def is_token_subsequence(short: str, long: str) -> bool:
+        """True, wenn short als zusammenhängende Token-Sequenz in long vorkommt."""
+        st = short.split()
+        lt = long.split()
+        if not st or len(st) > len(lt):
+            return False
+        m = len(st)
+        for i in range(0, len(lt) - m + 1):
+            if lt[i : i + m] == st:
+                return True
+        return False
+
+    def filter_maximal_phrases_tokenwise(phrases: List[str]) -> List[str]:
+        # längste zuerst
+        phrases = sorted([p for p in phrases if p], key=len, reverse=True)
+        result: List[str] = []
+        for p in phrases:
+            # verwerfe p, wenn es tokenweise in einem bereits gewählten enthalten ist
+            if any(is_token_subsequence(p, r) for r in result):
+                continue
+            result.append(p)
+        return result
+
+    # N-Gramme -> Text -> maximal tokenwise filtern -> zurück zu IDs
+    phrases = [decode_ngram_text(tokenizer, ng) for ng in diverse]
+    phrases = filter_maximal_phrases_tokenwise(phrases)
+    diverse = [tuple(tokenizer(p, add_special_tokens=False)["input_ids"]) for p in phrases if p]
+
+    # Extras ggf. hinzufügen (optional)
     if code_phrases_extra:
         for phrase in code_phrases_extra:
             if not phrase:
                 continue
-            if any(phrase in t or t in phrase for t in (chosen_code + chosen_text)):
+            # nicht hinzufügen, wenn es schon (fast) enthalten ist
+            if any(phrase in t or t in phrase for t in phrases):
                 continue
             ids = tokenizer(phrase, add_special_tokens=False)["input_ids"]
             if len(ids) > 1:
