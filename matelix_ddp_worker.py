@@ -881,11 +881,13 @@ def train_epoch(
 
         if ctx.is_main and preview_writer is not None:
             try:
-                ids0 = batch["input_ids"][0].detach().to("cpu").tolist()
-                attn0 = batch["attention_mask"][0].detach().to("cpu").tolist()
-                visible_ids = [tid for tid, m in zip(ids0, attn0) if int(m) == 1]
-                text0 = tokenizer.decode(visible_ids, skip_special_tokens=False)
-                preview_writer.write(text0[:4000], text0[:20000])
+                input_ids_cpu = batch["input_ids"].detach().to("cpu")
+                texts = []
+                for ids in input_ids_cpu:
+                    txt = tokenizer.decode(ids.tolist(), skip_special_tokens=False)
+                    texts.append(txt)
+                preview_text = "\n\n---\n\n".join(texts)
+                preview_writer.write(preview_text[:4000], preview_text[:20000])
             except Exception:
                 pass
 
