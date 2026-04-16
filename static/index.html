@@ -263,9 +263,17 @@ form label {
   border:1.2px solid #22ff7faa;
   box-shadow:0 0 12px #15ff7c22;
   margin-top:1.2em;
+  max-width:100%;
+  overflow-x:auto;
+  box-sizing:border-box;
 }
 #livepreview {
   white-space:pre-wrap;
+  overflow-wrap:anywhere;
+  word-break:break-word;
+  overflow-x:auto;
+  max-width:100%;
+  box-sizing:border-box;
   font-family:'Fira Mono','Consolas',monospace;
   font-size:1.07em;
   color:#19ff67;
