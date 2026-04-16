@@ -594,12 +594,66 @@ def dialogplus_block_iter(csv_path: str, shuffle_threads: bool = False) -> Itera
             yield "".join(parts), answer + "\n</s>"
 
 
+
+def _find_last_subsequence(haystack: List[int], needle: List[int]) -> int:
+    if not haystack or not needle or len(needle) > len(haystack):
+        return -1
+    n = len(needle)
+    for i in range(len(haystack) - n, -1, -1):
+        if haystack[i:i+n] == needle:
+            return i
+    return -1
+
+
+def _find_first_subsequence(haystack: List[int], needle: List[int]) -> int:
+    if not haystack or not needle or len(needle) > len(haystack):
+        return -1
+    n = len(needle)
+    for i in range(0, len(haystack) - n + 1):
+        if haystack[i:i+n] == needle:
+            return i
+    return -1
+
+
+def _trim_window_to_turn_boundary(
+    token_ids: List[int],
+    max_len: int,
+    turn_markers: List[List[int]],
+) -> List[int]:
+    """
+    Nimmt immer das rechte Ende des Fensters und versucht den linken Rand
+    auf eine Turn-Grenze (<|System|>, <|Benutzer|>, <|Assistentin|>) zu legen.
+    Wenn keine Grenze im Fenster gefunden wird, bleibt das rechte Fenster erhalten.
+    """
+    if len(token_ids) <= max_len:
+        return token_ids
+
+    window = token_ids[-max_len:]
+    best_start = 0
+    for marker_ids in turn_markers:
+        pos = _find_first_subsequence(window, marker_ids)
+        if pos != -1:
+            best_start = max(best_start, pos)
+    trimmed = window[best_start:]
+    return trimmed if trimmed else window
+
+
 class CausalLMDataset(Dataset):
     def __init__(self, examples: Sequence[Tuple[str, str] | str], tokenizer, max_seq_length: int, template_mode: str, sort_by_length: bool):
         self.tokenizer = tokenizer
         self.max_seq_length = int(max_seq_length)
         self.template_mode = template_mode
         self.samples: List[Any] = list(examples)
+
+        # Turn-Marker für sauberes Ausrichten auf Dialoggrenzen
+        self.system_marker_ids = tokenizer("<|System|>\n", add_special_tokens=False)["input_ids"]
+        self.user_marker_ids = tokenizer("<|Benutzer|>\n", add_special_tokens=False)["input_ids"]
+        self.assistant_marker_ids = tokenizer("<|Assistentin|>\n", add_special_tokens=False)["input_ids"]
+        self.turn_markers = [
+            self.system_marker_ids,
+            self.user_marker_ids,
+            self.assistant_marker_ids,
+        ]
 
         if sort_by_length:
             def _len_fn(x: Any) -> int:
@@ -612,6 +666,54 @@ class CausalLMDataset(Dataset):
     def __len__(self) -> int:
         return len(self.samples)
 
+    def _truncate_dialog_sample(self, prompt_ids: List[int], answer_ids: List[int]) -> Tuple[List[int], List[int]]:
+        """
+        Zielregeln:
+        - Links darf abgeschnitten werden.
+        - Das Ende der Zielantwort soll immer erhalten bleiben.
+        - Wenn die komplette Antwort nicht in max_seq_length passt, wird sie als
+          eigener Assistentinnen-Turn behandelt und am linken Rand möglichst auf
+          eine Turn-Grenze ausgerichtet.
+        """
+        total = len(prompt_ids) + len(answer_ids)
+
+        # Fall 1: passt komplett
+        if total <= self.max_seq_length:
+            input_ids = prompt_ids + answer_ids
+            labels = ([-100] * len(prompt_ids)) + answer_ids
+            return input_ids, labels
+
+        # Fall 2: komplette Antwort passt, also nur Prompt links kürzen
+        if len(answer_ids) <= self.max_seq_length:
+            keep_prompt = max(0, self.max_seq_length - len(answer_ids))
+            trimmed_prompt = prompt_ids[-keep_prompt:] if keep_prompt > 0 else []
+            trimmed_prompt = _trim_window_to_turn_boundary(trimmed_prompt, len(trimmed_prompt), self.turn_markers)
+            input_ids = trimmed_prompt + answer_ids
+            labels = ([-100] * len(trimmed_prompt)) + answer_ids
+            return input_ids[-self.max_seq_length:], labels[-self.max_seq_length:]
+
+        # Fall 3: selbst die Antwort ist länger als max_seq_length.
+        # Dann NICHT mitten im gesamten Dialog schneiden, sondern die Antwort als
+        # eigenen Turn behandeln: <|Assistentin|>\n + Antworttail.
+        assistant_turn = list(self.assistant_marker_ids) + list(answer_ids)
+        assistant_turn = _trim_window_to_turn_boundary(assistant_turn, self.max_seq_length, self.turn_markers)
+
+        # Marker innerhalb des finalen Fensters suchen, damit der Turn sauber beginnt
+        marker_pos = _find_first_subsequence(assistant_turn, self.assistant_marker_ids)
+        if marker_pos == -1:
+            # Falls der Marker nicht mehr vollständig im Fenster liegt, erzwingen wir
+            # einen minimal sauberen Turn-Start.
+            tail_budget = max(0, self.max_seq_length - len(self.assistant_marker_ids))
+            answer_tail = answer_ids[-tail_budget:] if tail_budget > 0 else []
+            assistant_turn = list(self.assistant_marker_ids) + answer_tail
+            marker_pos = 0
+
+        answer_start = marker_pos + len(self.assistant_marker_ids)
+        input_ids = assistant_turn[-self.max_seq_length:]
+        labels = ([-100] * answer_start) + input_ids[answer_start:]
+        labels = labels[-len(input_ids):]
+        return input_ids, labels
+
     def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
         item = self.samples[idx]
 
@@ -619,27 +721,18 @@ class CausalLMDataset(Dataset):
             prompt, answer = item
             prompt_ids = self.tokenizer(prompt, add_special_tokens=False)["input_ids"]
             answer_ids = self.tokenizer(answer, add_special_tokens=False)["input_ids"]
-            total = len(prompt_ids) + len(answer_ids)
-
-            if total > self.max_seq_length:
-                overflow = total - self.max_seq_length
-                if overflow > 0 and prompt_ids:
-                    prompt_ids = prompt_ids[min(len(prompt_ids), overflow):]
-                    total = len(prompt_ids) + len(answer_ids)
-                if total > self.max_seq_length:
-                    answer_ids = answer_ids[-self.max_seq_length:]
-                    prompt_ids = []
-
-            input_ids = prompt_ids + answer_ids
-            labels = ([-100] * len(prompt_ids)) + answer_ids
+            input_ids, labels = self._truncate_dialog_sample(prompt_ids, answer_ids)
         else:
-            ids = self.tokenizer(item, add_special_tokens=False)["input_ids"][-self.max_seq_length:]
+            ids = self.tokenizer(item, add_special_tokens=False)["input_ids"]
+            ids = ids[-self.max_seq_length:]
+            ids = _trim_window_to_turn_boundary(ids, self.max_seq_length, self.turn_markers)
             input_ids = ids
             labels = ids.copy()
 
         if len(input_ids) < 2:
-            input_ids = input_ids + [self.tokenizer.eos_token_id or self.tokenizer.pad_token_id or 0]
-            labels = labels + [self.tokenizer.eos_token_id or self.tokenizer.pad_token_id or 0]
+            eos_or_pad = self.tokenizer.eos_token_id or self.tokenizer.pad_token_id or 0
+            input_ids = input_ids + [eos_or_pad]
+            labels = labels + [eos_or_pad]
 
         attention_mask = [1] * len(input_ids)
         return {
