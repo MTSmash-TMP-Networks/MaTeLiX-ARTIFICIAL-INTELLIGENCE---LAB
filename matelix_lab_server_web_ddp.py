@@ -1,13 +1,5 @@
 #!/usr/bin/env python3
 # matelix_lab_server_web_ddp.py
-#
-# Web-first MaTeLiX Server:
-# - startet DDP-Training über die bestehende Weboberfläche
-# - kein manuelles torchrun im Terminal nötig
-# - kompatibel mit der vorhandenen index.html
-# - gemeinsames Inferenzmodell mit Wartelock für Webchat + OpenAI API
-# - automatisches Modell-Laden für API und Webchat
-#
 from __future__ import annotations
 
 import asyncio
@@ -42,9 +34,6 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
-# ----------------------------
-# Pydantic v1/v2 compatibility
-# ----------------------------
 try:
     from pydantic import BaseModel, Field, ConfigDict, model_validator  # type: ignore
     PYDANTIC_V2 = True
@@ -60,6 +49,42 @@ class MatelixBaseModel(BaseModel):
 
 
 os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
+
+
+def configure_tf32(allow_tf32: bool) -> None:
+    if not torch.cuda.is_available():
+        return
+
+    if allow_tf32:
+        if hasattr(torch.backends, "fp32_precision"):
+            torch.backends.fp32_precision = "ieee"
+        if hasattr(torch.backends.cuda.matmul, "fp32_precision"):
+            torch.backends.cuda.matmul.fp32_precision = "tf32"
+        if hasattr(torch.backends.cudnn, "fp32_precision"):
+            torch.backends.cudnn.fp32_precision = "ieee"
+        if hasattr(torch.backends.cudnn, "conv") and hasattr(torch.backends.cudnn.conv, "fp32_precision"):
+            torch.backends.cudnn.conv.fp32_precision = "tf32"
+        if hasattr(torch.backends.cudnn, "rnn") and hasattr(torch.backends.cudnn.rnn, "fp32_precision"):
+            torch.backends.cudnn.rnn.fp32_precision = "tf32"
+        try:
+            torch.set_float32_matmul_precision("high")
+        except Exception:
+            pass
+    else:
+        if hasattr(torch.backends, "fp32_precision"):
+            torch.backends.fp32_precision = "ieee"
+        if hasattr(torch.backends.cuda.matmul, "fp32_precision"):
+            torch.backends.cuda.matmul.fp32_precision = "ieee"
+        if hasattr(torch.backends.cudnn, "fp32_precision"):
+            torch.backends.cudnn.fp32_precision = "ieee"
+        if hasattr(torch.backends.cudnn, "conv") and hasattr(torch.backends.cudnn.conv, "fp32_precision"):
+            torch.backends.cudnn.conv.fp32_precision = "ieee"
+        if hasattr(torch.backends.cudnn, "rnn") and hasattr(torch.backends.cudnn.rnn, "fp32_precision"):
+            torch.backends.cudnn.rnn.fp32_precision = "ieee"
+        try:
+            torch.set_float32_matmul_precision("highest")
+        except Exception:
+            pass
 csv.field_size_limit(1024 * 1024 * 128)
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -73,7 +98,7 @@ TRAINING_OUT_DIR.mkdir(parents=True, exist_ok=True)
 DATASETS_DIR.mkdir(parents=True, exist_ok=True)
 STATIC_DIR.mkdir(parents=True, exist_ok=True)
 
-app = FastAPI(title="MaTeLiX AI Lab (Web DDP)", version="5.4-web-ddp")
+app = FastAPI(title="MaTeLiX AI Lab (Web DDP)", version="5.5-web-ddp-fast")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -84,10 +109,6 @@ app.add_middleware(
 app.mount("/training_outputs", StaticFiles(directory=str(TRAINING_OUT_DIR)), name="training_outputs")
 app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
-
-# ---------------------------------------------------------------------
-# Generic helpers
-# ---------------------------------------------------------------------
 
 def model_to_dict(model: Any, **kwargs) -> Dict[str, Any]:
     if hasattr(model, "model_dump"):
@@ -149,27 +170,15 @@ def get_chat_template(template_mode: str = "chat") -> str:
 {% else %}</s>{% endif %}"""
 
 
-# ---------------------------------------------------------------------
-# Fallback index
-# ---------------------------------------------------------------------
-
 DEFAULT_INDEX_HTML = """<!DOCTYPE html>
 <html lang="de">
 <head>
   <meta charset="utf-8"/>
   <title>MaTeLiX AI LAB</title>
-  <style>
-    body { background:#07110c; color:#c8ffdd; font-family:Arial,sans-serif; display:flex; align-items:center; justify-content:center; height:100vh; margin:0; }
-    .card { background:#102119; border:1px solid #2aff8f; padding:2rem; border-radius:16px; max-width:640px; box-shadow:0 0 24px #1cff7c33; }
-    code { background:#06140e; padding:0.2rem 0.5rem; border-radius:6px; border:1px solid #1cff7c55; }
-  </style>
 </head>
 <body>
-  <div class="card">
-    <h1>MaTeLiX LAB Backend läuft</h1>
-    <p>Lege deine Oberfläche unter <code>./static/index.html</code> ab.</p>
-    <p>Der Server startet DDP-Training direkt aus der Weboberfläche.</p>
-  </div>
+  <h1>MaTeLiX LAB Backend läuft</h1>
+  <p>Lege deine Oberfläche unter <code>./static/index.html</code> ab.</p>
 </body>
 </html>
 """
@@ -181,10 +190,6 @@ def ensure_index_html() -> Path:
         p.write_text(DEFAULT_INDEX_HTML, encoding="utf-8")
     return p
 
-
-# ---------------------------------------------------------------------
-# Logging store
-# ---------------------------------------------------------------------
 
 class LogStore:
     def __init__(self, max_lines: int = 8000):
@@ -247,10 +252,6 @@ class LogStore:
             return data, current_last
 
 
-# ---------------------------------------------------------------------
-# Runtime state
-# ---------------------------------------------------------------------
-
 class TrainingState:
     def __init__(self) -> None:
         self.lock = threading.Lock()
@@ -292,10 +293,6 @@ class TrainingState:
 
 TRAIN_STATE = TrainingState()
 
-
-# ---------------------------------------------------------------------
-# Web TrainConfig
-# ---------------------------------------------------------------------
 
 class WebTrainConfig(MatelixBaseModel):
     model_dir: str = Field(...)
@@ -347,7 +344,7 @@ class WebTrainConfig(MatelixBaseModel):
     master_addr: str = "127.0.0.1"
     master_port: int = 29500
     seed: int = 42
-    deterministic: bool = True
+    deterministic: bool = False
 
     find_unused_parameters: Optional[bool] = None
     ddp_find_unused_parameters: Optional[bool] = None
@@ -363,10 +360,17 @@ class WebTrainConfig(MatelixBaseModel):
     keep_last_k_checkpoints: int = 3
     resume: Optional[str] = None
 
+    allow_tf32: bool = True
+    distributed_debug: bool = False
+    nccl_blocking_wait: bool = False
+    prefetch_factor: int = 2
+    persistent_workers: bool = True
 
-# ---------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------
+    # Variant C / Shard-Tokenisierung
+    use_dataset_cache: bool = True
+    rebuild_dataset_cache: bool = False
+    tokenized_shard_size: int = 5000
+
 
 def get_new_output_dir(model_name: str, base_dir: Optional[Path] = None) -> Path:
     now = time.strftime("%Y-%m-%d_%H-%M-%S")
@@ -473,10 +477,6 @@ def get_system_status() -> Dict[str, Any]:
     }
 
 
-# ---------------------------------------------------------------------
-# DDP subprocess manager
-# ---------------------------------------------------------------------
-
 class DDPTrainingManager:
     def __init__(self, state: TrainingState) -> None:
         self.state = state
@@ -547,6 +547,7 @@ class DDPTrainingManager:
 
         if ddp_enabled and nproc > 1 and device == "cuda":
             return True
+
         return False
 
     def start(self, cfg: WebTrainConfig) -> Dict[str, Any]:
@@ -641,9 +642,13 @@ class DDPTrainingManager:
         env = os.environ.copy()
         env["PYTHONUNBUFFERED"] = "1"
         env["TOKENIZERS_PARALLELISM"] = "false"
-        env.pop("NCCL_ASYNC_ERROR_HANDLING", None)
-        env["TORCH_NCCL_ASYNC_ERROR_HANDLING"] = "1"
-        env.setdefault("TORCH_DISTRIBUTED_DEBUG", "DETAIL")
+        env["MATELIX_ALLOW_TF32"] = "1" if bool(cfg.allow_tf32) else "0"
+        env["MATELIX_DETERMINISTIC"] = "1" if bool(cfg.deterministic) else "0"
+        env["MATELIX_NCCL_BLOCKING_WAIT"] = "1" if bool(cfg.nccl_blocking_wait) else "0"
+        if bool(cfg.distributed_debug):
+            env["TORCH_DISTRIBUTED_DEBUG"] = "DETAIL"
+        else:
+            env.pop("TORCH_DISTRIBUTED_DEBUG", None)
 
         try:
             proc = subprocess.Popen(
@@ -693,8 +698,9 @@ class DDPTrainingManager:
                 f"DDP effective: enabled={bool(ddp_enabled and nproc > 1)} "
                 f"world_size={nproc} "
                 f"find_unused_parameters={worker_cfg['ddp_find_unused_parameters']} "
-                f"template_mode={worker_cfg.get('template_mode', 'chat')} "
-                f"force_template=True"
+                f"deterministic={worker_cfg.get('deterministic', False)} "
+                f"allow_tf32={worker_cfg.get('allow_tf32', True)} "
+                f"dataloader_num_workers={worker_cfg.get('dataloader_num_workers', 4)}"
             )
 
         self.stdout_thread = threading.Thread(target=self._stdout_pump, args=(proc,), daemon=True)
@@ -709,8 +715,8 @@ class DDPTrainingManager:
             "world_size": nproc,
             "ddp_enabled": bool(ddp_enabled and nproc > 1),
             "ddp_find_unused_parameters": worker_cfg["ddp_find_unused_parameters"],
-            "template_mode": worker_cfg.get("template_mode", "chat"),
-            "force_template": True,
+            "deterministic": worker_cfg.get("deterministic", False),
+            "allow_tf32": worker_cfg.get("allow_tf32", True),
         }
 
     def _stdout_pump(self, proc: subprocess.Popen) -> None:
@@ -805,10 +811,6 @@ class DDPTrainingManager:
 TRAIN_MANAGER = DDPTrainingManager(TRAIN_STATE)
 
 
-# ---------------------------------------------------------------------
-# Inference / Chat
-# ---------------------------------------------------------------------
-
 def prepare_tokenizer_for_matelix(tokenizer, force_template: bool = False, template_mode: str = "chat") -> bool:
     need_resize = False
     if tokenizer.pad_token_id is None:
@@ -860,8 +862,8 @@ def unload_torch_objects(*objs: Any) -> None:
 
 class InferenceSession:
     def __init__(self):
-        self.lock = threading.Lock()           # Laden / Entladen / Sessionzustand
-        self.generate_lock = threading.Lock()  # genau 1 aktive Generierung gleichzeitig
+        self.lock = threading.Lock()
+        self.generate_lock = threading.Lock()
         self.loaded_dir: Optional[str] = None
         self.device: Optional[torch.device] = None
         self.tokenizer = None
@@ -954,6 +956,7 @@ def load_inference_model(model_dir: str, device_name: str = "auto") -> Dict[str,
 
     dev_name = _preferred_device_name(device_name)
     dev = _get_device(dev_name)
+    configure_tf32(dev.type == "cuda")
 
     with INFER.lock:
         if INFER.is_generating:
@@ -976,6 +979,7 @@ def load_inference_model(model_dir: str, device_name: str = "auto") -> Dict[str,
             trust_remote_code=False,
             torch_dtype=dtype,
             low_cpu_mem_usage=True,
+            attn_implementation="sdpa",
         )
         if need_resize and hasattr(mdl, "resize_token_embeddings"):
             mdl.resize_token_embeddings(len(tok))
@@ -997,9 +1001,7 @@ def load_inference_model(model_dir: str, device_name: str = "auto") -> Dict[str,
 def ensure_model_loaded(model_dir: Optional[str], device_name: Optional[str]):
     mdl_dir = model_dir or INFER.loaded_dir or get_latest_model_dir()
     if not mdl_dir:
-        raise RuntimeError(
-            "Kein Inferenz-Modell gefunden. Trainiere zuerst ein Modell oder gib model_dir an."
-        )
+        raise RuntimeError("Kein Inferenz-Modell gefunden. Trainiere zuerst ein Modell oder gib model_dir an.")
 
     dev_name = _preferred_device_name(device_name or (INFER.device.type if INFER.device else "auto"))
     target_dev = _get_device(dev_name)
@@ -1131,10 +1133,6 @@ def end_generation() -> None:
         INFER.is_generating = False
         INFER.current_source = None
 
-
-# ---------------------------------------------------------------------
-# API endpoints
-# ---------------------------------------------------------------------
 
 @app.get("/hardware")
 def api_hardware():
@@ -1359,10 +1357,6 @@ def api_chat_stream(req: ChatRequest):
     return StreamingResponse(event_iter(), media_type="text/plain; charset=utf-8")
 
 
-# ----------------------------
-# OpenAI-kompatible API (/v1/*)
-# ----------------------------
-
 def _auth_dependency(authorization: Optional[str] = Header(default=None)):
     if OPENAI_COMPAT_API_KEY:
         if not authorization or not authorization.lower().startswith("bearer "):
@@ -1396,7 +1390,7 @@ class OAIChatRequest(MatelixBaseModel):
     stop: Optional[Union[str, List[str]]] = None
     presence_penalty: Optional[float] = 0.0
     frequency_penalty: Optional[float] = 0.0
-    repetition_penalty: Optional[float] = 1.05
+    repetition_penalty: Optional[float] = 1.1
     do_sample: Optional[bool] = None
     seed: Optional[int] = None
     device: Optional[str] = None
@@ -1414,7 +1408,7 @@ class OAICompletionRequest(MatelixBaseModel):
     stop: Optional[Union[str, List[str]]] = None
     presence_penalty: Optional[float] = 0.0
     frequency_penalty: Optional[float] = 0.0
-    repetition_penalty: Optional[float] = 1.05
+    repetition_penalty: Optional[float] = 1.1
     do_sample: Optional[bool] = None
     seed: Optional[int] = None
     device: Optional[str] = None
