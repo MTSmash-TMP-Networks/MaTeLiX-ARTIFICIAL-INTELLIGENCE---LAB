@@ -1,397 +1,770 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-"""
-matelix_ddp_worker.py
-
-Vollständiger, web-kompatibler DDP-Worker für MaTeLiX.
-Korrigiert u. a.:
-- DDP init_process_group: kein int mehr als device_id
-- save_dir Alias-Kompatibilität
-- unbekannte JSON-Felder werden ignoriert
-- robustes Gradient Checkpointing unter DDP
-- find_unused_parameters konfigurierbar
-- rank-sicheres Logging / Status-Datei
-- Trainingsdaten: text / chat / dialogplus
-"""
-
+# matelix_lab_server_web_ddp.py
+#
+# Web-first MaTeLiX Server:
+# - startet DDP-Training über die bestehende Weboberfläche
+# - kein manuelles torchrun im Terminal nötig
+# - kompatibel mit der vorhandenen index.html
+#
+# Architektur:
+#   Browser -> FastAPI -> subprocess (python -m torch.distributed.run ...) -> DDP Worker
+#
 from __future__ import annotations
 
-import argparse
+import asyncio
 import csv
+import gc
 import json
-import logging
-import math
 import os
-import random
+import platform
 import signal
+import subprocess
 import sys
+import threading
 import time
-import traceback
-from contextlib import nullcontext
-from dataclasses import dataclass, fields
+import uuid
+from collections import deque
 from pathlib import Path
-from typing import Any, Dict, Iterable, Iterator, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Optional, Union
+
+import psutil
+import torch
+from fastapi import (
+    Body,
+    Depends,
+    FastAPI,
+    Header,
+    HTTPException,
+    Request,
+    WebSocket,
+    WebSocketDisconnect,
+)
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, StreamingResponse
+from fastapi.staticfiles import StaticFiles
+
+# ----------------------------
+# Pydantic v1/v2 compatibility
+# ----------------------------
+try:
+    from pydantic import BaseModel, Field, ConfigDict, model_validator  # type: ignore
+    PYDANTIC_V2 = True
+except Exception:
+    from pydantic import BaseModel, Field, validator  # type: ignore
+    ConfigDict = None  # type: ignore
+    PYDANTIC_V2 = False
+
+
+class MatelixBaseModel(BaseModel):
+    if PYDANTIC_V2:
+        model_config = ConfigDict(protected_namespaces=())  # type: ignore
+
 
 os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
-os.environ.setdefault("TORCH_NCCL_ASYNC_ERROR_HANDLING", "1")
-os.environ.setdefault("TORCH_NCCL_BLOCKING_WAIT", "1")
-os.environ.setdefault("PYTHONUNBUFFERED", "1")
-os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
-os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
-
-import torch
-import torch.distributed as dist
-from torch import nn
-from torch.nn.parallel import DistributedDataParallel as DDP
-from torch.optim import AdamW
-from torch.optim.lr_scheduler import LambdaLR
-from torch.utils.data import DataLoader, Dataset, DistributedSampler
-from transformers import AutoModelForCausalLM, AutoTokenizer
-
-try:
-    from torch.amp import GradScaler
-    _NEW_SCALER = True
-except Exception:
-    from torch.cuda.amp import GradScaler
-    _NEW_SCALER = False
-
 csv.field_size_limit(1024 * 1024 * 128)
 
-LOGGER = logging.getLogger("matelix_ddp_worker")
+BASE_DIR = Path(__file__).resolve().parent
+TRAINING_OUT_DIR = BASE_DIR / "training_outputs"
+DATASETS_DIR = BASE_DIR / "datasets"
+STATIC_DIR = BASE_DIR / "static"
+WORKER_PATH = BASE_DIR / "matelix_ddp_worker.py"
+OPENAI_COMPAT_API_KEY = "matelix-local-dev-key"
+
+TRAINING_OUT_DIR.mkdir(parents=True, exist_ok=True)
+DATASETS_DIR.mkdir(parents=True, exist_ok=True)
+STATIC_DIR.mkdir(parents=True, exist_ok=True)
+
+app = FastAPI(title="MaTeLiX AI Lab (Web DDP)", version="5.1-web-ddp")
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=False,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+app.mount("/training_outputs", StaticFiles(directory=str(TRAINING_OUT_DIR)), name="training_outputs")
+app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
 
-# ---------------------------------------------------------------------------
-# Config
-# ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------
+# Generic helpers
+# ---------------------------------------------------------------------
 
-@dataclass
-class TrainConfig:
-    model_dir: str
-    csv_path: str
+def model_to_dict(model: Any, **kwargs) -> Dict[str, Any]:
+    if hasattr(model, "model_dump"):
+        return model.model_dump(**kwargs)
+    return model.dict(**kwargs)
+
+
+def _extract_sequences(out: Any):
+    return out.sequences if hasattr(out, "sequences") else out
+
+
+# ---------------------------------------------------------------------
+# Fallback index
+# ---------------------------------------------------------------------
+
+DEFAULT_INDEX_HTML = """<!DOCTYPE html>
+<html lang="de">
+<head>
+  <meta charset="utf-8"/>
+  <title>MaTeLiX AI LAB</title>
+  <style>
+    body { background:#07110c; color:#c8ffdd; font-family:Arial,sans-serif; display:flex; align-items:center; justify-content:center; height:100vh; margin:0; }
+    .card { background:#102119; border:1px solid #2aff8f; padding:2rem; border-radius:16px; max-width:640px; box-shadow:0 0 24px #1cff7c33; }
+    code { background:#06140e; padding:0.2rem 0.5rem; border-radius:6px; border:1px solid #1cff7c55; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h1>MaTeLiX LAB Backend läuft</h1>
+    <p>Lege deine Oberfläche unter <code>./static/index.html</code> ab.</p>
+    <p>Der Server startet DDP-Training direkt aus der Weboberfläche.</p>
+  </div>
+</body>
+</html>
+"""
+
+
+def ensure_index_html() -> Path:
+    p = STATIC_DIR / "index.html"
+    if not p.exists():
+        p.write_text(DEFAULT_INDEX_HTML, encoding="utf-8")
+    return p
+
+
+# ---------------------------------------------------------------------
+# Logging store
+# ---------------------------------------------------------------------
+
+class LogStore:
+    def __init__(self, max_lines: int = 8000):
+        self.max_lines = int(max_lines)
+        self._lock = threading.Lock()
+        self._base_id = 0
+        self._lines: deque[str] = deque()
+        self._file_path: Optional[Path] = None
+
+    def set_file(self, path: Optional[Path]) -> None:
+        with self._lock:
+            self._file_path = path
+            if path is not None:
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.touch(exist_ok=True)
+
+    def clear(self) -> None:
+        with self._lock:
+            self._base_id = 0
+            self._lines.clear()
+
+    def append(self, msg: str) -> None:
+        ts = time.strftime("%H:%M:%S")
+        line = f"[{ts}] {msg.rstrip()}"
+        with self._lock:
+            if self._file_path is not None:
+                try:
+                    with open(self._file_path, "a", encoding="utf-8") as f:
+                        f.write(line + "\n")
+                except Exception:
+                    pass
+            self._lines.append(line)
+            while len(self._lines) > self.max_lines:
+                self._lines.popleft()
+                self._base_id += 1
+
+    @property
+    def last_id(self) -> int:
+        with self._lock:
+            if not self._lines:
+                return self._base_id - 1
+            return self._base_id + len(self._lines) - 1
+
+    def tail(self, n: int = 200) -> List[str]:
+        with self._lock:
+            n = max(1, int(n))
+            return list(self._lines)[-n:]
+
+    def since(self, last_seen_id: int):
+        with self._lock:
+            if not self._lines:
+                return [], last_seen_id
+            current_last = self._base_id + len(self._lines) - 1
+            if last_seen_id < self._base_id - 1:
+                return list(self._lines), current_last
+            if last_seen_id >= current_last:
+                return [], last_seen_id
+            start = (last_seen_id - self._base_id) + 1
+            data = list(self._lines)[start:]
+            return data, current_last
+
+
+# ---------------------------------------------------------------------
+# Runtime state
+# ---------------------------------------------------------------------
+
+class TrainingState:
+    def __init__(self) -> None:
+        self.lock = threading.Lock()
+        self.running = False
+        self.step: int = 0
+        self.loss: Optional[float] = None
+        self.learning_rate: Optional[float] = None
+        self.last_preview: str = ""
+        self.last_preview_full: str = ""
+        self.tokens_per_step: Optional[int] = None
+        self.total_tokens: int = 0
+        self.eta: str = ""
+        self.save_dir: Optional[str] = None
+        self.active_config: Optional[Dict[str, Any]] = None
+        self.status_text: str = "idle"
+        self.error: Optional[str] = None
+        self.world_size: int = 1
+        self.exit_code: Optional[int] = None
+        self.log = LogStore()
+
+    def snapshot(self) -> Dict[str, Any]:
+        with self.lock:
+            return {
+                "running": self.running,
+                "step": self.step,
+                "loss": self.loss,
+                "learning_rate": self.learning_rate,
+                "eta": self.eta,
+                "tokens_per_step": self.tokens_per_step,
+                "total_tokens": self.total_tokens,
+                "save_dir": self.save_dir,
+                "config": self.active_config,
+                "status_text": self.status_text,
+                "error": self.error,
+                "world_size": self.world_size,
+                "exit_code": self.exit_code,
+            }
+
+
+TRAIN_STATE = TrainingState()
+
+
+# ---------------------------------------------------------------------
+# Web TrainConfig
+# ---------------------------------------------------------------------
+
+class WebTrainConfig(MatelixBaseModel):
+    model_dir: str = Field(...)
+    csv_path: str = Field(...)
 
     save_dir: Optional[str] = None
-    output_dir: Optional[str] = None
-
-    device: str = "cuda"
     template_mode: str = "chat"
     column_name: str = "text"
 
-    learning_rate: float = 2e-4
+    learning_rate: float = 2e-5
     lr_schedule: str = "cosine"
     per_device_train_batch_size: int = 1
     gradient_accumulation_steps: int = 8
     num_train_epochs: float = 3.0
     max_steps: Optional[int] = None
     max_seq_length: int = 1024
-    chunk_size: Optional[int] = None
-
     shuffle: bool = False
     sort_by_length: bool = True
-    dataloader_num_workers: int = 0
-    max_grad_norm: float = 1.0
-    weight_decay: float = 0.01
 
-    precision_mode: str = "auto"
-    gradient_checkpointing: bool = False
-
+    device: str = "auto"
     train_mode: str = "full"
     lora_r: int = 8
     lora_alpha: int = 16
+    precision_mode: str = "auto"
+    gradient_checkpointing: bool = False
+    dataloader_num_workers: int = 0
     merge_lora_on_save: bool = True
-
-    ddp_find_unused_parameters: bool = False
-    ddp_static_graph: bool = False
-    ddp_broadcast_buffers: bool = False
-    ddp_timeout_minutes: int = 30
-
-    seed: int = 42
+    max_grad_norm: float = 1.0
+    weight_decay: float = 0.01
 
     use_ngrams: bool = False
+    ngram_max: int = 12
+    ngram_top_k: int = 1500
+    ngram_min_chars: int = 16
+    ngram_min_words: int = 2
+    ngram_max_samples: int = 4000
+    ngram_budgeted: bool = True
+    ngram_target_fit: float = 0.98
+    ngram_eval_samples: int = 512
+    ngram_add_batch: int = 64
+    ngram_min_count: int = 2
+    ngram_max_token_chars: int = 384
+    ngram_max_tokens_per_text: int = 4096
 
-    def normalize(self) -> None:
-        if not self.output_dir:
-            self.output_dir = self.save_dir
-        if not self.chunk_size:
-            self.chunk_size = self.max_seq_length
-        self.max_seq_length = int(self.chunk_size or self.max_seq_length)
-        self.per_device_train_batch_size = max(1, int(self.per_device_train_batch_size))
-        self.gradient_accumulation_steps = max(1, int(self.gradient_accumulation_steps))
-        self.max_grad_norm = float(self.max_grad_norm)
-        self.learning_rate = float(self.learning_rate)
-        self.weight_decay = float(self.weight_decay)
-        self.num_train_epochs = float(self.num_train_epochs)
-        self.seed = int(self.seed)
-        self.dataloader_num_workers = int(self.dataloader_num_workers)
-        self.ddp_timeout_minutes = int(self.ddp_timeout_minutes)
-        self.ddp_find_unused_parameters = bool(self.ddp_find_unused_parameters)
-        self.ddp_static_graph = bool(self.ddp_static_graph)
-        self.ddp_broadcast_buffers = bool(self.ddp_broadcast_buffers)
+    ddp_enabled: Optional[bool] = None
+    nproc_per_node: Optional[int] = None
+    nnodes: int = 1
+    node_rank: int = 0
+    master_addr: str = "127.0.0.1"
+    master_port: int = 29500
+    seed: int = 42
+    deterministic: bool = True
 
+    find_unused_parameters: Optional[bool] = None
+    ddp_find_unused_parameters: Optional[bool] = None
 
-def _coerce_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
-    payload = dict(payload or {})
-
-    if "save_dir" in payload and "output_dir" not in payload:
-        payload["output_dir"] = payload["save_dir"]
-
-    # web/ddp launcher noise safely ignored
-    ignore_keys = {
-        "nproc_per_node", "nnodes", "node_rank", "master_addr", "master_port",
-        "world_size", "local_rank", "rank", "run_name", "experiment_name",
-        "resume", "save_every_epoch", "monitor_metric", "monitor_mode",
-        "use_tensorboard", "val_csv", "val_split", "split_seed",
-        "keep_last_k_checkpoints", "validate_every_epoch",
-        "early_stopping_patience", "early_stopping_min_delta",
-        "log_every_steps", "compile_model", "compile_mode", "tf32",
-        "persistent_workers", "prefetch_factor", "pin_memory",
-        "scheduler", "warmup_steps", "warmup_ratio", "min_lr_ratio",
-    }
-    for k in list(payload.keys()):
-        if k in ignore_keys:
-            payload.pop(k, None)
-
-    valid = {f.name for f in fields(TrainConfig)}
-    return {k: v for k, v in payload.items() if k in valid}
+    ddp_broadcast_buffers: bool = False
+    ddp_static_graph: bool = False
+    val_split: float = 0.05
+    early_stopping_patience: int = 3
+    early_stopping_min_delta: float = 0.0
+    log_every_steps: int = 10
+    use_tensorboard: bool = True
+    save_every_epoch: bool = True
+    keep_last_k_checkpoints: int = 3
+    resume: Optional[str] = None
 
 
-def load_cfg(path: str) -> TrainConfig:
-    payload = json.loads(Path(path).read_text(encoding="utf-8"))
-    payload = _coerce_payload(payload)
-    cfg = TrainConfig(**payload)
-    cfg.normalize()
-    return cfg
+# ---------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------
+
+def get_new_output_dir(model_name: str, base_dir: Optional[Path] = None) -> Path:
+    now = time.strftime("%Y-%m-%d_%H-%M-%S")
+    safe_name = "".join(ch if ch.isalnum() or ch in "-_." else "_" for ch in model_name) or "model"
+    base = base_dir or TRAINING_OUT_DIR
+    out = base / f"{safe_name}_{now}"
+    out.mkdir(parents=True, exist_ok=True)
+    return out
 
 
-# ---------------------------------------------------------------------------
-# DDP / state
-# ---------------------------------------------------------------------------
-
-@dataclass
-class DistContext:
-    rank: int
-    local_rank: int
-    world_size: int
-    is_distributed: bool
-    device: torch.device
-
-    @property
-    def is_main(self) -> bool:
-        return self.rank == 0
+def atomic_write_json(path: Path, payload: Dict[str, Any]) -> None:
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+    tmp.replace(path)
 
 
-class ShutdownFlag:
-    def __init__(self) -> None:
-        self.stop = False
-        self.reason = ""
-
-    def request(self, reason: str) -> None:
-        self.stop = True
-        self.reason = reason
-
-
-SHUTDOWN = ShutdownFlag()
-
-
-def register_signal_handlers() -> None:
-    def _handler(signum, _frame):
-        try:
-            name = signal.Signals(signum).name
-        except Exception:
-            name = str(signum)
-        SHUTDOWN.request(name)
-
-    signal.signal(signal.SIGINT, _handler)
-    signal.signal(signal.SIGTERM, _handler)
-
-
-def set_seed(seed: int) -> None:
-    random.seed(seed)
-    torch.manual_seed(seed)
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed_all(seed)
-    torch.backends.cudnn.deterministic = True
-    torch.backends.cudnn.benchmark = False
+def read_json_if_exists(path: Optional[Path]) -> Optional[Dict[str, Any]]:
+    if path is None or not path.exists():
+        return None
     try:
-        torch.use_deterministic_algorithms(True, warn_only=True)
+        return json.loads(path.read_text(encoding="utf-8"))
     except Exception:
-        pass
+        return None
 
 
-def init_dist(cfg: TrainConfig) -> DistContext:
-    world_size = int(os.environ.get("WORLD_SIZE", "1"))
-    rank = int(os.environ.get("RANK", "0"))
-    local_rank = int(os.environ.get("LOCAL_RANK", "0"))
-    is_distributed = world_size > 1
+def normalize_device(requested: str) -> str:
+    r = (requested or "auto").strip().lower()
+    if r == "cuda" and torch.cuda.is_available():
+        return "cuda"
+    if r == "mps" and getattr(torch.backends, "mps", None) and torch.backends.mps.is_available():
+        return "mps"
+    if r == "cpu":
+        return "cpu"
+    if torch.cuda.is_available():
+        return "cuda"
+    if getattr(torch.backends, "mps", None) and torch.backends.mps.is_available():
+        return "mps"
+    return "cpu"
 
-    device_name = (cfg.device or "").lower().strip()
-    if torch.cuda.is_available() and device_name in {"cuda", "auto", ""}:
-        device = torch.device("cuda", local_rank if is_distributed else 0)
-        torch.cuda.set_device(device)
-    elif device_name == "cpu":
-        device = torch.device("cpu")
-    elif device_name == "mps" and getattr(torch.backends, "mps", None) and torch.backends.mps.is_available():
-        device = torch.device("mps")
-    elif torch.cuda.is_available():
-        device = torch.device("cuda", local_rank if is_distributed else 0)
-        torch.cuda.set_device(device)
-    else:
-        device = torch.device("cpu")
 
-    ctx = DistContext(
-        rank=rank,
-        local_rank=local_rank,
-        world_size=world_size,
-        is_distributed=is_distributed,
-        device=device,
-    )
+def query_nvidia_smi() -> List[Dict[str, Any]]:
+    if not torch.cuda.is_available():
+        return []
+    try:
+        out = subprocess.check_output(
+            [
+                "nvidia-smi",
+                "--query-gpu=utilization.gpu,memory.total,memory.used,name",
+                "--format=csv,noheader,nounits",
+            ],
+            stderr=subprocess.DEVNULL,
+        )
+        rows = out.decode("utf-8", errors="ignore").strip().splitlines()
+        result = []
+        for idx, line in enumerate(rows):
+            util, mem_total, mem_used, name = [s.strip() for s in line.split(",")]
+            result.append(
+                {
+                    "id": idx,
+                    "name": name,
+                    "util": int(util),
+                    "mem_total": int(mem_total),
+                    "mem_used": int(mem_used),
+                }
+            )
+        return result
+    except Exception:
+        return []
 
-    if is_distributed:
-        backend = "nccl" if device.type == "cuda" else "gloo"
-        from datetime import timedelta
-        init_kwargs = dict(
-            backend=backend,
-            init_method="env://",
-            timeout=timedelta(minutes=cfg.ddp_timeout_minutes),
+
+def get_hardware_info() -> Dict[str, Any]:
+    cuda = torch.cuda.is_available()
+    mps = bool(getattr(torch.backends, "mps", None) and torch.backends.mps.is_available())
+    gpus = []
+    if cuda:
+        for i in range(torch.cuda.device_count()):
+            gpus.append(torch.cuda.get_device_name(i))
+    return {
+        "cuda": cuda,
+        "mps": mps,
+        "num_cuda": torch.cuda.device_count() if cuda else 0,
+        "gpus": gpus,
+        "num_cpus": os.cpu_count() or 1,
+    }
+
+
+def get_system_status() -> Dict[str, Any]:
+    mem = psutil.virtual_memory()
+    cpu = psutil.cpu_percent(interval=None)
+    gpu_infos = query_nvidia_smi()
+    primary = gpu_infos[0] if gpu_infos else None
+    return {
+        "ram_used": mem.used // (1024 * 1024),
+        "ram_total": mem.total // (1024 * 1024),
+        "ram_percent": mem.percent,
+        "cpu_percent": cpu,
+        "gpu_name": primary["name"] if primary else "",
+        "gpu_util": primary["util"] if primary else None,
+        "gpu_mem": primary["mem_total"] if primary else None,
+        "gpu_mem_used": primary["mem_used"] if primary else None,
+        "platform": platform.platform(),
+        "gpus": gpu_infos,
+        "num_cuda": torch.cuda.device_count() if torch.cuda.is_available() else 0,
+    }
+
+
+# ---------------------------------------------------------------------
+# DDP subprocess manager
+# ---------------------------------------------------------------------
+
+class DDPTrainingManager:
+    def __init__(self, state: TrainingState) -> None:
+        self.state = state
+        self.proc: Optional[subprocess.Popen] = None
+        self.runtime_state_path: Optional[Path] = None
+        self.status_state_path: Optional[Path] = None
+        self.livepreview_path: Optional[Path] = None
+        self.run_dir: Optional[Path] = None
+        self.stdout_thread: Optional[threading.Thread] = None
+        self.wait_thread: Optional[threading.Thread] = None
+        self.stop_requested = False
+        self.lock = threading.Lock()
+
+    def _is_alive(self) -> bool:
+        with self.lock:
+            return self.proc is not None and self.proc.poll() is None
+
+    def _merge_state_payload(self, payload: Dict[str, Any], source: str = "unknown") -> None:
+        with self.state.lock:
+            self.state.step = int(payload.get("step") or self.state.step or 0)
+            if payload.get("loss") is not None:
+                self.state.loss = payload.get("loss")
+            if payload.get("learning_rate") is not None:
+                self.state.learning_rate = payload.get("learning_rate")
+            self.state.eta = payload.get("eta") or self.state.eta or ""
+            if payload.get("tokens_per_step") is not None:
+                self.state.tokens_per_step = payload.get("tokens_per_step")
+            self.state.total_tokens = int(payload.get("total_tokens") or self.state.total_tokens or 0)
+            self.state.last_preview = (payload.get("preview") or self.state.last_preview or "")[:4000]
+            self.state.last_preview_full = (payload.get("preview_full") or self.state.last_preview_full or self.state.last_preview or "")[:20000]
+            self.state.save_dir = payload.get("save_dir") or self.state.save_dir
+            self.state.status_text = payload.get("status") or self.state.status_text
+            self.state.error = payload.get("error") or self.state.error
+            self.state.world_size = int(payload.get("world_size") or self.state.world_size or 1)
+            if self.proc is not None:
+                self.state.running = self.proc.poll() is None and bool(payload.get("running", self.state.running))
+            if self.run_dir is None and self.state.save_dir:
+                try:
+                    self.run_dir = Path(self.state.save_dir)
+                except Exception:
+                    pass
+
+    def _refresh_from_runtime_file(self) -> None:
+        runtime_payload = read_json_if_exists(self.runtime_state_path)
+        status_payload = read_json_if_exists(self.status_state_path)
+        preview_payload = read_json_if_exists(self.livepreview_path)
+
+        if runtime_payload:
+            self._merge_state_payload(runtime_payload, source="runtime_state.json")
+        if status_payload:
+            self._merge_state_payload(status_payload, source="status.json")
+        if preview_payload:
+            self._merge_state_payload(preview_payload, source="livepreview.json")
+
+        with self.state.lock:
+            if self.proc is not None and self.proc.poll() is not None:
+                self.state.running = False
+            elif self.proc is not None and self.proc.poll() is None:
+                self.state.running = True
+                if self.state.status_text in {"idle", "finished", "error"}:
+                    self.state.status_text = "running"
+
+    def _resolve_find_unused(self, cfg: WebTrainConfig, ddp_enabled: bool, nproc: int, device: str) -> bool:
+        explicit = None
+        if cfg.ddp_find_unused_parameters is not None:
+            explicit = bool(cfg.ddp_find_unused_parameters)
+        elif cfg.find_unused_parameters is not None:
+            explicit = bool(cfg.find_unused_parameters)
+
+        if explicit is not None:
+            return explicit
+
+        if ddp_enabled and nproc > 1 and device == "cuda":
+            return True
+        return False
+
+    def start(self, cfg: WebTrainConfig) -> Dict[str, Any]:
+        if not WORKER_PATH.exists():
+            return {"running": False, "error": f"Worker fehlt: {WORKER_PATH}"}
+
+        with self.state.lock:
+            if self.proc is not None and self.proc.poll() is None:
+                return {"running": False, "error": "Training läuft bereits."}
+
+        model_name = Path(cfg.model_dir.rstrip("/")).name or "model"
+        base_out = Path(cfg.save_dir).expanduser().resolve() if (cfg.save_dir and str(cfg.save_dir).strip()) else TRAINING_OUT_DIR
+        run_dir = get_new_output_dir(model_name, base_out)
+        runtime_state_path = run_dir / "runtime_state.json"
+        status_state_path = run_dir / "status.json"
+        livepreview_path = run_dir / "livepreview.json"
+
+        device = normalize_device(cfg.device)
+        auto_ddp = (device == "cuda" and torch.cuda.device_count() > 1)
+        ddp_enabled = auto_ddp if cfg.ddp_enabled is None else bool(cfg.ddp_enabled)
+        if device != "cuda":
+            ddp_enabled = False
+
+        nproc = int(cfg.nproc_per_node or (torch.cuda.device_count() if ddp_enabled else 1))
+        nproc = max(1, nproc)
+        if device == "cuda" and torch.cuda.device_count() > 0:
+            nproc = min(nproc, torch.cuda.device_count())
+        if not ddp_enabled:
+            nproc = 1
+
+        worker_cfg = model_to_dict(
+            cfg,
+            exclude={
+                "save_dir",
+                "ddp_enabled",
+                "nproc_per_node",
+                "nnodes",
+                "node_rank",
+                "master_addr",
+                "master_port",
+                "find_unused_parameters",
+            },
         )
 
-        # Wichtig: Bei dieser Torch-Version darf device_id kein int sein.
-        # Entweder torch.device oder weglassen. Wir geben für CUDA korrekt torch.device mit.
-        if device.type == "cuda":
-            try:
-                dist.init_process_group(**init_kwargs, device_id=device)
-            except TypeError:
-                dist.init_process_group(**init_kwargs)
+        worker_cfg["device"] = device
+        worker_cfg["output_dir"] = str(run_dir)
+        worker_cfg["save_dir"] = str(run_dir)
+        worker_cfg["ddp_find_unused_parameters"] = self._resolve_find_unused(cfg, ddp_enabled, nproc, device)
+
+        if bool(worker_cfg.get("gradient_checkpointing")) and worker_cfg["ddp_find_unused_parameters"]:
+            worker_cfg["ddp_static_graph"] = False
+
+        cfg_path = run_dir / "worker_config.json"
+        atomic_write_json(cfg_path, worker_cfg)
+        atomic_write_json(
+            run_dir / "train_config.json",
+            {
+                **model_to_dict(cfg),
+                "device": device,
+                "output_dir": str(run_dir),
+                "effective_world_size": nproc,
+                "effective_ddp_enabled": bool(ddp_enabled and nproc > 1),
+                "effective_ddp_find_unused_parameters": worker_cfg["ddp_find_unused_parameters"],
+            },
+        )
+
+        if ddp_enabled and nproc > 1:
+            cmd = [
+                sys.executable,
+                "-m",
+                "torch.distributed.run",
+                "--nproc_per_node",
+                str(nproc),
+                "--nnodes",
+                str(max(1, int(cfg.nnodes))),
+                "--node_rank",
+                str(max(0, int(cfg.node_rank))),
+                "--master_addr",
+                str(cfg.master_addr),
+                "--master_port",
+                str(int(cfg.master_port)),
+                str(WORKER_PATH),
+                "--config",
+                str(cfg_path),
+            ]
         else:
-            dist.init_process_group(**init_kwargs)
+            cmd = [sys.executable, str(WORKER_PATH), "--config", str(cfg_path)]
 
-    return ctx
+        env = os.environ.copy()
+        env["PYTHONUNBUFFERED"] = "1"
+        env["TOKENIZERS_PARALLELISM"] = "false"
+        env.pop("NCCL_ASYNC_ERROR_HANDLING", None)
+        env["TORCH_NCCL_ASYNC_ERROR_HANDLING"] = "1"
+        env.setdefault("TORCH_DISTRIBUTED_DEBUG", "DETAIL")
 
-
-def cleanup_dist() -> None:
-    if dist.is_available() and dist.is_initialized():
         try:
-            dist.destroy_process_group()
-        except Exception:
-            pass
+            proc = subprocess.Popen(
+                cmd,
+                cwd=str(BASE_DIR),
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                stdin=subprocess.DEVNULL,
+                text=True,
+                bufsize=1,
+                universal_newlines=True,
+                start_new_session=(os.name != "nt"),
+            )
+        except Exception as exc:
+            return {"running": False, "error": f"Subprocess-Start fehlgeschlagen: {exc}"}
 
+        with self.lock:
+            self.proc = proc
+            self.runtime_state_path = runtime_state_path
+            self.status_state_path = status_state_path
+            self.livepreview_path = livepreview_path
+            self.run_dir = run_dir
+            self.stop_requested = False
 
-def barrier(ctx: DistContext) -> None:
-    if ctx.is_distributed and dist.is_initialized():
-        if ctx.device.type == "cuda":
-            try:
-                dist.barrier(device_ids=[ctx.local_rank])
-                return
-            except Exception:
-                pass
-        dist.barrier()
+        with self.state.lock:
+            self.state.running = True
+            self.state.step = 0
+            self.state.loss = None
+            self.state.learning_rate = None
+            self.state.eta = ""
+            self.state.tokens_per_step = None
+            self.state.total_tokens = 0
+            self.state.last_preview = ""
+            self.state.last_preview_full = ""
+            self.state.save_dir = str(run_dir)
+            self.state.active_config = worker_cfg
+            self.state.status_text = "starting"
+            self.state.error = None
+            self.state.world_size = nproc
+            self.state.exit_code = None
+            self.state.log.clear()
+            self.state.log.set_file(run_dir / "training.log")
+            self.state.log.append("Training gestartet.")
+            self.state.log.append("Command: " + " ".join(cmd))
+            self.state.log.append(
+                f"DDP effective: enabled={bool(ddp_enabled and nproc > 1)} "
+                f"world_size={nproc} "
+                f"find_unused_parameters={worker_cfg['ddp_find_unused_parameters']}"
+            )
 
+        self.stdout_thread = threading.Thread(target=self._stdout_pump, args=(proc,), daemon=True)
+        self.wait_thread = threading.Thread(target=self._wait_pump, args=(proc,), daemon=True)
+        self.stdout_thread.start()
+        self.wait_thread.start()
 
-def all_reduce_mean(value: float, ctx: DistContext) -> float:
-    if not ctx.is_distributed:
-        return float(value)
-    t = torch.tensor(float(value), device=ctx.device, dtype=torch.float64)
-    dist.all_reduce(t, op=dist.ReduceOp.SUM)
-    t /= ctx.world_size
-    return float(t.item())
-
-
-def sync_stop(local_stop: bool, ctx: DistContext) -> bool:
-    if not ctx.is_distributed:
-        return local_stop
-    t = torch.tensor([1 if local_stop else 0], device=ctx.device, dtype=torch.int32)
-    dist.all_reduce(t, op=dist.ReduceOp.MAX)
-    return bool(t.item())
-
-
-def unwrap_model(model: nn.Module) -> nn.Module:
-    return model.module if isinstance(model, DDP) else model
-
-
-# ---------------------------------------------------------------------------
-# Logging / status files
-# ---------------------------------------------------------------------------
-
-class JsonStatusWriter:
-    def __init__(self, path: Path, ctx: DistContext):
-        self.path = path
-        self.ctx = ctx
-
-    def write(self, payload: Dict[str, Any]) -> None:
-        if not self.ctx.is_main:
-            return
-        tmp = self.path.with_suffix(".tmp")
-        tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-        tmp.replace(self.path)
-
-
-class JsonPreviewWriter:
-    def __init__(self, path: Path, ctx: DistContext):
-        self.path = path
-        self.ctx = ctx
-
-    def write(self, preview: str, preview_full: Optional[str] = None) -> None:
-        if not self.ctx.is_main:
-            return
-        payload = {
-            "preview": (preview or "")[:4000],
-            "preview_full": (preview_full if preview_full is not None else preview or "")[:20000],
+        return {
+            "running": True,
+            "msg": f"Training gestartet ({'DDP' if ddp_enabled and nproc > 1 else 'Single'} | world_size={nproc})",
+            "save_dir": str(run_dir),
+            "world_size": nproc,
+            "ddp_enabled": bool(ddp_enabled and nproc > 1),
+            "ddp_find_unused_parameters": worker_cfg["ddp_find_unused_parameters"],
         }
-        tmp = self.path.with_suffix(".tmp")
-        tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-        tmp.replace(self.path)
+
+    def _stdout_pump(self, proc: subprocess.Popen) -> None:
+        try:
+            if proc.stdout is None:
+                return
+            for line in proc.stdout:
+                if line is None:
+                    break
+                stripped = line.rstrip("\n")
+                if stripped:
+                    self.state.log.append(stripped)
+                self._refresh_from_runtime_file()
+        except Exception as exc:
+            self.state.log.append(f"[LOG-PUMP ERROR] {exc}")
+
+    def _wait_pump(self, proc: subprocess.Popen) -> None:
+        try:
+            code = proc.wait()
+        except Exception as exc:
+            self.state.log.append(f"[WAIT ERROR] {exc}")
+            code = -1
+
+        self._refresh_from_runtime_file()
+
+        with self.state.lock:
+            self.state.running = False
+            self.state.exit_code = int(code)
+            if self.stop_requested and self.state.status_text not in {"error", "finished"}:
+                self.state.status_text = "stopped"
+            elif code == 0 and self.state.status_text not in {"error", "stopped"}:
+                self.state.status_text = "finished"
+            elif code != 0 and not self.state.error:
+                self.state.error = f"Worker beendet mit Exit-Code {code}"
+                self.state.status_text = "error"
+
+        self.state.log.append(f"Training beendet (exit_code={code}).")
+
+    def stop(self) -> Dict[str, Any]:
+        with self.lock:
+            proc = self.proc
+            self.stop_requested = True
+
+        if proc is None or proc.poll() is not None:
+            with self.state.lock:
+                self.state.running = False
+                self.state.status_text = "idle"
+            return {"msg": "Kein laufendes Training gefunden."}
+
+        with self.state.lock:
+            self.state.eta = "stopping"
+            self.state.status_text = "stopping"
+
+        self.state.log.append("Stop-Signal gesetzt. Beende Trainingsprozess …")
+
+        try:
+            if os.name != "nt":
+                os.killpg(proc.pid, signal.SIGTERM)
+            else:
+                proc.terminate()
+        except Exception as exc:
+            self.state.log.append(f"[STOP WARN] {exc}")
+
+        def _kill_later(p: subprocess.Popen):
+            try:
+                p.wait(timeout=20)
+            except Exception:
+                try:
+                    if os.name != "nt":
+                        os.killpg(p.pid, signal.SIGKILL)
+                    else:
+                        p.kill()
+                except Exception:
+                    pass
+
+        threading.Thread(target=_kill_later, args=(proc,), daemon=True).start()
+        return {"msg": "Stop-Signal gesendet."}
+
+    def status(self) -> Dict[str, Any]:
+        self._refresh_from_runtime_file()
+        if self.proc is not None and self.proc.poll() is not None:
+            with self.state.lock:
+                self.state.running = False
+        return self.state.snapshot()
+
+    def livepreview(self) -> Dict[str, Any]:
+        self._refresh_from_runtime_file()
+        with self.state.lock:
+            return {"preview": self.state.last_preview, "preview_full": self.state.last_preview_full}
 
 
-def setup_logging(log_path: Path, ctx: DistContext) -> None:
-    LOGGER.handlers.clear()
-    LOGGER.setLevel(logging.INFO)
-    LOGGER.propagate = False
-
-    formatter = logging.Formatter(
-        fmt="%(asctime)s | %(levelname)s | rank=%(rank)s | %(message)s",
-        datefmt="%Y-%m-%d %H:%M:%S",
-    )
-
-    class RankFilter(logging.Filter):
-        def filter(self, record: logging.LogRecord) -> bool:
-            record.rank = ctx.rank
-            return True
-
-    fh = logging.FileHandler(log_path, encoding="utf-8")
-    fh.setFormatter(formatter)
-    fh.addFilter(RankFilter())
-    fh.setLevel(logging.INFO)
-    LOGGER.addHandler(fh)
-
-    sh = logging.StreamHandler(sys.stdout)
-    sh.setFormatter(formatter)
-    sh.addFilter(RankFilter())
-    sh.setLevel(logging.INFO if ctx.is_main else logging.ERROR)
-    LOGGER.addHandler(sh)
+TRAIN_MANAGER = DDPTrainingManager(TRAIN_STATE)
 
 
-# ---------------------------------------------------------------------------
-# Tokenizer / dataset helpers
-# ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------
+# Inference / Chat
+# ---------------------------------------------------------------------
 
-def normalize_id(val: Any) -> str:
-    if val is None:
-        return ""
-    s = str(val).strip()
-    if s.endswith(".0"):
-        s = s[:-2]
-    return s
-
-
-def prepare_tokenizer(tokenizer) -> bool:
+def prepare_tokenizer_for_matelix(tokenizer) -> bool:
     need_resize = False
     if tokenizer.pad_token_id is None:
         tokenizer.add_special_tokens({"pad_token": "<|pad|>"})
         need_resize = True
-
     added = tokenizer.add_tokens(["<|System|>", "<|Benutzer|>", "<|Assistentin|>"], special_tokens=False)
     if added > 0:
         need_resize = True
-
     tokenizer.padding_side = "left"
     if not getattr(tokenizer, "chat_template", None):
         tokenizer.chat_template = """{{ bos_token }}
@@ -409,829 +782,763 @@ def prepare_tokenizer(tokenizer) -> bool:
     return need_resize
 
 
-def column_iter(csv_path: str, column_name: str) -> Iterator[str]:
-    with open(csv_path, "r", encoding="utf-8") as f:
-        reader = csv.DictReader(f)
-        for row in reader:
-            txt = (row.get(column_name) or "").strip()
-            if txt:
-                yield txt
+def unload_torch_objects(*objs: Any) -> None:
+    for obj in objs:
+        try:
+            if hasattr(obj, "to"):
+                try:
+                    obj.to(torch.device("cpu"))
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        try:
+            del obj
+        except Exception:
+            pass
+    gc.collect()
+    try:
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            try:
+                torch.cuda.ipc_collect()
+            except Exception:
+                pass
+    except Exception:
+        pass
+    try:
+        if getattr(torch.backends, "mps", None) and torch.backends.mps.is_available():
+            torch.mps.empty_cache()
+    except Exception:
+        pass
 
 
-def chat_block_iter(csv_path: str, shuffle_threads: bool = False) -> Iterator[Tuple[str, str]]:
-    with open(csv_path, "r", encoding="utf-8") as f:
-        reader = csv.DictReader(f)
-        rows: List[Dict[str, Any]] = []
-        for idx, row in enumerate(reader):
-            row["_rowidx"] = idx
-            row["id"] = normalize_id(row.get("id", ""))
-            row["parent_id"] = normalize_id(row.get("parent_id", ""))
-            rows.append(row)
+class InferenceSession:
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.loaded_dir: Optional[str] = None
+        self.device: Optional[torch.device] = None
+        self.tokenizer = None
+        self.model = None
 
-    id2row = {r["id"]: r for r in rows if r.get("id")}
-    candidates = [r for r in rows if (r.get("Assistentin") or "").strip() and r.get("id")]
-    if not candidates:
-        return
 
-    from functools import lru_cache
+INFER = InferenceSession()
 
-    @lru_cache(maxsize=None)
-    def root_and_depth(rid: str) -> Tuple[str, int]:
-        depth = 0
-        cur = id2row.get(rid)
-        if not cur:
-            return ("", 0)
-        while True:
-            pid = cur.get("parent_id", "")
-            if not pid or pid not in id2row:
-                return (cur["id"], depth)
-            cur = id2row[pid]
-            depth += 1
 
-    threads: Dict[str, List[Tuple[int, int, Dict[str, Any]]]] = {}
-    for r in candidates:
-        root_id, depth = root_and_depth(r.get("id", ""))
-        threads.setdefault(root_id, []).append((depth, int(r["_rowidx"]), r))
+class ChatRequest(MatelixBaseModel):
+    model_dir: Optional[str] = None
+    device: Optional[str] = None
+    system: Optional[str] = None
+    messages: List[Dict[str, Any]] = Field(default_factory=list)
+    max_new_tokens: int = 256
+    temperature: float = 0.7
+    top_p: float = 0.9
+    top_k: int = 50
+    repetition_penalty: float = 1.05
+    do_sample: bool = True
 
-    order = list(threads.keys())
-    if shuffle_threads:
-        random.shuffle(order)
 
-    for root_id in order:
-        items = sorted(threads[root_id], key=lambda x: (x[0], x[1]))
-        for _, _, target in items:
-            chain: List[Dict[str, Any]] = []
-            cur = target
-            seen = set()
-            while cur.get("id") and cur["id"] not in seen:
-                seen.add(cur["id"])
-                chain.append(cur)
-                pid = cur.get("parent_id", "")
-                if pid and pid in id2row:
-                    cur = id2row[pid]
-                else:
-                    break
-            chain.reverse()
-            if not chain:
+def _preferred_device_name(req: Optional[str] = None) -> str:
+    return normalize_device(req or "auto")
+
+
+def _get_device(name: str) -> torch.device:
+    if name == "cuda" and torch.cuda.is_available():
+        return torch.device("cuda")
+    if name == "mps" and getattr(torch.backends, "mps", None) and torch.backends.mps.is_available():
+        return torch.device("mps")
+    return torch.device("cpu")
+
+
+def unload_inference() -> Dict[str, Any]:
+    with INFER.lock:
+        unload_torch_objects(INFER.model, INFER.tokenizer)
+        INFER.loaded_dir = None
+        INFER.device = None
+        INFER.tokenizer = None
+        INFER.model = None
+    return {"msg": "Inferenz-Modell entladen."}
+
+
+def load_inference_model(model_dir: str, device_name: str = "auto") -> Dict[str, Any]:
+    from transformers import AutoModelForCausalLM, AutoTokenizer
+
+    dev_name = _preferred_device_name(device_name)
+    dev = _get_device(dev_name)
+
+    with INFER.lock:
+        if INFER.loaded_dir and (INFER.loaded_dir != model_dir or (INFER.device and INFER.device.type != dev.type)):
+            unload_inference()
+
+        tok = AutoTokenizer.from_pretrained(model_dir, trust_remote_code=False)
+        need_resize = prepare_tokenizer_for_matelix(tok)
+        dtype = torch.float16 if dev.type == "cuda" else None
+
+        mdl = AutoModelForCausalLM.from_pretrained(
+            model_dir,
+            trust_remote_code=False,
+            torch_dtype=dtype,
+            low_cpu_mem_usage=True,
+        )
+        if need_resize and hasattr(mdl, "resize_token_embeddings"):
+            mdl.resize_token_embeddings(len(tok))
+        if dev.type == "mps":
+            mdl = mdl.to(torch.float32)
+        if hasattr(mdl, "config"):
+            mdl.config.use_cache = True
+        mdl.to(dev)
+        mdl.eval()
+
+        INFER.loaded_dir = model_dir
+        INFER.device = dev
+        INFER.tokenizer = tok
+        INFER.model = mdl
+
+    return {"msg": f"Modell geladen: {model_dir} auf {dev.type.upper()}"}
+
+
+def ensure_model_loaded(model_dir: Optional[str], device_name: Optional[str]):
+    mdl_dir = model_dir or INFER.loaded_dir
+    if not mdl_dir:
+        raise RuntimeError("Kein Inferenz-Modell geladen. Nutze /load_inference oder gib model_dir an.")
+    dev_name = _preferred_device_name(device_name or (INFER.device.type if INFER.device else "auto"))
+    target_dev = _get_device(dev_name)
+    if INFER.loaded_dir != mdl_dir or (INFER.device and INFER.device.type != target_dev.type):
+        load_inference_model(mdl_dir, dev_name)
+    with INFER.lock:
+        return mdl_dir, INFER.tokenizer, INFER.model, INFER.device
+
+
+def prepare_inputs(tokenizer, messages: List[Dict[str, Any]], system: Optional[str], device: torch.device):
+    msgs = list(messages or [])
+    if msgs and isinstance(msgs[-1], dict):
+        if msgs[-1].get("role") == "assistant" and not (msgs[-1].get("content") or "").strip():
+            msgs = msgs[:-1]
+
+    if system and system.strip():
+        msgs = [{"role": "system", "content": system.strip()}] + msgs
+
+    if hasattr(tokenizer, "apply_chat_template"):
+        enc = tokenizer.apply_chat_template(msgs, tokenize=True, add_generation_prompt=True, return_tensors="pt")
+    else:
+        parts = []
+        for m in msgs:
+            role = (m.get("role") or "").strip().lower()
+            content = (m.get("content") or "").strip()
+            if not content:
                 continue
+            if role == "system":
+                parts.append("<|System|>\n" + content + "\n</s>\n")
+            elif role == "user":
+                parts.append("<|Benutzer|>\n" + content + "\n</s>\n")
+            elif role == "assistant":
+                parts.append("<|Assistentin|>\n" + content + "\n</s>\n")
+        parts.append("<|Assistentin|>\n")
+        enc = tokenizer("".join(parts), return_tensors="pt", add_special_tokens=False)
 
-            target_idx = len(chain) - 1
-            answer = (chain[target_idx].get("Assistentin") or "").strip()
-            if not answer:
-                continue
+    pad_id = tokenizer.pad_token_id
+    if pad_id is None or pad_id == tokenizer.eos_token_id:
+        pad_id = tokenizer.unk_token_id if tokenizer.unk_token_id is not None else (tokenizer.eos_token_id or 0)
+    eos_id = tokenizer.eos_token_id or tokenizer.convert_tokens_to_ids("</s>") or pad_id
 
-            system_text = (chain[0].get("system") or "").strip()
-            parts: List[str] = ["<s>\n"]
-            if system_text:
-                parts.extend(["<|System|>\n", system_text, "\n"])
+    if isinstance(enc, dict) or hasattr(enc, "input_ids"):
+        input_ids = enc["input_ids"]
+        attention_mask = enc["attention_mask"] if "attention_mask" in enc else (input_ids != pad_id).long()
+    else:
+        input_ids = enc
+        attention_mask = (input_ids != pad_id).long()
 
-            for j in range(target_idx + 1):
-                turn = chain[j]
-                user = (turn.get("Benutzer") or "").strip()
-                ctx = (turn.get("Kontext") or "").strip()
-                asst = (turn.get("Assistentin") or "").strip()
+    if input_ids.dim() == 1:
+        input_ids = input_ids.unsqueeze(0)
+        attention_mask = attention_mask.unsqueeze(0)
 
-                if user:
-                    parts.append("<|Benutzer|>\n")
-                    parts.append(f"{ctx}\n{user}".strip() if ctx else user)
-                    parts.append("\n")
-
-                if j < target_idx and asst:
-                    parts.append("<|Assistentin|>\n")
-                    parts.append(asst)
-                    parts.append("\n")
-                elif j == target_idx:
-                    parts.append("<|Assistentin|>\n")
-
-            yield "".join(parts), answer + "\n</s>"
+    return input_ids.to(device), attention_mask.to(device), int(pad_id), int(eos_id)
 
 
-def dialogplus_block_iter(csv_path: str, shuffle_threads: bool = False) -> Iterator[Tuple[str, str]]:
-    with open(csv_path, "r", encoding="utf-8") as f:
-        reader = csv.DictReader(f)
-        rows: List[Dict[str, Any]] = []
-        for idx, row in enumerate(reader):
-            row["_rowidx"] = idx
-            row["id"] = normalize_id(row.get("id", ""))
-            row["parent_id"] = normalize_id(row.get("parent_id", ""))
-            rows.append(row)
-
-    id2row = {r["id"]: r for r in rows if r.get("id")}
-    candidates = [r for r in rows if (r.get("Assistentin") or "").strip() and r.get("id")]
-    if not candidates:
-        return
-
-    from functools import lru_cache
-
-    @lru_cache(maxsize=None)
-    def root_and_depth(rid: str) -> Tuple[str, int]:
-        depth = 0
-        cur = id2row.get(rid)
-        if not cur:
-            return ("", 0)
-        while True:
-            pid = cur.get("parent_id", "")
-            if not pid or pid not in id2row:
-                return (cur["id"], depth)
-            cur = id2row[pid]
-            depth += 1
-
-    threads: Dict[str, List[Tuple[int, int, Dict[str, Any]]]] = {}
-    for r in candidates:
-        root_id, depth = root_and_depth(r.get("id", ""))
-        threads.setdefault(root_id, []).append((depth, int(r["_rowidx"]), r))
-
-    order = list(threads.keys())
-    if shuffle_threads:
-        random.shuffle(order)
-
-    for root_id in order:
-        items = sorted(threads[root_id], key=lambda x: (x[0], x[1]))
-        for _, _, target in items:
-            chain: List[Dict[str, Any]] = []
-            cur = target
-            seen = set()
-            while cur.get("id") and cur["id"] not in seen:
-                seen.add(cur["id"])
-                chain.append(cur)
-                pid = cur.get("parent_id", "")
-                if pid and pid in id2row:
-                    cur = id2row[pid]
-                else:
-                    break
-            chain.reverse()
-            if not chain:
-                continue
-
-            target_idx = len(chain) - 1
-            answer = (chain[target_idx].get("Assistentin") or "").strip()
-            if not answer:
-                continue
-
-            system_text = (chain[0].get("system") or "").strip()
-            parts: List[str] = []
-            if system_text:
-                parts.extend(["<|System|>\n", system_text, "\n</s>"])
-
-            for j in range(target_idx + 1):
-                turn = chain[j]
-                user = (turn.get("Benutzer") or "").strip()
-                ctx = (turn.get("Kontext") or "").strip()
-                asst = (turn.get("Assistentin") or "").strip()
-
-                if user:
-                    parts.append("\n<|Benutzer|>\n")
-                    parts.append(f"{ctx}\n{user}".strip() if ctx else user)
-                    parts.append("\n</s>")
-
-                if j < target_idx and asst:
-                    parts.append("\n<|Assistentin|>\n")
-                    parts.append(asst)
-                    parts.append("\n</s>")
-                elif j == target_idx:
-                    parts.append("\n<|Assistentin|>\n")
-
-            yield "".join(parts), answer + "\n</s>"
+def _prepare_inputs(tokenizer, messages: List[Dict[str, Any]], system: Optional[str], device: torch.device):
+    return prepare_inputs(tokenizer, messages, system, device)
 
 
+def sanitize_sampling_args(
+    *,
+    max_new_tokens: int,
+    temperature: Optional[float],
+    top_p: Optional[float],
+    top_k: Optional[int],
+    repetition_penalty: Optional[float],
+    do_sample: Optional[bool],
+    pad_id: int,
+    eos_id: int,
+):
+    t = 0.0 if temperature is None else float(temperature)
+    p = 1.0 if top_p is None else float(top_p)
+    k = 50 if top_k is None else int(top_k)
+    rp = 1.05 if repetition_penalty is None else float(repetition_penalty)
 
-def _find_last_subsequence(haystack: List[int], needle: List[int]) -> int:
-    if not haystack or not needle or len(needle) > len(haystack):
-        return -1
-    n = len(needle)
-    for i in range(len(haystack) - n, -1, -1):
-        if haystack[i:i+n] == needle:
-            return i
-    return -1
-
-
-def _find_first_subsequence(haystack: List[int], needle: List[int]) -> int:
-    if not haystack or not needle or len(needle) > len(haystack):
-        return -1
-    n = len(needle)
-    for i in range(0, len(haystack) - n + 1):
-        if haystack[i:i+n] == needle:
-            return i
-    return -1
-
-
-def _trim_window_to_turn_boundary(
-    token_ids: List[int],
-    max_len: int,
-    turn_markers: List[List[int]],
-) -> List[int]:
-    """
-    Nimmt immer das rechte Ende des Fensters und versucht den linken Rand
-    auf eine Turn-Grenze (<|System|>, <|Benutzer|>, <|Assistentin|>) zu legen.
-    Wenn keine Grenze im Fenster gefunden wird, bleibt das rechte Fenster erhalten.
-    """
-    if len(token_ids) <= max_len:
-        return token_ids
-
-    window = token_ids[-max_len:]
-    best_start = 0
-    for marker_ids in turn_markers:
-        pos = _find_first_subsequence(window, marker_ids)
-        if pos != -1:
-            best_start = max(best_start, pos)
-    trimmed = window[best_start:]
-    return trimmed if trimmed else window
-
-
-class CausalLMDataset(Dataset):
-    def __init__(self, examples: Sequence[Tuple[str, str] | str], tokenizer, max_seq_length: int, template_mode: str, sort_by_length: bool):
-        self.tokenizer = tokenizer
-        self.max_seq_length = int(max_seq_length)
-        self.template_mode = template_mode
-        self.samples: List[Any] = list(examples)
-
-        # Turn-Marker für sauberes Ausrichten auf Dialoggrenzen
-        self.system_marker_ids = tokenizer("<|System|>\n", add_special_tokens=False)["input_ids"]
-        self.user_marker_ids = tokenizer("<|Benutzer|>\n", add_special_tokens=False)["input_ids"]
-        self.assistant_marker_ids = tokenizer("<|Assistentin|>\n", add_special_tokens=False)["input_ids"]
-        self.turn_markers = [
-            self.system_marker_ids,
-            self.user_marker_ids,
-            self.assistant_marker_ids,
-        ]
-
-        if sort_by_length:
-            def _len_fn(x: Any) -> int:
-                if isinstance(x, tuple):
-                    p, a = x
-                    return len(tokenizer(p + a, add_special_tokens=False)["input_ids"])
-                return len(tokenizer(x, add_special_tokens=False)["input_ids"])
-            self.samples.sort(key=_len_fn)
-
-    def __len__(self) -> int:
-        return len(self.samples)
-
-    def _truncate_dialog_sample(self, prompt_ids: List[int], answer_ids: List[int]) -> Tuple[List[int], List[int]]:
-        """
-        Zielregeln:
-        - Links darf abgeschnitten werden.
-        - Das Ende der Zielantwort soll immer erhalten bleiben.
-        - Wenn die komplette Antwort nicht in max_seq_length passt, wird sie als
-          eigener Assistentinnen-Turn behandelt und am linken Rand möglichst auf
-          eine Turn-Grenze ausgerichtet.
-        """
-        total = len(prompt_ids) + len(answer_ids)
-
-        # Fall 1: passt komplett
-        if total <= self.max_seq_length:
-            input_ids = prompt_ids + answer_ids
-            labels = ([-100] * len(prompt_ids)) + answer_ids
-            return input_ids, labels
-
-        # Fall 2: komplette Antwort passt, also nur Prompt links kürzen
-        if len(answer_ids) <= self.max_seq_length:
-            keep_prompt = max(0, self.max_seq_length - len(answer_ids))
-            trimmed_prompt = prompt_ids[-keep_prompt:] if keep_prompt > 0 else []
-            trimmed_prompt = _trim_window_to_turn_boundary(trimmed_prompt, len(trimmed_prompt), self.turn_markers)
-            input_ids = trimmed_prompt + answer_ids
-            labels = ([-100] * len(trimmed_prompt)) + answer_ids
-            return input_ids[-self.max_seq_length:], labels[-self.max_seq_length:]
-
-        # Fall 3: selbst die Antwort ist länger als max_seq_length.
-        # Dann NICHT mitten im gesamten Dialog schneiden, sondern die Antwort als
-        # eigenen Turn behandeln: <|Assistentin|>\n + Antworttail.
-        assistant_turn = list(self.assistant_marker_ids) + list(answer_ids)
-        assistant_turn = _trim_window_to_turn_boundary(assistant_turn, self.max_seq_length, self.turn_markers)
-
-        # Marker innerhalb des finalen Fensters suchen, damit der Turn sauber beginnt
-        marker_pos = _find_first_subsequence(assistant_turn, self.assistant_marker_ids)
-        if marker_pos == -1:
-            # Falls der Marker nicht mehr vollständig im Fenster liegt, erzwingen wir
-            # einen minimal sauberen Turn-Start.
-            tail_budget = max(0, self.max_seq_length - len(self.assistant_marker_ids))
-            answer_tail = answer_ids[-tail_budget:] if tail_budget > 0 else []
-            assistant_turn = list(self.assistant_marker_ids) + answer_tail
-            marker_pos = 0
-
-        answer_start = marker_pos + len(self.assistant_marker_ids)
-        input_ids = assistant_turn[-self.max_seq_length:]
-        labels = ([-100] * answer_start) + input_ids[answer_start:]
-        labels = labels[-len(input_ids):]
-        return input_ids, labels
-
-    def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
-        item = self.samples[idx]
-
-        if isinstance(item, tuple):
-            prompt, answer = item
-            prompt_ids = self.tokenizer(prompt, add_special_tokens=False)["input_ids"]
-            answer_ids = self.tokenizer(answer, add_special_tokens=False)["input_ids"]
-            input_ids, labels = self._truncate_dialog_sample(prompt_ids, answer_ids)
-        else:
-            ids = self.tokenizer(item, add_special_tokens=False)["input_ids"]
-            ids = ids[-self.max_seq_length:]
-            ids = _trim_window_to_turn_boundary(ids, self.max_seq_length, self.turn_markers)
-            input_ids = ids
-            labels = ids.copy()
-
-        if len(input_ids) < 2:
-            eos_or_pad = self.tokenizer.eos_token_id or self.tokenizer.pad_token_id or 0
-            input_ids = input_ids + [eos_or_pad]
-            labels = labels + [eos_or_pad]
-
-        attention_mask = [1] * len(input_ids)
-        return {
-            "input_ids": torch.tensor(input_ids, dtype=torch.long),
-            "attention_mask": torch.tensor(attention_mask, dtype=torch.long),
-            "labels": torch.tensor(labels, dtype=torch.long),
+    if t <= 0.0:
+        safe = {
+            "max_new_tokens": max(1, int(max_new_tokens)),
+            "temperature": 0.0,
+            "top_p": 1.0,
+            "top_k": 0,
+            "repetition_penalty": max(0.01, rp),
+            "do_sample": False,
+            "pad_token_id": pad_id,
+            "eos_token_id": eos_id,
+        }
+    else:
+        p = 1.0 if not (0.0 < p <= 1.0) else p
+        k = 0 if k < 0 else k
+        safe = {
+            "max_new_tokens": max(1, int(max_new_tokens)),
+            "temperature": max(1e-5, t),
+            "top_p": p,
+            "top_k": k,
+            "repetition_penalty": max(0.01, rp),
+            "do_sample": True if do_sample is None else bool(do_sample),
+            "pad_token_id": pad_id,
+            "eos_token_id": eos_id,
         }
 
+    from transformers import LogitsProcessorList
 
-class DataCollator:
-    def __init__(self, pad_token_id: int, pad_to_multiple_of: int = 8):
-        self.pad_token_id = int(pad_token_id)
-        self.pad_to_multiple_of = int(pad_to_multiple_of)
+    class SafeLogitsProcessor:
+        def __call__(self, input_ids, scores):
+            if not torch.isfinite(scores).all():
+                scores = scores.clone()
+                scores[~torch.isfinite(scores)] = -1e9
+            return torch.clamp(scores, min=-1e9, max=1e9)
 
-    def __call__(self, features: Sequence[Dict[str, torch.Tensor]]) -> Dict[str, torch.Tensor]:
-        max_len = max(int(x["input_ids"].numel()) for x in features)
-        if self.pad_to_multiple_of > 1:
-            max_len = int(math.ceil(max_len / self.pad_to_multiple_of) * self.pad_to_multiple_of)
-
-        def _pad(x: torch.Tensor, value: int) -> torch.Tensor:
-            pad_len = max_len - int(x.numel())
-            if pad_len <= 0:
-                return x
-            return torch.nn.functional.pad(x, (0, pad_len), value=value)
-
-        return {
-            "input_ids": torch.stack([_pad(x["input_ids"], self.pad_token_id) for x in features], dim=0),
-            "attention_mask": torch.stack([_pad(x["attention_mask"], 0) for x in features], dim=0),
-            "labels": torch.stack([_pad(x["labels"], -100) for x in features], dim=0),
-        }
+    return safe, LogitsProcessorList([SafeLogitsProcessor()])
 
 
-def build_examples(cfg: TrainConfig) -> List[Any]:
-    if cfg.template_mode == "chat":
-        return list(chat_block_iter(cfg.csv_path, shuffle_threads=bool(cfg.shuffle)))
-    if cfg.template_mode == "dialogplus":
-        return list(dialogplus_block_iter(cfg.csv_path, shuffle_threads=bool(cfg.shuffle)))
-    return list(column_iter(cfg.csv_path, cfg.column_name))
+# ---------------------------------------------------------------------
+# API endpoints
+# ---------------------------------------------------------------------
+
+@app.get("/hardware")
+def api_hardware():
+    return get_hardware_info()
 
 
-# ---------------------------------------------------------------------------
-# Model / optimizer / scheduler
-# ---------------------------------------------------------------------------
-
-def pick_precision(cfg: TrainConfig, device: torch.device) -> Tuple[Optional[torch.dtype], bool, bool]:
-    want = (cfg.precision_mode or "auto").lower().strip()
-    if device.type != "cuda":
-        return None, False, False
-    if want == "fp32":
-        return None, False, False
-    if want == "bf16":
-        ok = torch.cuda.is_bf16_supported()
-        return (torch.bfloat16 if ok else None), False, ok
-    if want == "fp16":
-        return torch.float16, True, False
-    if torch.cuda.is_bf16_supported():
-        return torch.bfloat16, False, True
-    return torch.float16, True, False
+@app.get("/sysstatus")
+def api_sysstatus():
+    return get_system_status()
 
 
-def build_model_and_tokenizer(cfg: TrainConfig, ctx: DistContext):
-    tokenizer = AutoTokenizer.from_pretrained(cfg.model_dir, trust_remote_code=False, use_fast=True)
-    need_resize = prepare_tokenizer(tokenizer)
+@app.get("/available_models")
+def api_available_models():
+    if not TRAINING_OUT_DIR.exists():
+        return []
+    return sorted([p.name for p in TRAINING_OUT_DIR.iterdir() if p.is_dir()])
 
-    load_dtype, fp16, bf16 = pick_precision(cfg, ctx.device)
-    LOGGER.info("Precision: load_dtype=%s fp16=%s bf16=%s", load_dtype, fp16, bf16)
 
-    model = AutoModelForCausalLM.from_pretrained(
-        cfg.model_dir,
-        trust_remote_code=False,
-        torch_dtype=load_dtype,
-        low_cpu_mem_usage=True,
+@app.get("/available_datasets")
+def api_available_datasets():
+    if not DATASETS_DIR.exists():
+        return []
+    return sorted([p.name for p in DATASETS_DIR.iterdir() if p.is_file() and p.suffix.lower() == ".csv"])
+
+
+@app.get("/trainings")
+def api_trainings():
+    if not TRAINING_OUT_DIR.exists():
+        return []
+    trainings = []
+    for d in sorted(TRAINING_OUT_DIR.iterdir()):
+        if not d.is_dir():
+            continue
+        train_cfg = d / "train_config.json"
+        cfg_obj: Dict[str, Any] = {}
+        if train_cfg.exists():
+            try:
+                cfg_obj = json.loads(train_cfg.read_text(encoding="utf-8"))
+            except Exception:
+                cfg_obj = {}
+        trainings.append({"folder": d.name, "config": cfg_obj})
+    return trainings
+
+
+@app.post("/start")
+def api_start_training(cfg: WebTrainConfig):
+    res = TRAIN_MANAGER.start(cfg)
+    if not res.get("running"):
+        return JSONResponse(res, status_code=400)
+    return res
+
+
+@app.post("/stop")
+def api_stop_training():
+    return TRAIN_MANAGER.stop()
+
+
+@app.get("/status")
+def api_status():
+    return TRAIN_MANAGER.status()
+
+
+@app.get("/logs")
+def api_logs():
+    return {"log": TRAIN_STATE.log.tail(200)}
+
+
+@app.get("/livepreview")
+def api_livepreview():
+    return TRAIN_MANAGER.livepreview()
+
+
+@app.websocket("/ws/logs")
+async def ws_logs(websocket: WebSocket):
+    await websocket.accept()
+    cursor = TRAIN_STATE.log.last_id - 200
+    try:
+        while True:
+            lines, cursor = TRAIN_STATE.log.since(cursor)
+            if lines:
+                await websocket.send_text("\n".join(lines))
+            await asyncio.sleep(1.0)
+    except WebSocketDisconnect:
+        return
+
+
+@app.post("/load_inference")
+def api_load_inference(cfg: Dict[str, Any] | None = Body(default=None)):
+    cfg = cfg or {}
+    model_dir = cfg.get("model_dir") or TRAIN_MANAGER.status().get("save_dir") or cfg.get("fallback_model_dir")
+    if not model_dir:
+        return JSONResponse({"error": "model_dir fehlt."}, status_code=400)
+    try:
+        return JSONResponse(load_inference_model(model_dir, cfg.get("device") or "auto"), status_code=200)
+    except FileNotFoundError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=404)
+    except Exception as exc:
+        return JSONResponse({"error": f"{exc.__class__.__name__}: {exc}"}, status_code=500)
+
+
+@app.post("/unload_inference")
+def api_unload_inference():
+    return unload_inference()
+
+
+@app.post("/chat")
+def api_chat(req: ChatRequest):
+    try:
+        model_dir, tok, mdl, dev = ensure_model_loaded(req.model_dir, req.device)
+    except RuntimeError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+    except Exception as exc:
+        return JSONResponse({"error": f"{exc.__class__.__name__}: {exc}"}, status_code=500)
+
+    input_ids, attention_mask, pad_id, eos_id = prepare_inputs(tok, req.messages, req.system, dev)
+    gen_kwargs, logits_processor = sanitize_sampling_args(
+        max_new_tokens=req.max_new_tokens,
+        temperature=req.temperature,
+        top_p=req.top_p,
+        top_k=req.top_k,
+        repetition_penalty=req.repetition_penalty,
+        do_sample=req.do_sample,
+        pad_id=pad_id,
+        eos_id=eos_id,
     )
 
-    if need_resize or model.get_input_embeddings().weight.shape[0] != len(tokenizer):
-        model.resize_token_embeddings(len(tokenizer))
+    with torch.no_grad():
+        out = mdl.generate(
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            logits_processor=logits_processor,
+            num_beams=1,
+            num_return_sequences=1,
+            **gen_kwargs,
+        )
 
-    # Wichtig: für MPS/CPU stabil auf float32
-    if ctx.device.type in {"cpu", "mps"} or (cfg.precision_mode or "").lower() == "fp32":
-        model = model.to(torch.float32)
-
-    if hasattr(model, "config"):
-        model.config.use_cache = False
-
-    if cfg.gradient_checkpointing:
-        _enable_gradient_checkpointing(model, cfg, ctx)
-
-    model.to(ctx.device)
-    return model, tokenizer, fp16, bf16
+    seq = _extract_sequences(out)
+    generated = seq[0, input_ids.shape[-1]:]
+    text = tok.decode(generated, skip_special_tokens=True)
+    return {"model_dir": model_dir, "response": text.strip()}
 
 
-def _enable_gradient_checkpointing(model: nn.Module, cfg: TrainConfig, ctx: DistContext) -> None:
-    if not hasattr(model, "gradient_checkpointing_enable"):
-        LOGGER.info("Gradient Checkpointing nicht verfügbar.")
-        return
+@app.post("/chat_stream")
+def api_chat_stream(req: ChatRequest):
+    from transformers import TextIteratorStreamer
 
-    # h2o-artiger kompatibler Pfad: zuerst non-reentrant versuchen
-    enabled = False
     try:
-        model.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})
-        enabled = True
-        LOGGER.info("Gradient Checkpointing: ON (non-reentrant)")
-    except TypeError:
-        try:
-            model.gradient_checkpointing_enable()
-            enabled = True
-            LOGGER.info("Gradient Checkpointing: ON (legacy API)")
-        except Exception as e:
-            LOGGER.warning("Gradient Checkpointing konnte nicht aktiviert werden: %s", e)
+        model_dir, tok, mdl, dev = ensure_model_loaded(req.model_dir, req.device)
+    except RuntimeError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+    except Exception as exc:
+        return JSONResponse({"error": f"{exc.__class__.__name__}: {exc}"}, status_code=500)
 
-    if enabled and hasattr(model, "enable_input_require_grads"):
+    input_ids, attention_mask, pad_id, eos_id = prepare_inputs(tok, req.messages, req.system, dev)
+    gen_kwargs, logits_processor = sanitize_sampling_args(
+        max_new_tokens=req.max_new_tokens,
+        temperature=req.temperature,
+        top_p=req.top_p,
+        top_k=req.top_k,
+        repetition_penalty=req.repetition_penalty,
+        do_sample=req.do_sample,
+        pad_id=pad_id,
+        eos_id=eos_id,
+    )
+    streamer = TextIteratorStreamer(tok, skip_prompt=True, skip_special_tokens=True)
+
+    def _gen():
         try:
-            model.enable_input_require_grads()
+            with torch.no_grad():
+                mdl.generate(
+                    input_ids=input_ids,
+                    attention_mask=attention_mask,
+                    logits_processor=logits_processor,
+                    num_beams=1,
+                    num_return_sequences=1,
+                    streamer=streamer,
+                    **gen_kwargs,
+                )
         except Exception:
             pass
 
+    t = threading.Thread(target=_gen, daemon=True)
+    t.start()
 
-def build_optimizer(model: nn.Module, cfg: TrainConfig) -> torch.optim.Optimizer:
-    no_decay_terms = ("bias", "LayerNorm.weight", "layernorm.weight", "norm.weight", "ln_f.weight")
-    named_params = list(unwrap_model(model).named_parameters())
-    decay = [p for n, p in named_params if p.requires_grad and not any(x in n for x in no_decay_terms)]
-    no_decay = [p for n, p in named_params if p.requires_grad and any(x in n for x in no_decay_terms)]
+    def event_iter():
+        try:
+            for text in streamer:
+                yield text
+        except Exception:
+            return
 
-    return AdamW(
-        [
-            {"params": decay, "weight_decay": cfg.weight_decay},
-            {"params": no_decay, "weight_decay": 0.0},
-        ],
-        lr=cfg.learning_rate,
+    return StreamingResponse(event_iter(), media_type="text/plain; charset=utf-8")
+
+
+# ----------------------------
+# OpenAI-kompatible API (/v1/*)
+# ----------------------------
+
+def _auth_dependency(authorization: Optional[str] = Header(default=None)):
+    if OPENAI_COMPAT_API_KEY:
+        if not authorization or not authorization.lower().startswith("bearer "):
+            raise HTTPException(status_code=401, detail="Missing bearer token")
+        token = authorization.split(" ", 1)[1].strip()
+        if token != OPENAI_COMPAT_API_KEY:
+            raise HTTPException(status_code=401, detail="Invalid API key")
+    return True
+
+
+def _oai_error(message: str, status_code: int = 400, code: Optional[str] = None):
+    return JSONResponse(
+        status_code=status_code,
+        content={"error": {"message": message, "type": "invalid_request_error", "param": None, "code": code}},
     )
 
 
-def build_scheduler(optimizer: torch.optim.Optimizer, total_steps: int, schedule: str) -> LambdaLR:
-    schedule = (schedule or "cosine").lower().strip()
-
-    def _lambda(step: int) -> float:
-        if total_steps <= 0:
-            return 1.0
-        progress = min(1.0, max(0.0, step / max(1, total_steps)))
-        if schedule == "linear":
-            return 1.0 - progress
-        if schedule == "cosine":
-            return 0.5 * (1.0 + math.cos(math.pi * progress))
-        return 1.0
-
-    return LambdaLR(optimizer, _lambda)
+class OAIChatMessage(MatelixBaseModel):
+    role: str
+    content: str
 
 
-def wrap_ddp(model: nn.Module, cfg: TrainConfig, ctx: DistContext) -> nn.Module:
-    if not ctx.is_distributed:
-        return model
+class OAIChatRequest(MatelixBaseModel):
+    model: Optional[str] = None
+    messages: List[OAIChatMessage]
+    temperature: Optional[float] = 0.7
+    top_p: Optional[float] = 0.9
+    top_k: Optional[int] = 50
+    max_tokens: Optional[int] = 256
+    stream: Optional[bool] = False
+    stop: Optional[Union[str, List[str]]] = None
+    presence_penalty: Optional[float] = 0.0
+    frequency_penalty: Optional[float] = 0.0
+    repetition_penalty: Optional[float] = 1.05
+    do_sample: Optional[bool] = None
+    seed: Optional[int] = None
+    device: Optional[str] = None
+    user: Optional[str] = None
 
-    kwargs: Dict[str, Any] = {
-        "broadcast_buffers": cfg.ddp_broadcast_buffers,
-        "find_unused_parameters": cfg.ddp_find_unused_parameters,
+
+class OAICompletionRequest(MatelixBaseModel):
+    model: Optional[str] = None
+    prompt: Union[str, List[str]]
+    temperature: Optional[float] = 0.7
+    top_p: Optional[float] = 0.9
+    top_k: Optional[int] = 50
+    max_tokens: Optional[int] = 256
+    stream: Optional[bool] = False
+    stop: Optional[Union[str, List[str]]] = None
+    presence_penalty: Optional[float] = 0.0
+    frequency_penalty: Optional[float] = 0.0
+    repetition_penalty: Optional[float] = 1.05
+    do_sample: Optional[bool] = None
+    seed: Optional[int] = None
+    device: Optional[str] = None
+    user: Optional[str] = None
+
+
+def _extract_system(msgs: List[OAIChatMessage]) -> Optional[str]:
+    for m in msgs:
+        if m.role.strip().lower() == "system":
+            return m.content
+    return None
+
+
+def _messages_to_hf(msgs: List[OAIChatMessage]) -> List[Dict[str, str]]:
+    out = []
+    for m in msgs:
+        r = m.role.strip().lower()
+        if r in ("user", "assistant"):
+            out.append({"role": r, "content": m.content})
+    return out
+
+
+@app.get("/v1/models", dependencies=[Depends(_auth_dependency)])
+def oai_models():
+    local = api_available_models()
+    current = INFER.loaded_dir
+    models: List[str] = []
+    if current:
+        models.append(current)
+    for m in local:
+        path = str(TRAINING_OUT_DIR / m)
+        if path not in models:
+            models.append(path)
+    return {
+        "object": "list",
+        "data": [{"id": mid, "object": "model", "created": 0, "owned_by": "owner"} for mid in models],
     }
 
-    if "static_graph" in DDP.__init__.__code__.co_varnames:
-        kwargs["static_graph"] = cfg.ddp_static_graph
-    if "gradient_as_bucket_view" in DDP.__init__.__code__.co_varnames:
-        kwargs["gradient_as_bucket_view"] = True
 
-    if ctx.device.type == "cuda":
-        kwargs["device_ids"] = [ctx.local_rank]
-        kwargs["output_device"] = ctx.local_rank
-
-    LOGGER.info(
-        "DDP: find_unused_parameters=%s | broadcast_buffers=%s | static_graph=%s",
-        cfg.ddp_find_unused_parameters,
-        cfg.ddp_broadcast_buffers,
-        cfg.ddp_static_graph,
-    )
-    return DDP(model, **kwargs)
-
-
-# ---------------------------------------------------------------------------
-# Training
-# ---------------------------------------------------------------------------
-
-def move_batch(batch: Dict[str, torch.Tensor], device: torch.device) -> Dict[str, torch.Tensor]:
-    return {k: v.to(device, non_blocking=(device.type == "cuda")) for k, v in batch.items()}
-
-
-def format_eta(seconds: float) -> str:
-    seconds = max(0, int(seconds))
-    h = seconds // 3600
-    m = (seconds % 3600) // 60
-    s = seconds % 60
-    return f"{h:02d}:{m:02d}:{s:02d}"
-
-
-def make_scaler(fp16: bool, device: torch.device):
-    enabled = bool(device.type == "cuda" and fp16)
-    if _NEW_SCALER:
-        try:
-            return GradScaler("cuda", enabled=enabled)
-        except TypeError:
-            return GradScaler(enabled=enabled)
-    return GradScaler(enabled=enabled)
-
-
-def train_epoch(
-    model: nn.Module,
-    loader: DataLoader,
-    optimizer: torch.optim.Optimizer,
-    scheduler: Optional[LambdaLR],
-    scaler: Any,
-    cfg: TrainConfig,
-    ctx: DistContext,
-    epoch: int,
-    global_step: int,
-    total_steps: int,
-    train_start_time: float,
-    status_writer: JsonStatusWriter,
-    preview_writer: Optional[JsonPreviewWriter],
-    tokenizer,
-) -> Tuple[float, int, bool]:
-    model.train()
-
-    _, fp16, bf16 = pick_precision(cfg, ctx.device)
-    amp_dtype = torch.float16 if fp16 else (torch.bfloat16 if bf16 else None)
-    autocast_ctx = (
-        torch.autocast(device_type="cuda", dtype=amp_dtype)
-        if (ctx.device.type == "cuda" and amp_dtype is not None)
-        else nullcontext()
-    )
-
-    optimizer.zero_grad(set_to_none=True)
-
-    running_loss = 0.0
-    running_updates = 0
-    reached_max_steps = False
-
-    for batch_idx, batch in enumerate(loader):
-        if sync_stop(SHUTDOWN.stop, ctx):
-            break
-
-        batch = move_batch(batch, ctx.device)
-
-        if ctx.is_main and preview_writer is not None:
-            try:
-                input_ids_cpu = batch["input_ids"].detach().to("cpu")
-                texts = []
-                for ids in input_ids_cpu:
-                    txt = tokenizer.decode(ids.tolist(), skip_special_tokens=False)
-                    texts.append(txt)
-                preview_text = "\n\n---\n\n".join(texts)
-                preview_writer.write(preview_text[:4000], preview_text[:20000])
-            except Exception:
-                pass
-
-        try:
-            with autocast_ctx:
-                outputs = model(**batch)
-                loss = outputs.loss
-
-            if not torch.isfinite(loss):
-                raise FloatingPointError(f"Nicht-finite Loss erkannt: {float(loss.detach().item())}")
-
-            loss_to_backprop = loss / cfg.gradient_accumulation_steps
-
-            if scaler is not None and getattr(scaler, "is_enabled", lambda: False)():
-                scaler.scale(loss_to_backprop).backward()
-            else:
-                loss_to_backprop.backward()
-        except torch.OutOfMemoryError as oom:
-            try:
-                if ctx.device.type == "cuda":
-                    torch.cuda.empty_cache()
-            except Exception:
-                pass
-            raise RuntimeError(
-                f"CUDA OOM im Trainingsschritt. Das ist meist kein Leak, sondern ein Batch/Sequenz-Peak. "
-                f"Empfehlung: sort_by_length=False, kleinere max_seq_length oder kleinere per_device_train_batch_size. Original: {oom}"
-            )
-
-        should_step = (
-            ((batch_idx + 1) % cfg.gradient_accumulation_steps == 0)
-            or (batch_idx + 1 == len(loader))
-        )
-
-        if should_step:
-            if scaler is not None and getattr(scaler, "is_enabled", lambda: False)():
-                scaler.unscale_(optimizer)
-
-            grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), cfg.max_grad_norm)
-
-            if scaler is not None and getattr(scaler, "is_enabled", lambda: False)():
-                scaler.step(optimizer)
-                scaler.update()
-            else:
-                optimizer.step()
-
-            optimizer.zero_grad(set_to_none=True)
-            if scheduler is not None:
-                scheduler.step()
-
-            global_step += 1
-            running_updates += 1
-            reduced_loss = all_reduce_mean(float(loss.detach().item()), ctx)
-            running_loss += reduced_loss
-
-            if ctx.is_main:
-                lr = optimizer.param_groups[0]["lr"]
-                elapsed = max(1e-6, time.time() - train_start_time)
-                steps_done = max(1, global_step)
-                steps_left = max(0, int(total_steps) - int(global_step))
-                sec_per_step = elapsed / steps_done
-                eta = format_eta(sec_per_step * steps_left)
-                LOGGER.info("Step %d | Loss: %.6f | LR: %s", global_step, reduced_loss, lr)
-                status_writer.write(
-                    {
-                        "running": True,
-                        "step": global_step,
-                        "loss": reduced_loss,
-                        "learning_rate": lr,
-                        "eta": eta,
-                        "tokens_per_step": int(cfg.max_seq_length * cfg.per_device_train_batch_size * cfg.gradient_accumulation_steps * max(1, ctx.world_size)),
-                        "total_tokens": int(global_step * cfg.max_seq_length * cfg.per_device_train_batch_size * cfg.gradient_accumulation_steps * max(1, ctx.world_size)),
-                        "epoch": epoch,
-                        "total_steps": int(total_steps),
-                    }
-                )
-
-            if cfg.max_steps is not None and global_step >= int(cfg.max_steps):
-                reached_max_steps = True
-                break
-
-    avg_loss = running_loss / max(1, running_updates)
-    return avg_loss, global_step, reached_max_steps
-
-
-# ---------------------------------------------------------------------------
-# Main
-# ---------------------------------------------------------------------------
-
-def main() -> int:
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--config", required=True, type=str)
-    args = parser.parse_args()
-
-    register_signal_handlers()
-    cfg = load_cfg(args.config)
-    ctx = init_dist(cfg)
-
-    # Wichtige OOM-Schutzmaßnahme:
-    # sort_by_length in strikt aufsteigender Reihenfolge schiebt die größten Samples ans Ende.
-    # Dadurch sieht es wie ein Memory-Leak aus, obwohl nur später die längsten Sequenzen kommen.
-    # Unter Multi-GPU deaktivieren wir das standardmäßig für stabileren VRAM-Verlauf.
-    if ctx.is_distributed and cfg.sort_by_length:
-        cfg.sort_by_length = False
-
-    outdir = Path(cfg.output_dir or cfg.save_dir or "./training_outputs/worker_run").expanduser().resolve()
-    outdir.mkdir(parents=True, exist_ok=True)
-    log_path = outdir / "training.log"
-    status_path = outdir / "status.json"
-    setup_logging(log_path, ctx)
-    status_writer = JsonStatusWriter(status_path, ctx)
-    preview_path = outdir / "livepreview.json"
-    preview_writer = JsonPreviewWriter(preview_path, ctx)
-
+@app.post("/v1/chat/completions", dependencies=[Depends(_auth_dependency)])
+def oai_chat(req: OAIChatRequest):
     try:
-        set_seed(cfg.seed + ctx.rank)
-
-        LOGGER.info("Worker gestartet | rank=%s local_rank=%s world_size=%s device=%s", ctx.rank, ctx.local_rank, ctx.world_size, ctx.device)
-        LOGGER.info("Config: %s", json.dumps(cfg.__dict__, ensure_ascii=False))
-
-        model, tokenizer, fp16, bf16 = build_model_and_tokenizer(cfg, ctx)
-
-        examples = build_examples(cfg)
-        if not examples:
-            raise RuntimeError("Kein Trainingssample gefunden.")
-
-        if ctx.is_main:
-            if isinstance(examples[0], tuple):
-                preview = (examples[0][0] + examples[0][1])
-            else:
-                preview = str(examples[0])
-            preview_writer.write(preview[:4000], preview[:20000])
-
-        dataset = CausalLMDataset(
-            examples=examples,
-            tokenizer=tokenizer,
-            max_seq_length=cfg.max_seq_length,
-            template_mode=cfg.template_mode,
-            sort_by_length=bool(cfg.sort_by_length),
-        )
-        collator = DataCollator(tokenizer.pad_token_id or tokenizer.eos_token_id or 0, pad_to_multiple_of=8)
-
-        if ctx.is_distributed:
-            sampler = DistributedSampler(
-                dataset,
-                num_replicas=ctx.world_size,
-                rank=ctx.rank,
-                shuffle=bool(cfg.shuffle),
-                drop_last=False,
-            )
-        else:
-            sampler = None
-
-        loader = DataLoader(
-            dataset,
-            batch_size=cfg.per_device_train_batch_size,
-            shuffle=(sampler is None and bool(cfg.shuffle)),
-            sampler=sampler,
-            num_workers=max(0, int(cfg.dataloader_num_workers)),
-            pin_memory=(ctx.device.type == "cuda"),
-            collate_fn=collator,
-            persistent_workers=False,
-        )
-
-        optimizer = build_optimizer(model, cfg)
-
-        updates_per_epoch = max(1, math.ceil(len(loader) / max(1, cfg.gradient_accumulation_steps)))
-        total_steps = int(cfg.max_steps) if cfg.max_steps is not None else max(1, int(math.ceil(cfg.num_train_epochs * updates_per_epoch)))
-        scheduler = build_scheduler(optimizer, total_steps, cfg.lr_schedule)
-        scaler = make_scaler(fp16=fp16, device=ctx.device)
-
-        model = wrap_ddp(model, cfg, ctx)
-        barrier(ctx)
-
-        global_step = 0
-        last_loss = None
-        train_start_time = time.time()
-
-        epochs = max(1, int(math.ceil(cfg.num_train_epochs)))
-        for epoch in range(epochs):
-            if sampler is not None:
-                sampler.set_epoch(epoch)
-
-            avg_loss, global_step, reached_max_steps = train_epoch(
-                model=model,
-                loader=loader,
-                optimizer=optimizer,
-                scheduler=scheduler,
-                scaler=scaler,
-                cfg=cfg,
-                ctx=ctx,
-                epoch=epoch,
-                global_step=global_step,
-                total_steps=total_steps,
-                train_start_time=train_start_time,
-                status_writer=status_writer,
-                preview_writer=preview_writer,
-                tokenizer=tokenizer,
-            )
-            last_loss = avg_loss
-
-            if ctx.is_main:
-                LOGGER.info("Epoche %d abgeschlossen | avg_loss=%.6f", epoch, avg_loss)
-
-            if reached_max_steps or sync_stop(SHUTDOWN.stop, ctx):
-                break
-
-        barrier(ctx)
-
-        if ctx.is_main:
-            save_target = unwrap_model(model)
-            save_target.save_pretrained(outdir)
-            tokenizer.save_pretrained(outdir)
-            status_writer.write(
-                {
-                    "running": False,
-                    "step": global_step,
-                    "loss": last_loss,
-                    "learning_rate": optimizer.param_groups[0]["lr"],
-                    "eta": "",
-                    "tokens_per_step": int(cfg.max_seq_length * cfg.per_device_train_batch_size * cfg.gradient_accumulation_steps * max(1, ctx.world_size)),
-                    "total_tokens": int(global_step * cfg.max_seq_length * cfg.per_device_train_batch_size * cfg.gradient_accumulation_steps * max(1, ctx.world_size)),
-                    "done": True,
-                }
-            )
-            LOGGER.info("Training abgeschlossen. Modell gespeichert nach: %s", outdir)
-
-        barrier(ctx)
-        return 0
-
+        model_id, tok, mdl, dev = ensure_model_loaded(req.model, req.device)
     except Exception as e:
-        LOGGER.error("Fataler Worker-Fehler: %s", e)
-        LOGGER.error(traceback.format_exc())
+        return _oai_error(str(e), status_code=500)
+
+    if tok is None or mdl is None or dev is None:
+        return _oai_error("Inference model not loaded", status_code=500)
+
+    system = _extract_system(req.messages)
+    msgs = _messages_to_hf(req.messages)
+    if not msgs:
+        return _oai_error("messages is empty")
+
+    input_ids, attention_mask, pad_id, eos_id = _prepare_inputs(tok, msgs, system, dev)
+    temperature = 0.0 if req.temperature is None else float(req.temperature)
+    do_sample = req.do_sample if req.do_sample is not None else (temperature > 0)
+
+    gen_kwargs, logits_processor = sanitize_sampling_args(
+        max_new_tokens=int(req.max_tokens or 256),
+        temperature=temperature,
+        top_p=req.top_p,
+        top_k=req.top_k,
+        repetition_penalty=req.repetition_penalty,
+        do_sample=do_sample,
+        pad_id=pad_id,
+        eos_id=eos_id,
+    )
+
+    created = int(time.time())
+    resp_id = f"chatcmpl-{uuid.uuid4().hex}"
+
+    stops = req.stop
+    if isinstance(stops, str):
+        stops = [stops]
+
+    stopping_criteria = None
+    if stops:
+        from transformers import StoppingCriteria, StoppingCriteriaList
+
+        class StringStopCriteria(StoppingCriteria):
+            def __init__(self, tokenizer, stop_strings: List[str]):
+                self.tokenizer = tokenizer
+                self.stop_strings = stop_strings
+                self.buffer = ""
+
+            def __call__(self, input_ids, scores, **kwargs):
+                try:
+                    new_text = self.tokenizer.decode(input_ids[0, -1:], skip_special_tokens=False)
+                except Exception:
+                    return False
+                self.buffer += new_text
+                return any(s in self.buffer for s in self.stop_strings)
+
+        stopping_criteria = StoppingCriteriaList([StringStopCriteria(tok, stops)])
+
+    if req.seed is not None:
         try:
-            if ctx.device.type == "cuda":
-                torch.cuda.empty_cache()
+            torch.manual_seed(int(req.seed))
+            if torch.cuda.is_available():
+                torch.cuda.manual_seed_all(int(req.seed))
         except Exception:
             pass
-        if ctx.is_main:
+
+    if req.stream:
+        from transformers import TextIteratorStreamer
+
+        streamer = TextIteratorStreamer(tok, skip_prompt=True, skip_special_tokens=True)
+
+        def _run_stream():
             try:
-                status_writer.write(
-                    {
-                        "running": False,
-                        "error": f"{e.__class__.__name__}: {e}",
-                    }
-                )
+                with torch.no_grad():
+                    mdl.generate(
+                        input_ids=input_ids[:1, :],
+                        attention_mask=attention_mask[:1, :] if attention_mask is not None else None,
+                        streamer=streamer,
+                        logits_processor=logits_processor,
+                        num_beams=1,
+                        num_return_sequences=1,
+                        stopping_criteria=stopping_criteria,
+                        **gen_kwargs,
+                    )
             except Exception:
                 pass
-        return 1
-    finally:
-        cleanup_dist()
+
+        t = threading.Thread(target=_run_stream, daemon=True)
+        t.start()
+
+        def sse():
+            first = {
+                "id": resp_id,
+                "object": "chat.completion.chunk",
+                "created": created,
+                "model": model_id,
+                "choices": [{"index": 0, "delta": {"role": "assistant"}, "finish_reason": None}],
+            }
+            yield f"data: {json.dumps(first, ensure_ascii=False)}\n\n"
+
+            for piece in streamer:
+                yield "data: " + json.dumps(
+                    {
+                        "id": resp_id,
+                        "object": "chat.completion.chunk",
+                        "created": created,
+                        "model": model_id,
+                        "choices": [{"index": 0, "delta": {"content": piece}, "finish_reason": None}],
+                    },
+                    ensure_ascii=False,
+                ) + "\n\n"
+
+            yield "data: " + json.dumps(
+                {
+                    "id": resp_id,
+                    "object": "chat.completion.chunk",
+                    "created": created,
+                    "model": model_id,
+                    "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
+                },
+                ensure_ascii=False,
+            ) + "\n\n"
+            yield "data: [DONE]\n\n"
+
+        return StreamingResponse(sse(), media_type="text/event-stream")
+
+    with torch.no_grad():
+        out = mdl.generate(
+            input_ids=input_ids[:1, :],
+            attention_mask=attention_mask[:1, :] if attention_mask is not None else None,
+            logits_processor=logits_processor,
+            num_beams=1,
+            num_return_sequences=1,
+            stopping_criteria=stopping_criteria,
+            **gen_kwargs,
+        )
+
+    seq = _extract_sequences(out)
+    prompt_len = input_ids.shape[-1]
+    generated = seq[0, prompt_len:]
+    text = tok.decode(generated, skip_special_tokens=True).strip()
+
+    usage = {
+        "prompt_tokens": int(input_ids.numel()),
+        "completion_tokens": int(generated.numel()),
+        "total_tokens": int(input_ids.numel() + generated.numel()),
+    }
+
+    return {
+        "id": resp_id,
+        "object": "chat.completion",
+        "created": created,
+        "model": model_id,
+        "choices": [{"index": 0, "message": {"role": "assistant", "content": text}, "finish_reason": "stop"}],
+        "usage": usage,
+        "system_fingerprint": None,
+    }
+
+
+@app.post("/v1/completions", dependencies=[Depends(_auth_dependency)])
+def oai_completions(req: OAICompletionRequest):
+    try:
+        model_id, tok, mdl, dev = ensure_model_loaded(req.model, req.device)
+    except Exception as e:
+        return _oai_error(str(e), status_code=500)
+
+    if tok is None or mdl is None or dev is None:
+        return _oai_error("Inference model not loaded", status_code=500)
+
+    prompts = req.prompt if isinstance(req.prompt, list) else [req.prompt]
+    created = int(time.time())
+    results = []
+    last_usage = None
+
+    if req.seed is not None:
+        try:
+            torch.manual_seed(int(req.seed))
+            if torch.cuda.is_available():
+                torch.cuda.manual_seed_all(int(req.seed))
+        except Exception:
+            pass
+
+    for idx, p in enumerate(prompts):
+        msgs = [{"role": "user", "content": p}]
+        input_ids, attention_mask, pad_id, eos_id = _prepare_inputs(tok, msgs, None, dev)
+
+        temperature = 0.0 if req.temperature is None else float(req.temperature)
+        do_sample = req.do_sample if req.do_sample is not None else (temperature > 0)
+
+        gen_kwargs, logits_processor = sanitize_sampling_args(
+            max_new_tokens=int(req.max_tokens or 256),
+            temperature=temperature,
+            top_p=req.top_p,
+            top_k=req.top_k,
+            repetition_penalty=req.repetition_penalty,
+            do_sample=do_sample,
+            pad_id=pad_id,
+            eos_id=eos_id,
+        )
+
+        with torch.no_grad():
+            out = mdl.generate(
+                input_ids=input_ids[:1, :],
+                attention_mask=attention_mask[:1, :] if attention_mask is not None else None,
+                logits_processor=logits_processor,
+                num_beams=1,
+                num_return_sequences=1,
+                **gen_kwargs,
+            )
+
+        seq = _extract_sequences(out)
+        gen_ids = seq[0, input_ids.shape[-1]:]
+        text = tok.decode(gen_ids, skip_special_tokens=True).strip()
+
+        last_usage = {
+            "prompt_tokens": int(input_ids.numel()),
+            "completion_tokens": int(gen_ids.numel()),
+            "total_tokens": int(input_ids.numel() + gen_ids.numel()),
+        }
+        results.append({"text": text, "index": idx, "logprobs": None, "finish_reason": "stop"})
+
+    return {
+        "id": f"cmpl-{uuid.uuid4().hex}",
+        "object": "text_completion",
+        "created": created,
+        "model": model_id,
+        "choices": results,
+        "usage": last_usage or {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
+    }
+
+
+@app.get("/", response_class=HTMLResponse)
+def root(_: Request):
+    return FileResponse(str(ensure_index_html()))
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8002)
