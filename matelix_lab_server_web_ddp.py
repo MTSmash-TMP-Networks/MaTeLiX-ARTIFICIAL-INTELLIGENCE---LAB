@@ -5,9 +5,8 @@
 # - startet DDP-Training über die bestehende Weboberfläche
 # - kein manuelles torchrun im Terminal nötig
 # - kompatibel mit der vorhandenen index.html
-#
-# Architektur:
-#   Browser -> FastAPI -> subprocess (python -m torch.distributed.run ...) -> DDP Worker
+# - gemeinsames Inferenzmodell mit Wartelock für Webchat + OpenAI API
+# - automatisches Modell-Laden für API und Webchat
 #
 from __future__ import annotations
 
@@ -22,17 +21,43 @@ import subprocess
 import sys
 import threading
 import time
+import uuid
 from collections import deque
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Union
 
 import psutil
 import torch
-from fastapi import Body, FastAPI, Request, WebSocket, WebSocketDisconnect
+from fastapi import (
+    Body,
+    Depends,
+    FastAPI,
+    Header,
+    HTTPException,
+    Request,
+    WebSocket,
+    WebSocketDisconnect,
+)
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, Field
+
+# ----------------------------
+# Pydantic v1/v2 compatibility
+# ----------------------------
+try:
+    from pydantic import BaseModel, Field, ConfigDict, model_validator  # type: ignore
+    PYDANTIC_V2 = True
+except Exception:
+    from pydantic import BaseModel, Field, validator  # type: ignore
+    ConfigDict = None  # type: ignore
+    PYDANTIC_V2 = False
+
+
+class MatelixBaseModel(BaseModel):
+    if PYDANTIC_V2:
+        model_config = ConfigDict(protected_namespaces=())  # type: ignore
+
 
 os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
 csv.field_size_limit(1024 * 1024 * 128)
@@ -42,12 +67,13 @@ TRAINING_OUT_DIR = BASE_DIR / "training_outputs"
 DATASETS_DIR = BASE_DIR / "datasets"
 STATIC_DIR = BASE_DIR / "static"
 WORKER_PATH = BASE_DIR / "matelix_ddp_worker.py"
+OPENAI_COMPAT_API_KEY = "matelix-local-dev-key"
 
 TRAINING_OUT_DIR.mkdir(parents=True, exist_ok=True)
 DATASETS_DIR.mkdir(parents=True, exist_ok=True)
 STATIC_DIR.mkdir(parents=True, exist_ok=True)
 
-app = FastAPI(title="MaTeLiX AI Lab (Web DDP)", version="5.1-web-ddp")
+app = FastAPI(title="MaTeLiX AI Lab (Web DDP)", version="5.4-web-ddp")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -57,6 +83,70 @@ app.add_middleware(
 )
 app.mount("/training_outputs", StaticFiles(directory=str(TRAINING_OUT_DIR)), name="training_outputs")
 app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
+
+
+# ---------------------------------------------------------------------
+# Generic helpers
+# ---------------------------------------------------------------------
+
+def model_to_dict(model: Any, **kwargs) -> Dict[str, Any]:
+    if hasattr(model, "model_dump"):
+        return model.model_dump(**kwargs)
+    return model.dict(**kwargs)
+
+
+def _extract_sequences(out: Any):
+    return out.sequences if hasattr(out, "sequences") else out
+
+
+def get_chat_template(template_mode: str = "chat") -> str:
+    mode = (template_mode or "chat").strip().lower()
+
+    if mode == "plain":
+        return """{% for message in messages %}
+{{ message.content }}
+{% endfor %}"""
+
+    if mode == "instruct":
+        return """{{ bos_token }}
+{% for message in messages %}
+{% if message.role == 'system' %}[SYSTEM]
+{{ message.content }}
+{% elif message.role == 'user' %}[USER]
+{{ message.content }}
+{% elif message.role == 'assistant' %}[ASSISTANT]
+{{ message.content }}
+{% endif %}
+{% endfor %}
+{% if add_generation_prompt %}[ASSISTANT]
+{% endif %}"""
+
+    if mode == "dialogplus":
+        return """{{ bos_token }}
+{% for message in messages %}
+{% if message.role == 'system' %}<|System|>
+{{ message.content }}</s>
+{% elif message.role == 'user' %}<|Benutzer|>
+{{ message.content }}</s>
+{% elif message.role == 'assistant' %}<|Assistentin|>
+{{ message.content }}</s>
+{% endif %}
+{% endfor %}
+{% if add_generation_prompt %}<|Assistentin|>
+{% endif %}"""
+
+    return """{{ bos_token }}
+{% for message in messages %}
+{% if message.role == 'system' %}<|System|>
+{{ message.content }}
+{% elif message.role == 'user' %}<|Benutzer|>
+{{ message.content }}
+{% elif message.role == 'assistant' %}<|Assistentin|>
+{{ message.content }}
+{% endif %}
+{% endfor %}
+{% if add_generation_prompt %}<|Assistentin|>
+{% else %}</s>{% endif %}"""
 
 
 # ---------------------------------------------------------------------
@@ -83,6 +173,7 @@ DEFAULT_INDEX_HTML = """<!DOCTYPE html>
 </body>
 </html>
 """
+
 
 def ensure_index_html() -> Path:
     p = STATIC_DIR / "index.html"
@@ -206,7 +297,7 @@ TRAIN_STATE = TrainingState()
 # Web TrainConfig
 # ---------------------------------------------------------------------
 
-class WebTrainConfig(BaseModel):
+class WebTrainConfig(MatelixBaseModel):
     model_dir: str = Field(...)
     csv_path: str = Field(...)
 
@@ -249,7 +340,6 @@ class WebTrainConfig(BaseModel):
     ngram_max_token_chars: int = 384
     ngram_max_tokens_per_text: int = 4096
 
-    # neue optionale Web-DDP Felder
     ddp_enabled: Optional[bool] = None
     nproc_per_node: Optional[int] = None
     nnodes: int = 1
@@ -259,7 +349,6 @@ class WebTrainConfig(BaseModel):
     seed: int = 42
     deterministic: bool = True
 
-    # beide Felder erlaubt; Server mappt sauber auf ddp_find_unused_parameters
     find_unused_parameters: Optional[bool] = None
     ddp_find_unused_parameters: Optional[bool] = None
 
@@ -401,10 +490,6 @@ class DDPTrainingManager:
         self.stop_requested = False
         self.lock = threading.Lock()
 
-    def _is_alive(self) -> bool:
-        with self.lock:
-            return self.proc is not None and self.proc.poll() is None
-
     def _merge_state_payload(self, payload: Dict[str, Any], source: str = "unknown") -> None:
         with self.state.lock:
             self.state.step = int(payload.get("step") or self.state.step or 0)
@@ -446,7 +531,6 @@ class DDPTrainingManager:
             if self.proc is not None and self.proc.poll() is not None:
                 self.state.running = False
             elif self.proc is not None and self.proc.poll() is None:
-                # Falls noch keine State-Datei geschrieben wurde, wenigstens "läuft" anzeigen.
                 self.state.running = True
                 if self.state.status_text in {"idle", "finished", "error"}:
                     self.state.status_text = "running"
@@ -461,7 +545,6 @@ class DDPTrainingManager:
         if explicit is not None:
             return explicit
 
-        # sicherer Default für Multi-GPU CUDA mit sparsely-used Parametern / MoE / Router
         if ddp_enabled and nproc > 1 and device == "cuda":
             return True
         return False
@@ -494,23 +577,26 @@ class DDPTrainingManager:
         if not ddp_enabled:
             nproc = 1
 
-        worker_cfg = cfg.model_dump(exclude={
-            "save_dir",
-            "ddp_enabled",
-            "nproc_per_node",
-            "nnodes",
-            "node_rank",
-            "master_addr",
-            "master_port",
-            "find_unused_parameters",  # server mappt sauber selbst
-        })
+        worker_cfg = model_to_dict(
+            cfg,
+            exclude={
+                "save_dir",
+                "ddp_enabled",
+                "nproc_per_node",
+                "nnodes",
+                "node_rank",
+                "master_addr",
+                "master_port",
+                "find_unused_parameters",
+            },
+        )
 
         worker_cfg["device"] = device
         worker_cfg["output_dir"] = str(run_dir)
         worker_cfg["save_dir"] = str(run_dir)
         worker_cfg["ddp_find_unused_parameters"] = self._resolve_find_unused(cfg, ddp_enabled, nproc, device)
+        worker_cfg["force_template"] = True
 
-        # DDP + dynamischer Graph + checkpointing => static_graph sicherheitshalber aus
         if bool(worker_cfg.get("gradient_checkpointing")) and worker_cfg["ddp_find_unused_parameters"]:
             worker_cfg["ddp_static_graph"] = False
 
@@ -519,12 +605,14 @@ class DDPTrainingManager:
         atomic_write_json(
             run_dir / "train_config.json",
             {
-                **cfg.model_dump(),
+                **model_to_dict(cfg),
                 "device": device,
                 "output_dir": str(run_dir),
                 "effective_world_size": nproc,
                 "effective_ddp_enabled": bool(ddp_enabled and nproc > 1),
                 "effective_ddp_find_unused_parameters": worker_cfg["ddp_find_unused_parameters"],
+                "effective_template_mode": worker_cfg.get("template_mode", "chat"),
+                "effective_force_template": True,
             },
         )
 
@@ -601,7 +689,13 @@ class DDPTrainingManager:
             self.state.log.set_file(run_dir / "training.log")
             self.state.log.append("Training gestartet.")
             self.state.log.append("Command: " + " ".join(cmd))
-            self.state.log.append(f"DDP effective: enabled={bool(ddp_enabled and nproc > 1)} world_size={nproc} find_unused_parameters={worker_cfg['ddp_find_unused_parameters']}")
+            self.state.log.append(
+                f"DDP effective: enabled={bool(ddp_enabled and nproc > 1)} "
+                f"world_size={nproc} "
+                f"find_unused_parameters={worker_cfg['ddp_find_unused_parameters']} "
+                f"template_mode={worker_cfg.get('template_mode', 'chat')} "
+                f"force_template=True"
+            )
 
         self.stdout_thread = threading.Thread(target=self._stdout_pump, args=(proc,), daemon=True)
         self.wait_thread = threading.Thread(target=self._wait_pump, args=(proc,), daemon=True)
@@ -615,6 +709,8 @@ class DDPTrainingManager:
             "world_size": nproc,
             "ddp_enabled": bool(ddp_enabled and nproc > 1),
             "ddp_find_unused_parameters": worker_cfg["ddp_find_unused_parameters"],
+            "template_mode": worker_cfg.get("template_mode", "chat"),
+            "force_template": True,
         }
 
     def _stdout_pump(self, proc: subprocess.Popen) -> None:
@@ -713,28 +809,21 @@ TRAIN_MANAGER = DDPTrainingManager(TRAIN_STATE)
 # Inference / Chat
 # ---------------------------------------------------------------------
 
-def prepare_tokenizer_for_matelix(tokenizer) -> bool:
+def prepare_tokenizer_for_matelix(tokenizer, force_template: bool = False, template_mode: str = "chat") -> bool:
     need_resize = False
     if tokenizer.pad_token_id is None:
         tokenizer.add_special_tokens({"pad_token": "<|pad|>"})
         need_resize = True
+
     added = tokenizer.add_tokens(["<|System|>", "<|Benutzer|>", "<|Assistentin|>"], special_tokens=False)
     if added > 0:
         need_resize = True
+
     tokenizer.padding_side = "left"
-    if not getattr(tokenizer, "chat_template", None):
-        tokenizer.chat_template = """{{ bos_token }}
-{% for message in messages %}
-{% if message.role == 'system' %}<|System|>
-{{ message.content }}
-{% elif message.role == 'user' %}<|Benutzer|>
-{{ message.content }}
-{% elif message.role == 'assistant' %}<|Assistentin|>
-{{ message.content }}
-{% endif %}
-{% endfor %}
-{% if add_generation_prompt %}<|Assistentin|>
-{% else %}</s>{% endif %}"""
+
+    if force_template or not getattr(tokenizer, "chat_template", None):
+        tokenizer.chat_template = get_chat_template(template_mode)
+
     return need_resize
 
 
@@ -771,26 +860,30 @@ def unload_torch_objects(*objs: Any) -> None:
 
 class InferenceSession:
     def __init__(self):
-        self.lock = threading.Lock()
+        self.lock = threading.Lock()           # Laden / Entladen / Sessionzustand
+        self.generate_lock = threading.Lock()  # genau 1 aktive Generierung gleichzeitig
         self.loaded_dir: Optional[str] = None
         self.device: Optional[torch.device] = None
         self.tokenizer = None
         self.model = None
+        self.is_generating: bool = False
+        self.current_source: Optional[str] = None
+        self.last_started_at: Optional[float] = None
 
 
 INFER = InferenceSession()
 
 
-class ChatRequest(BaseModel):
+class ChatRequest(MatelixBaseModel):
     model_dir: Optional[str] = None
     device: Optional[str] = None
     system: Optional[str] = None
     messages: List[Dict[str, Any]] = Field(default_factory=list)
-    max_new_tokens: int = 256
+    max_new_tokens: int = 4096
     temperature: float = 0.7
     top_p: float = 0.9
-    top_k: int = 50
-    repetition_penalty: float = 1.05
+    top_k: int = 40
+    repetition_penalty: float = 1.1
     do_sample: bool = True
 
 
@@ -806,13 +899,53 @@ def _get_device(name: str) -> torch.device:
     return torch.device("cpu")
 
 
+def get_latest_model_dir() -> Optional[str]:
+    candidates: List[Path] = []
+
+    status_dir = TRAIN_MANAGER.status().get("save_dir")
+    if status_dir:
+        try:
+            p = Path(status_dir).expanduser().resolve()
+            if p.exists() and p.is_dir():
+                candidates.append(p)
+        except Exception:
+            pass
+
+    if TRAINING_OUT_DIR.exists():
+        for p in TRAINING_OUT_DIR.iterdir():
+            try:
+                if p.is_dir():
+                    candidates.append(p.resolve())
+            except Exception:
+                continue
+
+    valid_candidates: List[Path] = []
+    for p in candidates:
+        try:
+            if (p / "config.json").exists():
+                valid_candidates.append(p)
+        except Exception:
+            continue
+
+    if not valid_candidates:
+        return None
+
+    valid_candidates = sorted(valid_candidates, key=lambda p: p.stat().st_mtime, reverse=True)
+    return str(valid_candidates[0])
+
+
 def unload_inference() -> Dict[str, Any]:
     with INFER.lock:
+        if INFER.is_generating:
+            return {"error": "Modell generiert gerade und kann aktuell nicht entladen werden."}
+
         unload_torch_objects(INFER.model, INFER.tokenizer)
         INFER.loaded_dir = None
         INFER.device = None
         INFER.tokenizer = None
         INFER.model = None
+        INFER.current_source = None
+        INFER.last_started_at = None
     return {"msg": "Inferenz-Modell entladen."}
 
 
@@ -823,11 +956,19 @@ def load_inference_model(model_dir: str, device_name: str = "auto") -> Dict[str,
     dev = _get_device(dev_name)
 
     with INFER.lock:
+        if INFER.is_generating:
+            return {"error": "Modell generiert gerade. Laden bitte nach Abschluss erneut ausführen."}
+
         if INFER.loaded_dir and (INFER.loaded_dir != model_dir or (INFER.device and INFER.device.type != dev.type)):
-            unload_inference()
+            unload_torch_objects(INFER.model, INFER.tokenizer)
+            INFER.loaded_dir = None
+            INFER.device = None
+            INFER.tokenizer = None
+            INFER.model = None
 
         tok = AutoTokenizer.from_pretrained(model_dir, trust_remote_code=False)
-        need_resize = prepare_tokenizer_for_matelix(tok)
+        need_resize = prepare_tokenizer_for_matelix(tok, force_template=False, template_mode="chat")
+
         dtype = torch.float16 if dev.type == "cuda" else None
 
         mdl = AutoModelForCausalLM.from_pretrained(
@@ -854,13 +995,23 @@ def load_inference_model(model_dir: str, device_name: str = "auto") -> Dict[str,
 
 
 def ensure_model_loaded(model_dir: Optional[str], device_name: Optional[str]):
-    mdl_dir = model_dir or INFER.loaded_dir
+    mdl_dir = model_dir or INFER.loaded_dir or get_latest_model_dir()
     if not mdl_dir:
-        raise RuntimeError("Kein Inferenz-Modell geladen. Nutze /load_inference oder gib model_dir an.")
+        raise RuntimeError(
+            "Kein Inferenz-Modell gefunden. Trainiere zuerst ein Modell oder gib model_dir an."
+        )
+
     dev_name = _preferred_device_name(device_name or (INFER.device.type if INFER.device else "auto"))
     target_dev = _get_device(dev_name)
-    if INFER.loaded_dir != mdl_dir or (INFER.device and INFER.device.type != target_dev.type):
-        load_inference_model(mdl_dir, dev_name)
+
+    current_loaded = INFER.loaded_dir
+    current_device_type = INFER.device.type if INFER.device else None
+
+    if current_loaded != mdl_dir or current_device_type != target_dev.type:
+        res = load_inference_model(mdl_dir, dev_name)
+        if res.get("error"):
+            raise RuntimeError(res["error"])
+
     with INFER.lock:
         return mdl_dir, INFER.tokenizer, INFER.model, INFER.device
 
@@ -884,11 +1035,11 @@ def prepare_inputs(tokenizer, messages: List[Dict[str, Any]], system: Optional[s
             if not content:
                 continue
             if role == "system":
-                parts.append("<|System|>\n" + content + "\n</s>\n")
+                parts.append("<|System|>\n" + content + "\n")
             elif role == "user":
-                parts.append("<|Benutzer|>\n" + content + "\n</s>\n")
+                parts.append("<|Benutzer|>\n" + content + "\n")
             elif role == "assistant":
-                parts.append("<|Assistentin|>\n" + content + "\n</s>\n")
+                parts.append("<|Assistentin|>\n" + content + "\n")
         parts.append("<|Assistentin|>\n")
         enc = tokenizer("".join(parts), return_tensors="pt", add_special_tokens=False)
 
@@ -911,6 +1062,10 @@ def prepare_inputs(tokenizer, messages: List[Dict[str, Any]], system: Optional[s
     return input_ids.to(device), attention_mask.to(device), int(pad_id), int(eos_id)
 
 
+def _prepare_inputs(tokenizer, messages: List[Dict[str, Any]], system: Optional[str], device: torch.device):
+    return prepare_inputs(tokenizer, messages, system, device)
+
+
 def sanitize_sampling_args(
     *,
     max_new_tokens: int,
@@ -924,8 +1079,9 @@ def sanitize_sampling_args(
 ):
     t = 0.0 if temperature is None else float(temperature)
     p = 1.0 if top_p is None else float(top_p)
-    k = 50 if top_k is None else int(top_k)
-    rp = 1.05 if repetition_penalty is None else float(repetition_penalty)
+    k = 40 if top_k is None else int(top_k)
+    rp = 1.1 if repetition_penalty is None else float(repetition_penalty)
+
     if t <= 0.0:
         safe = {
             "max_new_tokens": max(1, int(max_new_tokens)),
@@ -950,14 +1106,30 @@ def sanitize_sampling_args(
             "pad_token_id": pad_id,
             "eos_token_id": eos_id,
         }
+
     from transformers import LogitsProcessorList
+
     class SafeLogitsProcessor:
         def __call__(self, input_ids, scores):
             if not torch.isfinite(scores).all():
                 scores = scores.clone()
                 scores[~torch.isfinite(scores)] = -1e9
             return torch.clamp(scores, min=-1e9, max=1e9)
+
     return safe, LogitsProcessorList([SafeLogitsProcessor()])
+
+
+def begin_generation(source: str) -> None:
+    with INFER.lock:
+        INFER.is_generating = True
+        INFER.current_source = source
+        INFER.last_started_at = time.time()
+
+
+def end_generation() -> None:
+    with INFER.lock:
+        INFER.is_generating = False
+        INFER.current_source = None
 
 
 # ---------------------------------------------------------------------
@@ -1035,6 +1207,19 @@ def api_livepreview():
     return TRAIN_MANAGER.livepreview()
 
 
+@app.get("/inference_status")
+def api_inference_status():
+    with INFER.lock:
+        return {
+            "loaded_dir": INFER.loaded_dir,
+            "device": INFER.device.type if INFER.device else None,
+            "is_generating": INFER.is_generating,
+            "current_source": INFER.current_source,
+            "last_started_at": INFER.last_started_at,
+            "latest_available_model": get_latest_model_dir(),
+        }
+
+
 @app.websocket("/ws/logs")
 async def ws_logs(websocket: WebSocket):
     await websocket.accept()
@@ -1052,11 +1237,14 @@ async def ws_logs(websocket: WebSocket):
 @app.post("/load_inference")
 def api_load_inference(cfg: Dict[str, Any] | None = Body(default=None)):
     cfg = cfg or {}
-    model_dir = cfg.get("model_dir") or TRAIN_MANAGER.status().get("save_dir") or cfg.get("fallback_model_dir")
+    model_dir = cfg.get("model_dir") or TRAIN_MANAGER.status().get("save_dir") or cfg.get("fallback_model_dir") or get_latest_model_dir()
     if not model_dir:
-        return JSONResponse({"error": "model_dir fehlt."}, status_code=400)
+        return JSONResponse({"error": "Kein Modell gefunden."}, status_code=400)
     try:
-        return JSONResponse(load_inference_model(model_dir, cfg.get("device") or "auto"), status_code=200)
+        res = load_inference_model(model_dir, cfg.get("device") or "auto")
+        if res.get("error"):
+            return JSONResponse(res, status_code=409)
+        return JSONResponse(res, status_code=200)
     except FileNotFoundError as exc:
         return JSONResponse({"error": str(exc)}, status_code=404)
     except Exception as exc:
@@ -1065,7 +1253,10 @@ def api_load_inference(cfg: Dict[str, Any] | None = Body(default=None)):
 
 @app.post("/unload_inference")
 def api_unload_inference():
-    return unload_inference()
+    res = unload_inference()
+    if res.get("error"):
+        return JSONResponse(res, status_code=409)
+    return res
 
 
 @app.post("/chat")
@@ -1089,17 +1280,23 @@ def api_chat(req: ChatRequest):
         eos_id=eos_id,
     )
 
-    with torch.no_grad():
-        out = mdl.generate(
-            input_ids=input_ids,
-            attention_mask=attention_mask,
-            logits_processor=logits_processor,
-            num_beams=1,
-            num_return_sequences=1,
-            **gen_kwargs,
-        )
+    with INFER.generate_lock:
+        begin_generation("web")
+        try:
+            with torch.no_grad():
+                out = mdl.generate(
+                    input_ids=input_ids,
+                    attention_mask=attention_mask,
+                    logits_processor=logits_processor,
+                    num_beams=1,
+                    num_return_sequences=1,
+                    no_repeat_ngram_size=3,
+                    **gen_kwargs,
+                )
+        finally:
+            end_generation()
 
-    seq = out.sequences if hasattr(out, "sequences") else out
+    seq = _extract_sequences(out)
     generated = seq[0, input_ids.shape[-1]:]
     text = tok.decode(generated, skip_special_tokens=True)
     return {"model_dir": model_dir, "response": text.strip()}
@@ -1130,19 +1327,24 @@ def api_chat_stream(req: ChatRequest):
     streamer = TextIteratorStreamer(tok, skip_prompt=True, skip_special_tokens=True)
 
     def _gen():
-        try:
-            with torch.no_grad():
-                mdl.generate(
-                    input_ids=input_ids,
-                    attention_mask=attention_mask,
-                    logits_processor=logits_processor,
-                    num_beams=1,
-                    num_return_sequences=1,
-                    streamer=streamer,
-                    **gen_kwargs,
-                )
-        except Exception:
-            pass
+        with INFER.generate_lock:
+            begin_generation("web_stream")
+            try:
+                with torch.no_grad():
+                    mdl.generate(
+                        input_ids=input_ids,
+                        attention_mask=attention_mask,
+                        logits_processor=logits_processor,
+                        num_beams=1,
+                        num_return_sequences=1,
+                        no_repeat_ngram_size=3,
+                        streamer=streamer,
+                        **gen_kwargs,
+                    )
+            except Exception:
+                pass
+            finally:
+                end_generation()
 
     t = threading.Thread(target=_gen, daemon=True)
     t.start()
@@ -1155,6 +1357,355 @@ def api_chat_stream(req: ChatRequest):
             return
 
     return StreamingResponse(event_iter(), media_type="text/plain; charset=utf-8")
+
+
+# ----------------------------
+# OpenAI-kompatible API (/v1/*)
+# ----------------------------
+
+def _auth_dependency(authorization: Optional[str] = Header(default=None)):
+    if OPENAI_COMPAT_API_KEY:
+        if not authorization or not authorization.lower().startswith("bearer "):
+            raise HTTPException(status_code=401, detail="Missing bearer token")
+        token = authorization.split(" ", 1)[1].strip()
+        if token != OPENAI_COMPAT_API_KEY:
+            raise HTTPException(status_code=401, detail="Invalid API key")
+    return True
+
+
+def _oai_error(message: str, status_code: int = 400, code: Optional[str] = None):
+    return JSONResponse(
+        status_code=status_code,
+        content={"error": {"message": message, "type": "invalid_request_error", "param": None, "code": code}},
+    )
+
+
+class OAIChatMessage(MatelixBaseModel):
+    role: str
+    content: str
+
+
+class OAIChatRequest(MatelixBaseModel):
+    model: Optional[str] = None
+    messages: List[OAIChatMessage]
+    temperature: Optional[float] = 0.7
+    top_p: Optional[float] = 0.9
+    top_k: Optional[int] = 40
+    max_tokens: Optional[int] = 4096
+    stream: Optional[bool] = False
+    stop: Optional[Union[str, List[str]]] = None
+    presence_penalty: Optional[float] = 0.0
+    frequency_penalty: Optional[float] = 0.0
+    repetition_penalty: Optional[float] = 1.05
+    do_sample: Optional[bool] = None
+    seed: Optional[int] = None
+    device: Optional[str] = None
+    user: Optional[str] = None
+
+
+class OAICompletionRequest(MatelixBaseModel):
+    model: Optional[str] = None
+    prompt: Union[str, List[str]]
+    temperature: Optional[float] = 0.7
+    top_p: Optional[float] = 0.9
+    top_k: Optional[int] = 40
+    max_tokens: Optional[int] = 4096
+    stream: Optional[bool] = False
+    stop: Optional[Union[str, List[str]]] = None
+    presence_penalty: Optional[float] = 0.0
+    frequency_penalty: Optional[float] = 0.0
+    repetition_penalty: Optional[float] = 1.05
+    do_sample: Optional[bool] = None
+    seed: Optional[int] = None
+    device: Optional[str] = None
+    user: Optional[str] = None
+
+
+def _extract_system(msgs: List[OAIChatMessage]) -> Optional[str]:
+    for m in msgs:
+        if m.role.strip().lower() == "system":
+            return m.content
+    return None
+
+
+def _messages_to_hf(msgs: List[OAIChatMessage]) -> List[Dict[str, str]]:
+    out = []
+    for m in msgs:
+        r = m.role.strip().lower()
+        if r in ("user", "assistant"):
+            out.append({"role": r, "content": m.content})
+    return out
+
+
+@app.get("/v1/models", dependencies=[Depends(_auth_dependency)])
+def oai_models():
+    local = api_available_models()
+    current = INFER.loaded_dir
+    models: List[str] = []
+
+    if current:
+        models.append(current)
+
+    latest = get_latest_model_dir()
+    if latest and latest not in models:
+        models.append(latest)
+
+    for m in local:
+        path = str(TRAINING_OUT_DIR / m)
+        if path not in models:
+            models.append(path)
+
+    return {
+        "object": "list",
+        "data": [{"id": mid, "object": "model", "created": 0, "owned_by": "owner"} for mid in models],
+    }
+
+
+@app.post("/v1/chat/completions", dependencies=[Depends(_auth_dependency)])
+def oai_chat(req: OAIChatRequest):
+    try:
+        model_id, tok, mdl, dev = ensure_model_loaded(req.model, req.device)
+    except Exception as e:
+        return _oai_error(str(e), status_code=500)
+
+    if tok is None or mdl is None or dev is None:
+        return _oai_error("Inference model not loaded", status_code=500)
+
+    system = _extract_system(req.messages)
+    msgs = _messages_to_hf(req.messages)
+    if not msgs:
+        return _oai_error("messages is empty")
+
+    input_ids, attention_mask, pad_id, eos_id = _prepare_inputs(tok, msgs, system, dev)
+    temperature = 0.0 if req.temperature is None else float(req.temperature)
+    do_sample = req.do_sample if req.do_sample is not None else (temperature > 0)
+
+    gen_kwargs, logits_processor = sanitize_sampling_args(
+        max_new_tokens=int(req.max_tokens or 256),
+        temperature=temperature,
+        top_p=req.top_p,
+        top_k=req.top_k,
+        repetition_penalty=req.repetition_penalty,
+        do_sample=do_sample,
+        pad_id=pad_id,
+        eos_id=eos_id,
+    )
+
+    created = int(time.time())
+    resp_id = f"chatcmpl-{uuid.uuid4().hex}"
+
+    stops = req.stop
+    if isinstance(stops, str):
+        stops = [stops]
+
+    stopping_criteria = None
+    if stops:
+        from transformers import StoppingCriteria, StoppingCriteriaList
+
+        class StringStopCriteria(StoppingCriteria):
+            def __init__(self, tokenizer, stop_strings: List[str]):
+                self.tokenizer = tokenizer
+                self.stop_strings = stop_strings
+                self.buffer = ""
+
+            def __call__(self, input_ids, scores, **kwargs):
+                try:
+                    new_text = self.tokenizer.decode(input_ids[0, -1:], skip_special_tokens=False)
+                except Exception:
+                    return False
+                self.buffer += new_text
+                return any(s in self.buffer for s in self.stop_strings)
+
+        stopping_criteria = StoppingCriteriaList([StringStopCriteria(tok, stops)])
+
+    if req.seed is not None:
+        try:
+            torch.manual_seed(int(req.seed))
+            if torch.cuda.is_available():
+                torch.cuda.manual_seed_all(int(req.seed))
+        except Exception:
+            pass
+
+    if req.stream:
+        from transformers import TextIteratorStreamer
+
+        streamer = TextIteratorStreamer(tok, skip_prompt=True, skip_special_tokens=True)
+
+        def _run_stream():
+            with INFER.generate_lock:
+                begin_generation("openai_stream")
+                try:
+                    with torch.no_grad():
+                        mdl.generate(
+                            input_ids=input_ids[:1, :],
+                            attention_mask=attention_mask[:1, :] if attention_mask is not None else None,
+                            streamer=streamer,
+                            logits_processor=logits_processor,
+                            num_beams=1,
+                            num_return_sequences=1,
+                            no_repeat_ngram_size=3,
+                            stopping_criteria=stopping_criteria,
+                            **gen_kwargs,
+                        )
+                except Exception:
+                    pass
+                finally:
+                    end_generation()
+
+        t = threading.Thread(target=_run_stream, daemon=True)
+        t.start()
+
+        def sse():
+            first = {
+                "id": resp_id,
+                "object": "chat.completion.chunk",
+                "created": created,
+                "model": model_id,
+                "choices": [{"index": 0, "delta": {"role": "assistant"}, "finish_reason": None}],
+            }
+            yield f"data: {json.dumps(first, ensure_ascii=False)}\n\n"
+
+            for piece in streamer:
+                yield "data: " + json.dumps(
+                    {
+                        "id": resp_id,
+                        "object": "chat.completion.chunk",
+                        "created": created,
+                        "model": model_id,
+                        "choices": [{"index": 0, "delta": {"content": piece}, "finish_reason": None}],
+                    },
+                    ensure_ascii=False,
+                ) + "\n\n"
+
+            yield "data: " + json.dumps(
+                {
+                    "id": resp_id,
+                    "object": "chat.completion.chunk",
+                    "created": created,
+                    "model": model_id,
+                    "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
+                },
+                ensure_ascii=False,
+            ) + "\n\n"
+            yield "data: [DONE]\n\n"
+
+        return StreamingResponse(sse(), media_type="text/event-stream")
+
+    with INFER.generate_lock:
+        begin_generation("openai")
+        try:
+            with torch.no_grad():
+                out = mdl.generate(
+                    input_ids=input_ids[:1, :],
+                    attention_mask=attention_mask[:1, :] if attention_mask is not None else None,
+                    logits_processor=logits_processor,
+                    num_beams=1,
+                    num_return_sequences=1,
+                    no_repeat_ngram_size=3,
+                    stopping_criteria=stopping_criteria,
+                    **gen_kwargs,
+                )
+        finally:
+            end_generation()
+
+    seq = _extract_sequences(out)
+    prompt_len = input_ids.shape[-1]
+    generated = seq[0, prompt_len:]
+    text = tok.decode(generated, skip_special_tokens=True).strip()
+
+    usage = {
+        "prompt_tokens": int(input_ids.numel()),
+        "completion_tokens": int(generated.numel()),
+        "total_tokens": int(input_ids.numel() + generated.numel()),
+    }
+
+    return {
+        "id": resp_id,
+        "object": "chat.completion",
+        "created": created,
+        "model": model_id,
+        "choices": [{"index": 0, "message": {"role": "assistant", "content": text}, "finish_reason": "stop"}],
+        "usage": usage,
+        "system_fingerprint": None,
+    }
+
+
+@app.post("/v1/completions", dependencies=[Depends(_auth_dependency)])
+def oai_completions(req: OAICompletionRequest):
+    try:
+        model_id, tok, mdl, dev = ensure_model_loaded(req.model, req.device)
+    except Exception as e:
+        return _oai_error(str(e), status_code=500)
+
+    if tok is None or mdl is None or dev is None:
+        return _oai_error("Inference model not loaded", status_code=500)
+
+    prompts = req.prompt if isinstance(req.prompt, list) else [req.prompt]
+    created = int(time.time())
+    results = []
+    last_usage = None
+
+    if req.seed is not None:
+        try:
+            torch.manual_seed(int(req.seed))
+            if torch.cuda.is_available():
+                torch.cuda.manual_seed_all(int(req.seed))
+        except Exception:
+            pass
+
+    for idx, p in enumerate(prompts):
+        msgs = [{"role": "user", "content": p}]
+        input_ids, attention_mask, pad_id, eos_id = _prepare_inputs(tok, msgs, None, dev)
+
+        temperature = 0.0 if req.temperature is None else float(req.temperature)
+        do_sample = req.do_sample if req.do_sample is not None else (temperature > 0)
+
+        gen_kwargs, logits_processor = sanitize_sampling_args(
+            max_new_tokens=int(req.max_tokens or 256),
+            temperature=temperature,
+            top_p=req.top_p,
+            top_k=req.top_k,
+            repetition_penalty=req.repetition_penalty,
+            do_sample=do_sample,
+            pad_id=pad_id,
+            eos_id=eos_id,
+        )
+
+        with INFER.generate_lock:
+            begin_generation("openai_completion")
+            try:
+                with torch.no_grad():
+                    out = mdl.generate(
+                        input_ids=input_ids[:1, :],
+                        attention_mask=attention_mask[:1, :] if attention_mask is not None else None,
+                        logits_processor=logits_processor,
+                        num_beams=1,
+                        num_return_sequences=1,
+                        no_repeat_ngram_size=3,
+                        **gen_kwargs,
+                    )
+            finally:
+                end_generation()
+
+        seq = _extract_sequences(out)
+        gen_ids = seq[0, input_ids.shape[-1]:]
+        text = tok.decode(gen_ids, skip_special_tokens=True).strip()
+
+        last_usage = {
+            "prompt_tokens": int(input_ids.numel()),
+            "completion_tokens": int(gen_ids.numel()),
+            "total_tokens": int(input_ids.numel() + gen_ids.numel()),
+        }
+        results.append({"text": text, "index": idx, "logprobs": None, "finish_reason": "stop"})
+
+    return {
+        "id": f"cmpl-{uuid.uuid4().hex}",
+        "object": "text_completion",
+        "created": created,
+        "model": model_id,
+        "choices": results,
+        "usage": last_usage or {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
+    }
 
 
 @app.get("/", response_class=HTMLResponse)
