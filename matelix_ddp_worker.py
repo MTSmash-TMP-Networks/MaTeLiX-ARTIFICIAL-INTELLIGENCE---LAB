@@ -706,6 +706,24 @@ def count_examples_fast(cfg: TrainConfig) -> int:
     return count
 
 
+def get_first_raw_example_preview(cfg: TrainConfig) -> Tuple[str, str]:
+    try:
+        examples_iter = build_examples_stream(cfg)
+        first_item = next(examples_iter)
+    except StopIteration:
+        return "", ""
+    except Exception:
+        return "", ""
+
+    if isinstance(first_item, tuple):
+        prompt, answer = first_item
+        preview = (prompt + answer)
+    else:
+        preview = str(first_item)
+
+    return preview[:4000], preview[:20000]
+
+
 # ---------------------------------------------------------------------------
 # Shard Cache
 # ---------------------------------------------------------------------------
@@ -1255,11 +1273,7 @@ def train_epoch(
                 for ids in input_ids_cpu:
                     txt = tokenizer.decode(ids.tolist(), skip_special_tokens=False)
                     texts.append(txt)
-                preview_text = "
-
----
-
-".join(texts)
+                preview_text = "\n\n---\n\n".join(texts)
                 preview_writer.write(preview_text[:4000], preview_text[:20000])
             except Exception:
                 pass
@@ -1432,6 +1446,14 @@ def main() -> int:
         total_samples_est = count_examples_fast(cfg)
         if total_samples_est <= 0:
             raise RuntimeError("Kein Trainingssample gefunden.")
+
+        if ctx.is_main:
+            try:
+                preview, preview_full = get_first_raw_example_preview(cfg)
+                if preview_writer is not None and (preview or preview_full):
+                    preview_writer.write(preview, preview_full)
+            except Exception:
+                pass
 
         cache_dir = compute_shard_cache_dir(cfg)
         producer_proc = start_shard_producer(cfg, cache_dir, ctx)
