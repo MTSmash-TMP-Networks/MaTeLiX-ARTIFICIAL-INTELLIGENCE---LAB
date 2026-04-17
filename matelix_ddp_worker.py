@@ -1247,14 +1247,19 @@ def train_epoch(
 
         batch = move_batch(batch, ctx.device)
 
-        if ctx.is_main and preview_writer is not None and batch_idx == 1:
+        # Live-Preview: immer den aktuellen Batch anzeigen
+        if ctx.is_main and preview_writer is not None:
             try:
                 input_ids_cpu = batch["input_ids"].detach().to("cpu")
                 texts = []
-                for ids in input_ids_cpu[:2]:
+                for ids in input_ids_cpu:
                     txt = tokenizer.decode(ids.tolist(), skip_special_tokens=False)
                     texts.append(txt)
-                preview_text = "\n\n---\n\n".join(texts)
+                preview_text = "
+
+---
+
+".join(texts)
                 preview_writer.write(preview_text[:4000], preview_text[:20000])
             except Exception:
                 pass
@@ -1332,6 +1337,7 @@ def train_epoch(
                 reached_max_steps = True
                 break
 
+    # Restliche Gradienten am Ende der Epoche noch flushen
     if accum_counter > 0 and not reached_max_steps and not sync_stop(SHUTDOWN.stop, ctx):
         if scaler is not None and getattr(scaler, "is_enabled", lambda: False)():
             scaler.unscale_(optimizer)
@@ -1350,7 +1356,6 @@ def train_epoch(
 
         global_step += 1
         running_updates += 1
-        accum_counter = 0
 
     avg_loss = running_loss / max(1, running_updates)
     return avg_loss, global_step, reached_max_steps
