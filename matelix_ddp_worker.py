@@ -51,8 +51,15 @@ from torch import nn
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import LambdaLR
-from torch.utils.data import DataLoader, Dataset, IterableDataset, DistributedSampler
+from torch.utils.data import DataLoader, IterableDataset
 from transformers import AutoModelForCausalLM, AutoTokenizer
+
+try:
+    from peft import LoraConfig, PeftModel, TaskType, get_peft_model
+    _PEFT_AVAILABLE = True
+except Exception:
+    LoraConfig = PeftModel = TaskType = get_peft_model = None
+    _PEFT_AVAILABLE = False
 
 try:
     from torch.amp import GradScaler
@@ -83,6 +90,7 @@ class TrainConfig:
 
     learning_rate: float = 2e-4
     lr_schedule: str = "cosine"
+    lr_decay_factor: float = 4.0
     per_device_train_batch_size: int = 1
     gradient_accumulation_steps: int = 8
     num_train_epochs: float = 3.0
@@ -133,6 +141,7 @@ class TrainConfig:
         self.learning_rate = float(self.learning_rate)
         self.weight_decay = float(self.weight_decay)
         self.num_train_epochs = float(self.num_train_epochs)
+        self.lr_decay_factor = max(0.01, float(self.lr_decay_factor))
         self.seed = int(self.seed)
         self.dataloader_num_workers = int(self.dataloader_num_workers)
         self.ddp_timeout_minutes = int(self.ddp_timeout_minutes)
@@ -666,7 +675,7 @@ def _find_first_subsequence(haystack: List[int], needle: List[int]) -> int:
         return -1
     n = len(needle)
     for i in range(0, len(haystack) - n + 1):
-        if haystack[i:i+n] == needle:
+        if haystack[i:i + n] == needle:
             return i
     return -1
 
@@ -717,7 +726,7 @@ def get_first_raw_example_preview(cfg: TrainConfig) -> Tuple[str, str]:
 
     if isinstance(first_item, tuple):
         prompt, answer = first_item
-        preview = (prompt + answer)
+        preview = prompt + answer
     else:
         preview = str(first_item)
 
@@ -1071,6 +1080,50 @@ def pick_precision(cfg: TrainConfig, device: torch.device) -> Tuple[Optional[tor
     return torch.float16, True, False
 
 
+def apply_training_mode(model: nn.Module, cfg: TrainConfig) -> nn.Module:
+    mode = (cfg.train_mode or "full").lower().strip()
+    if mode == "full":
+        for p in model.parameters():
+            p.requires_grad = True
+        return model
+
+    if mode != "lora":
+        raise ValueError(f"Unbekannter train_mode: {cfg.train_mode}")
+
+    if not _PEFT_AVAILABLE:
+        raise RuntimeError("LoRA angefordert, aber 'peft' ist nicht installiert.")
+
+    target_modules = []
+    for name, module in model.named_modules():
+        leaf = name.split('.')[-1].lower()
+        if isinstance(module, nn.Linear) and leaf in {
+            'q_proj', 'k_proj', 'v_proj', 'o_proj',
+            'gate_proj', 'up_proj', 'down_proj',
+            'query', 'key', 'value', 'dense',
+            'fc1', 'fc2', 'wq', 'wk', 'wv', 'wo',
+        }:
+            target_modules.append(name.split('.')[-1])
+    target_modules = sorted(set(target_modules))
+    if not target_modules:
+        target_modules = ['q_proj', 'k_proj', 'v_proj', 'o_proj']
+
+    peft_cfg = LoraConfig(
+        r=int(cfg.lora_r),
+        lora_alpha=int(cfg.lora_alpha),
+        lora_dropout=0.05,
+        bias='none',
+        task_type=TaskType.CAUSAL_LM,
+        target_modules=target_modules,
+    )
+    model = get_peft_model(model, peft_cfg)
+    try:
+        model.print_trainable_parameters()
+    except Exception:
+        pass
+    LOGGER.info('LoRA aktiv | r=%s alpha=%s targets=%s', cfg.lora_r, cfg.lora_alpha, ','.join(target_modules))
+    return model
+
+
 def build_model_and_tokenizer(cfg: TrainConfig, ctx: DistContext):
     tokenizer = AutoTokenizer.from_pretrained(cfg.model_dir, trust_remote_code=False, use_fast=True)
     need_resize = prepare_tokenizer(
@@ -1098,6 +1151,8 @@ def build_model_and_tokenizer(cfg: TrainConfig, ctx: DistContext):
 
     if hasattr(model, "config"):
         model.config.use_cache = False
+
+    model = apply_training_mode(model, cfg)
 
     if cfg.gradient_checkpointing:
         _enable_gradient_checkpointing(model)
@@ -1154,7 +1209,11 @@ def build_optimizer(model: nn.Module, cfg: TrainConfig) -> torch.optim.Optimizer
         )
 
 
-def build_scheduler(optimizer: torch.optim.Optimizer, total_steps: int, schedule: str) -> LambdaLR:
+def build_scheduler(
+    optimizer: torch.optim.Optimizer,
+    total_steps: int,
+    schedule: str,
+) -> LambdaLR:
     schedule = (schedule or "cosine").lower().strip()
 
     def _lambda(step: int) -> float:
@@ -1162,7 +1221,7 @@ def build_scheduler(optimizer: torch.optim.Optimizer, total_steps: int, schedule
             return 1.0
         progress = min(1.0, max(0.0, step / max(1, total_steps)))
         if schedule == "linear":
-            return 1.0 - progress
+            return max(0.0, 1.0 - progress)
         if schedule == "cosine":
             return 0.5 * (1.0 + math.cos(math.pi * progress))
         return 1.0
@@ -1265,7 +1324,6 @@ def train_epoch(
 
         batch = move_batch(batch, ctx.device)
 
-        # Live-Preview: immer den aktuellen Batch anzeigen
         if ctx.is_main and preview_writer is not None:
             try:
                 input_ids_cpu = batch["input_ids"].detach().to("cpu")
@@ -1351,7 +1409,6 @@ def train_epoch(
                 reached_max_steps = True
                 break
 
-    # Restliche Gradienten am Ende der Epoche noch flushen
     if accum_counter > 0 and not reached_max_steps and not sync_stop(SHUTDOWN.stop, ctx):
         if scaler is not None and getattr(scaler, "is_enabled", lambda: False)():
             scaler.unscale_(optimizer)
@@ -1439,6 +1496,7 @@ def main() -> int:
         set_seed(cfg.seed + ctx.rank, deterministic=cfg.deterministic)
 
         LOGGER.info("Worker gestartet | rank=%s local_rank=%s world_size=%s device=%s", ctx.rank, ctx.local_rank, ctx.world_size, ctx.device)
+        LOGGER.info("Train mode: %s", cfg.train_mode)
         LOGGER.info("Config: %s", json.dumps(cfg.__dict__, ensure_ascii=False))
 
         model, tokenizer, fp16, bf16 = build_model_and_tokenizer(cfg, ctx)
@@ -1478,6 +1536,8 @@ def main() -> int:
         updates_per_epoch = max(1, int(math.ceil(batches_per_epoch_est / max(1, cfg.gradient_accumulation_steps))))
         total_steps = int(cfg.max_steps) if cfg.max_steps is not None else max(1, int(math.ceil(cfg.num_train_epochs * updates_per_epoch)))
 
+        scheduler_total_steps = max(1, int(math.ceil(total_steps / max(0.01, cfg.lr_decay_factor))))
+
         loader = DataLoader(
             dataset,
             batch_size=cfg.per_device_train_batch_size,
@@ -1487,8 +1547,17 @@ def main() -> int:
         )
 
         optimizer = build_optimizer(model, cfg)
-        scheduler = build_scheduler(optimizer, total_steps, cfg.lr_schedule)
+        scheduler = build_scheduler(optimizer, scheduler_total_steps, cfg.lr_schedule)
         scaler = make_scaler(fp16=fp16, device=ctx.device)
+
+        if ctx.is_main:
+            LOGGER.info(
+                "Scheduler: schedule=%s total_steps=%s scheduler_total_steps=%s lr_decay_factor=%s",
+                cfg.lr_schedule,
+                total_steps,
+                scheduler_total_steps,
+                cfg.lr_decay_factor,
+            )
 
         model = wrap_ddp(model, cfg, ctx)
         barrier(ctx)
@@ -1532,7 +1601,21 @@ def main() -> int:
 
         if ctx.is_main:
             save_target = unwrap_model(model)
-            save_target.save_pretrained(outdir)
+            mode = (cfg.train_mode or "full").lower().strip()
+            if mode == "lora" and _PEFT_AVAILABLE and isinstance(save_target, PeftModel):
+                save_target.save_pretrained(outdir)
+                if cfg.merge_lora_on_save:
+                    try:
+                        merged_target = save_target.merge_and_unload()
+                        merged_dir = outdir / "merged"
+                        merged_dir.mkdir(parents=True, exist_ok=True)
+                        merged_target.save_pretrained(merged_dir)
+                        tokenizer.save_pretrained(merged_dir)
+                        LOGGER.info("Gemergtes LoRA-Modell gespeichert nach: %s", merged_dir)
+                    except Exception as merge_exc:
+                        LOGGER.warning("LoRA-Merge beim Speichern fehlgeschlagen: %s", merge_exc)
+            else:
+                save_target.save_pretrained(outdir)
             tokenizer.save_pretrained(outdir)
 
             (outdir / "template_info.json").write_text(
@@ -1569,6 +1652,11 @@ def main() -> int:
                     "allow_tf32": cfg.allow_tf32,
                     "use_dataset_cache": cfg.use_dataset_cache,
                     "cache_dir": str(cache_dir),
+                    "lr_decay_factor": cfg.lr_decay_factor,
+                    "scheduler_total_steps": scheduler_total_steps,
+                    "train_mode": cfg.train_mode,
+                    "lora_r": cfg.lora_r,
+                    "lora_alpha": cfg.lora_alpha,
                 }
             )
             LOGGER.info("Training abgeschlossen. Modell gespeichert nach: %s", outdir)
