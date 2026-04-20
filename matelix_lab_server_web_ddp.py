@@ -608,6 +608,8 @@ class DDPTrainingManager:
         )
 
         worker_cfg["device"] = device
+        if (cfg.train_mode or "full").strip().lower() == "lora" and float(worker_cfg.get("learning_rate", 0.0)) <= 2e-5:
+            worker_cfg["learning_rate"] = 2e-4
         worker_cfg["output_dir"] = str(run_dir)
         worker_cfg["save_dir"] = str(run_dir)
         worker_cfg["ddp_find_unused_parameters"] = self._resolve_find_unused(cfg, ddp_enabled, nproc, device)
@@ -939,7 +941,10 @@ def get_latest_model_dir() -> Optional[str]:
     valid_candidates: List[Path] = []
     for p in candidates:
         try:
-            if (p / "config.json").exists():
+            merged = p / "merged"
+            if merged.exists() and (merged / "config.json").exists():
+                valid_candidates.append(merged)
+            elif (p / "config.json").exists():
                 valid_candidates.append(p)
         except Exception:
             continue
@@ -968,6 +973,11 @@ def unload_inference() -> Dict[str, Any]:
 
 def load_inference_model(model_dir: str, device_name: str = "auto") -> Dict[str, Any]:
     from transformers import AutoModelForCausalLM, AutoTokenizer
+    try:
+        from peft import PeftConfig, PeftModel
+    except Exception:
+        PeftConfig = None
+        PeftModel = None
 
     dev_name = _preferred_device_name(device_name)
     dev = _get_device(dev_name)
@@ -984,18 +994,35 @@ def load_inference_model(model_dir: str, device_name: str = "auto") -> Dict[str,
             INFER.tokenizer = None
             INFER.model = None
 
-        tok = AutoTokenizer.from_pretrained(model_dir, trust_remote_code=False)
+        effective_model_dir = model_dir
+        if (Path(model_dir) / "merged" / "config.json").exists():
+            effective_model_dir = str(Path(model_dir) / "merged")
+
+        tok = AutoTokenizer.from_pretrained(effective_model_dir, trust_remote_code=False)
         need_resize = prepare_tokenizer_for_matelix(tok, force_template=False, template_mode="chat")
 
         dtype = torch.float16 if dev.type == "cuda" else None
 
-        mdl = AutoModelForCausalLM.from_pretrained(
-            model_dir,
-            trust_remote_code=False,
-            torch_dtype=dtype,
-            low_cpu_mem_usage=True,
-            attn_implementation="sdpa",
-        )
+        is_adapter = (Path(model_dir) / "adapter_config.json").exists()
+        if is_adapter and PeftConfig is not None and PeftModel is not None:
+            peft_cfg = PeftConfig.from_pretrained(model_dir)
+            base_model_dir = peft_cfg.base_model_name_or_path
+            mdl = AutoModelForCausalLM.from_pretrained(
+                base_model_dir,
+                trust_remote_code=False,
+                torch_dtype=dtype,
+                low_cpu_mem_usage=True,
+                attn_implementation="sdpa",
+            )
+            mdl = PeftModel.from_pretrained(mdl, model_dir)
+        else:
+            mdl = AutoModelForCausalLM.from_pretrained(
+                effective_model_dir,
+                trust_remote_code=False,
+                torch_dtype=dtype,
+                low_cpu_mem_usage=True,
+                attn_implementation="sdpa",
+            )
         if need_resize and hasattr(mdl, "resize_token_embeddings"):
             mdl.resize_token_embeddings(len(tok))
         if dev.type == "mps":
@@ -1725,3 +1752,4 @@ def root(_: Request):
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8002)
+
