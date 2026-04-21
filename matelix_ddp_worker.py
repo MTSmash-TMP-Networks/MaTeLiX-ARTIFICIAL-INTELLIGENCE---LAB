@@ -424,19 +424,8 @@ def get_chat_template(template_mode: str) -> str:
 {% if add_generation_prompt %}[ASSISTANT]
 {% endif %}"""
 
-    if mode == "dialogplus":
-        return """{{ bos_token }}
-{% for message in messages %}
-{% if message.role == 'system' %}<|System|>
-{{ message.content }}</s>
-{% elif message.role == 'user' %}<|Benutzer|>
-{{ message.content }}</s>
-{% elif message.role == 'assistant' %}<|Assistentin|>
-{{ message.content }}</s>
-{% endif %}
-{% endfor %}
-{% if add_generation_prompt %}<|Assistentin|>
-{% endif %}"""
+    if mode in {"chat", "dialogplus"}:
+        return """{% for message in messages %}{% if loop.index0 != 0 and message['role'] == 'system' %}{{ raise_exception('Conversation roles must alternate system(optional)/user/assistant/user/assistant/...') }}{% elif messages[0]['role'] == 'system' and ((message['role'] == 'user' and (loop.index0 % 2 == 0)) or (message['role'] == 'assistant' and (loop.index0 % 2 == 1))) %}{{ raise_exception('Conversation roles must alternate system(optional)/user/assistant/user/assistant/...') }}{% elif messages[0]['role'] != 'system' and ((message['role'] == 'user' and (loop.index0 % 2 != 0)) or (message['role'] == 'assistant' and (loop.index0 % 2 != 1))) %}{{ raise_exception('Conversation roles must alternate system(optional)/user/assistant/user/assistant/...') }}{% endif %}{% if message['role'] == 'user' %}{{ '<|Benutzer|>' + message['content'].strip() + eos_token }}{% elif message['role'] == 'system' %}{{ '<|System|>' + message['content'].strip() + eos_token }}{% elif message['role'] == 'assistant' %}{{ '<|Assistentin|>' + message['content'].strip() + eos_token }}{% endif %}{% endfor %}{% if add_generation_prompt %}{{ '<|Assistentin|>' }}{% endif %}"""
 
     return """{% for message in messages %}{% if loop.index0 != 0 and message['role'] == 'system' %}{{ raise_exception('Conversation roles must alternate system(optional)/user/assistant/user/assistant/...') }}{% elif messages[0]['role'] == 'system' and ((message['role'] == 'user' and (loop.index0 % 2 == 0)) or (message['role'] == 'assistant' and (loop.index0 % 2 == 1))) %}{{ raise_exception('Conversation roles must alternate system(optional)/user/assistant/user/assistant/...') }}{% elif messages[0]['role'] != 'system' and ((message['role'] == 'user' and (loop.index0 % 2 != 0)) or (message['role'] == 'assistant' and (loop.index0 % 2 != 1))) %}{{ raise_exception('Conversation roles must alternate system(optional)/user/assistant/user/assistant/...') }}{% endif %}{% if message['role'] == 'user' %}{{ '<|Benutzer|>' + message['content'].strip() + eos_token }}{% elif message['role'] == 'system' %}{{ '<|System|>' + message['content'].strip() + eos_token }}{% elif message['role'] == 'assistant' %}{{ '<|Assistentin|>' + message['content'].strip() + eos_token }}{% endif %}{% endfor %}{% if add_generation_prompt %}{{ '<|Assistentin|>' }}{% endif %}"""
 
@@ -618,14 +607,12 @@ def pack_dialog_from_blocks_strict(
     if max_seq_length <= 0:
         raise ValueError("max_seq_length muss > 0 sein")
 
-    # Zielantwort muss vollständig reinpassen
     if len(answer_ids) > max_seq_length:
         return None
 
     kept_prompt_blocks: List[List[int]] = []
     used = len(answer_ids)
 
-    # ganze Blöcke rückwärts einpacken
     for block_ids in reversed(prompt_blocks):
         if not block_ids:
             continue
@@ -633,7 +620,6 @@ def pack_dialog_from_blocks_strict(
             kept_prompt_blocks.insert(0, block_ids)
             used += len(block_ids)
         else:
-            # kompletter Block passt nicht mehr -> nicht anschneiden
             break
 
     input_ids = [tok for part in kept_prompt_blocks for tok in part] + answer_ids
@@ -651,7 +637,7 @@ def tokenize_example(
     max_seq_length: int,
     template_mode: str,
     max_history_turns: Optional[int],
-) -> Optional[Dict[str, List[int]]]:
+) -> Optional[Dict[str, Any]]:
     if isinstance(item, str):
         ids = tokenizer(item, add_special_tokens=False)["input_ids"]
         if len(ids) > max_seq_length:
@@ -665,6 +651,7 @@ def tokenize_example(
             "input_ids": ids,
             "attention_mask": [1] * len(ids),
             "labels": labels,
+            "seq_len": len(ids),
         }
 
     prompt_blocks: List[List[int]] = []
@@ -683,7 +670,6 @@ def tokenize_example(
         block = _build_role_block(turn.role, turn.content, template_mode, eos_token)
         block_ids = tokenizer(block, add_special_tokens=False)["input_ids"]
         if len(block_ids) > max_seq_length:
-            # einzelner Turn zu groß -> komplettes Sample verwerfen
             return None
         prompt_blocks.append(block_ids)
 
@@ -717,6 +703,7 @@ def tokenize_example(
         "input_ids": input_ids,
         "attention_mask": [1] * len(input_ids),
         "labels": labels,
+        "seq_len": len(input_ids),
     }
 
 
@@ -779,6 +766,7 @@ def compute_shard_cache_dir(cfg: TrainConfig) -> Path:
         "sort_by_length": bool(cfg.sort_by_length),
         "max_history_turns": cfg.max_history_turns,
         "strict_whole_turns": True,
+        "bucketed_shuffle": True,
     }
     key = hashlib.sha256(json.dumps(payload, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()[:24]
     cache_root = Path(cfg.output_dir or cfg.save_dir or "./training_outputs/worker_run").expanduser().resolve() / "dataset_cache"
@@ -802,6 +790,54 @@ def producer_meta_path(cache_dir: Path) -> Path:
     return cache_dir / "_producer_meta.json"
 
 
+def _write_shard(cache_dir: Path, shard_idx: int, global_start: int, samples: List[Dict[str, Any]]) -> None:
+    payload = {
+        "shard_idx": shard_idx,
+        "global_start": global_start,
+        "num_samples": len(samples),
+        "samples": samples,
+    }
+    tmp = shard_file_path(cache_dir, shard_idx).with_suffix(".tmp")
+    with open(tmp, "wb") as f:
+        pickle.dump(payload, f, protocol=pickle.HIGHEST_PROTOCOL)
+    tmp.replace(shard_file_path(cache_dir, shard_idx))
+
+
+def _flush_pending_samples(
+    *,
+    cache_dir: Path,
+    pending_samples: List[Dict[str, Any]],
+    current_samples: List[Dict[str, Any]],
+    shard_idx: int,
+    global_start: int,
+    shard_size: int,
+    sort_by_length: bool,
+) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], int, int]:
+    if sort_by_length and pending_samples:
+        pending_samples.sort(key=lambda s: int(s.get("seq_len") or len(s["input_ids"])))
+
+    while pending_samples:
+        free_slots = shard_size - len(current_samples)
+        if free_slots <= 0:
+            _write_shard(cache_dir, shard_idx, global_start, current_samples)
+            global_start += len(current_samples)
+            shard_idx += 1
+            current_samples = []
+            free_slots = shard_size
+
+        take = min(free_slots, len(pending_samples))
+        current_samples.extend(pending_samples[:take])
+        del pending_samples[:take]
+
+        if len(current_samples) >= shard_size:
+            _write_shard(cache_dir, shard_idx, global_start, current_samples)
+            global_start += len(current_samples)
+            shard_idx += 1
+            current_samples = []
+
+    return pending_samples, current_samples, shard_idx, global_start
+
+
 def shard_producer_process_main(cfg_dict: Dict[str, Any], cache_dir_str: str) -> None:
     try:
         cfg = TrainConfig(**cfg_dict)
@@ -818,7 +854,14 @@ def shard_producer_process_main(cfg_dict: Dict[str, Any], cache_dir_str: str) ->
         total_samples = 0
         skipped_samples = 0
 
-        current_samples: List[Dict[str, List[int]]] = []
+        current_samples: List[Dict[str, Any]] = []
+        pending_samples: List[Dict[str, Any]] = []
+
+        if cfg.sort_by_length:
+            sort_buffer_size = max(512, min(shard_size * 2, 20000))
+        else:
+            sort_buffer_size = shard_size
+
         examples_iter = build_examples_stream(cfg)
 
         for item in examples_iter:
@@ -834,36 +877,33 @@ def shard_producer_process_main(cfg_dict: Dict[str, Any], cache_dir_str: str) ->
                 skipped_samples += 1
                 continue
 
-            current_samples.append(sample)
+            pending_samples.append(sample)
             total_samples += 1
 
-            if len(current_samples) >= shard_size:
-                payload = {
-                    "shard_idx": shard_idx,
-                    "global_start": global_start,
-                    "num_samples": len(current_samples),
-                    "samples": current_samples,
-                }
-                tmp = shard_file_path(cache_dir, shard_idx).with_suffix(".tmp")
-                with open(tmp, "wb") as f:
-                    pickle.dump(payload, f, protocol=pickle.HIGHEST_PROTOCOL)
-                tmp.replace(shard_file_path(cache_dir, shard_idx))
+            if len(pending_samples) >= sort_buffer_size:
+                pending_samples, current_samples, shard_idx, global_start = _flush_pending_samples(
+                    cache_dir=cache_dir,
+                    pending_samples=pending_samples,
+                    current_samples=current_samples,
+                    shard_idx=shard_idx,
+                    global_start=global_start,
+                    shard_size=shard_size,
+                    sort_by_length=bool(cfg.sort_by_length),
+                )
 
-                global_start += len(current_samples)
-                current_samples = []
-                shard_idx += 1
+        if pending_samples:
+            pending_samples, current_samples, shard_idx, global_start = _flush_pending_samples(
+                cache_dir=cache_dir,
+                pending_samples=pending_samples,
+                current_samples=current_samples,
+                shard_idx=shard_idx,
+                global_start=global_start,
+                shard_size=shard_size,
+                sort_by_length=bool(cfg.sort_by_length),
+            )
 
         if current_samples:
-            payload = {
-                "shard_idx": shard_idx,
-                "global_start": global_start,
-                "num_samples": len(current_samples),
-                "samples": current_samples,
-            }
-            tmp = shard_file_path(cache_dir, shard_idx).with_suffix(".tmp")
-            with open(tmp, "wb") as f:
-                pickle.dump(payload, f, protocol=pickle.HIGHEST_PROTOCOL)
-            tmp.replace(shard_file_path(cache_dir, shard_idx))
+            _write_shard(cache_dir, shard_idx, global_start, current_samples)
             shard_idx += 1
 
         meta = {
@@ -875,6 +915,9 @@ def shard_producer_process_main(cfg_dict: Dict[str, Any], cache_dir_str: str) ->
             "max_seq_length": cfg.max_seq_length,
             "max_history_turns": cfg.max_history_turns,
             "strict_whole_turns": True,
+            "sort_by_length": bool(cfg.sort_by_length),
+            "sort_buffer_size": sort_buffer_size,
+            "bucketed_shuffle": True,
         }
         producer_meta_path(cache_dir).write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
         producer_done_path(cache_dir).write_text(json.dumps({"done": True}, ensure_ascii=False), encoding="utf-8")
@@ -940,6 +983,28 @@ def wait_for_first_shard(cache_dir: Path, poll_sec: float = 1.0) -> None:
         time.sleep(poll_sec)
 
 
+def _make_bucketed_shuffle_order(samples: List[Dict[str, Any]], rng: random.Random) -> List[int]:
+    order = list(range(len(samples)))
+    if not order:
+        return order
+
+    if not all(("seq_len" in s) for s in samples):
+        rng.shuffle(order)
+        return order
+
+    order.sort(key=lambda i: int(samples[i].get("seq_len") or len(samples[i]["input_ids"])))
+
+    bucket_size = max(8, min(64, len(order)))
+    buckets = [order[i:i + bucket_size] for i in range(0, len(order), bucket_size)]
+
+    for bucket in buckets:
+        rng.shuffle(bucket)
+
+    rng.shuffle(buckets)
+
+    return [idx for bucket in buckets for idx in bucket]
+
+
 class TokenizedShardIterableDataset(IterableDataset):
     def __init__(
         self,
@@ -947,6 +1012,7 @@ class TokenizedShardIterableDataset(IterableDataset):
         rank: int,
         world_size: int,
         shuffle: bool = False,
+        sort_by_length: bool = True,
         epoch: int = 0,
     ):
         super().__init__()
@@ -954,6 +1020,7 @@ class TokenizedShardIterableDataset(IterableDataset):
         self.rank = rank
         self.world_size = world_size
         self.shuffle = shuffle
+        self.sort_by_length = sort_by_length
         self.epoch = epoch
 
     def set_epoch(self, epoch: int) -> None:
@@ -982,8 +1049,11 @@ class TokenizedShardIterableDataset(IterableDataset):
 
             if self.shuffle:
                 rng = random.Random((self.epoch + 1) * 1000003 + shard_idx)
-                order = list(range(len(samples)))
-                rng.shuffle(order)
+                if self.sort_by_length:
+                    order = _make_bucketed_shuffle_order(samples, rng)
+                else:
+                    order = list(range(len(samples)))
+                    rng.shuffle(order)
             else:
                 order = list(range(len(samples)))
 
@@ -1429,9 +1499,6 @@ def main() -> int:
             except Exception:
                 pass
 
-    if ctx.is_distributed and cfg.sort_by_length:
-        cfg.sort_by_length = False
-
     outdir = Path(cfg.output_dir or cfg.save_dir or "./training_outputs/worker_run").expanduser().resolve()
     outdir.mkdir(parents=True, exist_ok=True)
     log_path = outdir / "training.log"
@@ -1479,6 +1546,7 @@ def main() -> int:
             rank=ctx.rank,
             world_size=ctx.world_size,
             shuffle=bool(cfg.shuffle),
+            sort_by_length=bool(cfg.sort_by_length),
             epoch=0,
         )
         collator = DataCollator(tokenizer.pad_token_id or tokenizer.eos_token_id or 0, pad_to_multiple_of=8)
@@ -1513,6 +1581,12 @@ def main() -> int:
             LOGGER.info(
                 "Strict whole-turn packing aktiv | max_history_turns=%s | no partial turns | oversize samples skipped",
                 cfg.max_history_turns,
+            )
+            LOGGER.info(
+                "sort_by_length=%s | shuffle=%s | bucketed_shuffle=%s",
+                cfg.sort_by_length,
+                cfg.shuffle,
+                bool(cfg.shuffle and cfg.sort_by_length),
             )
 
         model = wrap_ddp(model, cfg, ctx)
@@ -1610,6 +1684,8 @@ def main() -> int:
                         "max_history_turns": cfg.max_history_turns,
                         "strict_whole_turns": True,
                         "skipped_samples": meta.get("skipped_samples", 0),
+                        "sort_by_length": bool(cfg.sort_by_length),
+                        "bucketed_shuffle": True,
                     },
                     ensure_ascii=False,
                     indent=2,
@@ -1641,6 +1717,8 @@ def main() -> int:
                     "max_history_turns": cfg.max_history_turns,
                     "strict_whole_turns": True,
                     "skipped_samples": meta.get("skipped_samples", 0),
+                    "sort_by_length": bool(cfg.sort_by_length),
+                    "bucketed_shuffle": True,
                 }
             )
             LOGGER.info("Training abgeschlossen. Modell gespeichert nach: %s", outdir)
