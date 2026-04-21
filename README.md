@@ -1,166 +1,292 @@
-# MaTeLiX AI Lab (Trainer & Inference Server)
+# MaTeLiX ARTIFICIAL INTELLIGENCE - LAB
 
-<img width="1940" height="811" alt="Matelix" src="https://github.com/user-attachments/assets/23873d32-74ef-4640-b4c5-f24fb40b738c" />
+![Python](https://img.shields.io/badge/Python-3.10%2B-3776AB?logo=python&logoColor=white)
+![FastAPI](https://img.shields.io/badge/FastAPI-Web%20API-009688?logo=fastapi&logoColor=white)
+![PyTorch](https://img.shields.io/badge/PyTorch-Training-EE4C2C?logo=pytorch&logoColor=white)
+![Transformers](https://img.shields.io/badge/Transformers-Hugging%20Face-FFD21E)
+![License](https://img.shields.io/badge/License-Apache%202.0-blue)
 
+Lokales **LLM Training- und Inference-Lab** mit **FastAPI**, **Web-UI**, **DDP-/Multi-GPU-Training**, **LoRA**, **Live-Logs**, **Live-Preview** und einer **OpenAI-kompatiblen API**.
 
-Ein lokales **FastAPI**-Lab für **Fine-Tuning** (Full / LoRA) und **Inference** inkl. Web-UI-Fallback, Live-Logs, Training-Status, Live-Preview sowie einer **OpenAI-kompatiblen API** (`/v1/*`).
+> Entwickelt für lokales Fine-Tuning, Chat-Datasets, Text-Datasets und kontrollierte Inference-Workflows.
 
-> Datei: `matelix_llm_lab.py`  
-> Standard-Port: `8002`
+---
+
+## Inhaltsverzeichnis
+
+- [Features](#features)
+- [Projektstruktur](#projektstruktur)
+- [Installation](#installation)
+- [Start](#start)
+- [Web-UI](#web-ui)
+- [Dataset-Formate](#dataset-formate)
+- [Strict Whole-Turn Packing](#strict-whole-turn-packing)
+- [Training](#training)
+- [Inference](#inference)
+- [OpenAI-kompatible API](#openai-kompatible-api)
+- [Wichtige Parameter](#wichtige-parameter)
+- [DDP / Multi-GPU](#ddp--multi-gpu)
+- [LoRA / Merge-Verhalten](#lora--merge-verhalten)
+- [Troubleshooting](#troubleshooting)
+- [Lizenz](#lizenz)
 
 ---
 
 ## Features
 
 ### Training
-- **Full Fine-Tuning** oder **LoRA Fine-Tuning** (`train_mode: full|lora`)
-- CSV-Datasets (`./datasets/*.csv`)
-- Trainingsoutputs + Logs in `./training_outputs/…`
-- **Live-Status** (`/status`), **Live-Logs** (`/logs` + WebSocket `/ws/logs`)
-- **Live-Preview** eines Batches (`/livepreview`)
-- Stop-Mechanik mit sauberem Thread-Ende (Stop-Signal wird gesetzt, `running` erst am Ende zurückgesetzt)
+- Full Fine-Tuning oder LoRA Fine-Tuning
+- Single-GPU, CPU, MPS oder **DDP / Multi-GPU**
+- CSV-basierte Trainingsdaten
+- Trainingsstatus, Logs und Live-Preview
+- Stop-Funktion für laufende Trainings
+- automatische Trainingsoutputs pro Run
+
+### Dataset-Verarbeitung
+- `chat`, `dialogplus`, `plain`
+- Thread-Rekonstruktion über `id` / `parent_id`
+- **strict whole-turn packing**
+- keine halben Turns / keine halb abgeschnittenen Dialoge
+- Oversize-Samples werden übersprungen
+- tokenisierte **Shard-Caches** für schnellere Folge-Trainings
 
 ### Tokenizer / Template
-- Auto-Setup für MaTeLiX-Chat-Template inkl. Rollen-Tokens:
-  - `<|System|>`, `<|Benutzer|>`, `<|Assistentin|>`
-- `pad_token` wird gesetzt (falls fehlt / identisch zu `eos`)
-- Robust: **System-Message** wird als `role="system"` in `messages` geprepended (kein `system=` Parameter in `apply_chat_template`)
-
-### N-Gramm Optimierung (optional)
-- Extrahiert häufige N-Gramme (auch code-lastig) und fügt sie als Tokens hinzu
-- Initialisiert neue Token-Embeddings aus Mittelwert der Quell-Tokens
-- Speichert Mapping in `ngram_token_map.json` im Output-Ordner
+- automatische Rollen-Tokens:
+  - `<|System|>`
+  - `<|Benutzer|>`
+  - `<|Assistentin|>`
+- automatisches `pad_token`-Handling
+- eigenes MaTeLiX Chat-Template
+- strikte Rollenvalidierung im Chat-Modus
 
 ### Inference
-- Laden/Entladen von Modellen (`/load_inference`, `/unload_inference`)
-- Chat (`/chat`) und Streaming (`/chat_stream`)
-- Optional `model_dir` pro Request
+- Modell laden / entladen
+- normaler Chat
+- Streaming-Chat
+- LoRA-Adapter oder reguläre Modelle laden
+- bevorzugt aktuelles / letztes Modell
 
-### OpenAI-kompatibel (`/v1/*`)
-- `GET /v1/models`
-- `POST /v1/chat/completions`
-- `POST /v1/completions`
-- API-Key via `Authorization: Bearer ...`
+### API / UI
+- FastAPI-Backend
+- OpenAI-kompatible `/v1/*` Endpunkte
+- Web-UI mit Hardware-Anzeige, Logs, Loss-Kurve und Chat
 
 ---
 
-## Projektstruktur (Default)
+## Projektstruktur
 
-```txt
+```text
 .
-├─ matelix_llm_lab.py
+├─ matelix_lab_server_web_ddp.py
+├─ matelix_ddp_worker.py
 ├─ datasets/
-│  └─ your_dataset.csv
+│  └─ *.csv
+├─ static/
+│  └─ index.html
 ├─ training_outputs/
 │  └─ <model>_YYYY-MM-DD_HH-MM-SS/
-│     ├─ training.log
 │     ├─ train_config.json
-│     ├─ (model files)
-│     └─ (tokenizer files)
-└─ static/
-   └─ index.html
+│     ├─ worker_config.json
+│     ├─ training.log
+│     ├─ status.json
+│     ├─ livepreview.json
+│     ├─ dataset_cache/
+│     ├─ template_info.json
+│     ├─ merged/                # falls LoRA-Merge erfolgreich
+│     └─ ...
+└─ README.md
 ````
-
-Wenn `./static/index.html` fehlt, wird automatisch eine kleine Fallback-Seite erzeugt.
-
----
-
-## Voraussetzungen
-
-* Python 3.11+ empfohlen
-* PyTorch (CUDA optional)
-* NVIDIA-Setup optional: `nvidia-smi` wird genutzt, wenn verfügbar
-
-### Wichtige Python-Pakete
-
-* `fastapi`, `uvicorn`, `pydantic`
-* `torch`, `transformers`, `tokenizers`
-* `psutil`
-* optional für LoRA: `peft`
 
 ---
 
 ## Installation
 
+### Voraussetzungen
+
+* Python 3.10+ empfohlen
+* PyTorch
+* `transformers`
+* `fastapi`
+* `uvicorn`
+* `psutil`
+* optional: `peft` für LoRA
+
+### Setup
+
 ```bash
 python -m venv .venv
-source .venv/bin/activate   # Windows: .venv\Scripts\activate
-
-pip install -U pip
-pip install fastapi uvicorn pydantic psutil torch transformers tokenizers
-pip install peft   # optional (nur wenn du LoRA nutzen willst)
+source .venv/bin/activate
 ```
 
-> Hinweis: Für CUDA nutze die passende PyTorch-Installation entsprechend deiner CUDA-Version.
+Windows:
+
+```bash
+.venv\Scripts\activate
+```
+
+Pakete installieren:
+
+```bash
+pip install -U pip
+pip install fastapi uvicorn pydantic psutil torch transformers tokenizers
+pip install peft
+```
 
 ---
 
 ## Start
 
 ```bash
-python matelix_llm_lab.py
+python matelix_lab_server_web_ddp.py
 ```
 
-Dann im Browser öffnen:
+Danach:
 
-* [http://127.0.0.1:8002/](http://127.0.0.1:8002/)
-
----
-
-## API Quickstart
-
-### Hardware / Systemstatus
-
-```bash
-curl http://127.0.0.1:8002/hardware
-curl http://127.0.0.1:8002/sysstatus
-```
-
-### Datasets / Modelle
-
-```bash
-curl http://127.0.0.1:8002/available_datasets
-curl http://127.0.0.1:8002/available_models
-curl http://127.0.0.1:8002/trainings
+```text
+http://127.0.0.1:8002/
 ```
 
 ---
 
-## Training starten
+## Web-UI
 
-### Beispiel: Full Fine-Tuning
+Die Oberfläche liegt unter:
+
+```text
+/static/index.html
+```
+
+Funktionen der UI:
+
+* Modellauswahl
+* Dataset-Auswahl
+* Trainingsparameter
+* optionaler History-Deckel
+* Cache-Neuaufbau
+* LoRA-Optionen
+* Live-Logs
+* Loss-Kurve
+* Live-Preview
+* Browser-Chat mit geladenem Modell
+
+---
+
+## Dataset-Formate
+
+## 1. `template_mode="plain"`
+
+Für reine Textdaten.
+
+```csv
+text
+Das ist ein Beispielsatz.
+Noch ein Beispielsatz.
+```
+
+Beispiel:
+
+```json
+{
+  "template_mode": "plain",
+  "column_name": "text"
+}
+```
+
+---
+
+## 2. `template_mode="chat"`
+
+Für Chat-/Thread-Datasets.
+
+Erwartete Felder:
+
+* `id`
+* `parent_id`
+* `system` (optional)
+* `Benutzer`
+* `Kontext` (optional)
+* `Assistentin`
+
+Beispiel:
+
+```csv
+id,parent_id,system,Benutzer,Kontext,Assistentin
+1,,Du bist ein freundlicher Chatbot.,Hallo!,,"Hallo! Wie kann ich dir helfen?"
+2,1,,Wie spät ist es?,,"Ich habe keinen Zugriff auf deine Uhr, aber du kannst oben rechts schauen."
+3,,Du bist Übersetzer.,Übersetze: "Guten Morgen",,Auf Englisch: "Good morning".
+```
+
+---
+
+## 3. `template_mode="dialogplus"`
+
+Wie `chat`, aber blockorientiert.
+
+Auch hier gilt:
+
+* ganze Turns
+* keine halben Blöcke
+* zu große Samples werden übersprungen
+
+---
+
+## Strict Whole-Turn Packing
+
+Die aktuelle Logik ist **tokenbudget-gesteuert**:
+
+* komplette Turns werden rückwärts gesammelt
+* nur vollständige Blöcke werden übernommen
+* Antwort bleibt vollständig
+* kein harter Cut mitten im Turn
+* zu große Samples werden verworfen
+
+### Empfehlung
+
+Für normale Chat-Datasets:
+
+```json
+{
+  "max_history_turns": null
+}
+```
+
+Das bedeutet:
+
+* nur das Tokenfenster entscheidet
+* kein künstlicher Zusatzdeckel
+
+Optional kann `max_history_turns` gesetzt werden, wenn zusätzlich begrenzt werden soll.
+
+---
+
+## Training
+
+### Beispiel: Chat / LoRA
 
 ```bash
 curl -X POST http://127.0.0.1:8002/start \
   -H "Content-Type: application/json" \
   -d '{
-    "model_dir": "path/or/hf-repo-id",
-    "csv_path": "datasets/your_dataset.csv",
-    "device": "auto",
-    "train_mode": "full",
-    "learning_rate": 0.0004,
-    "per_device_train_batch_size": 1,
-    "gradient_accumulation_steps": 7,
-    "num_train_epochs": 3,
-    "chunk_size": 1024,
+    "model_dir": "MTSmash/EvaGPT-German-0.7B",
+    "csv_path": "./datasets/dein_dataset.csv",
+    "save_dir": "./training_outputs",
     "template_mode": "chat",
+    "learning_rate": 0.0002,
+    "lr_schedule": "cosine",
+    "per_device_train_batch_size": 1,
+    "gradient_accumulation_steps": 8,
+    "num_train_epochs": 3,
+    "max_seq_length": 1024,
+    "max_history_turns": null,
     "shuffle": false,
-    "sort_by_length": true
-  }'
-```
-
-### Beispiel: LoRA Fine-Tuning
-
-```bash
-curl -X POST http://127.0.0.1:8002/start \
-  -H "Content-Type: application/json" \
-  -d '{
-    "model_dir": "path/or/hf-repo-id",
-    "csv_path": "datasets/your_dataset.csv",
+    "sort_by_length": true,
+    "rebuild_dataset_cache": true,
     "device": "auto",
     "train_mode": "lora",
     "lora_r": 8,
     "lora_alpha": 16,
+    "precision_mode": "auto",
+    "gradient_checkpointing": false,
     "merge_lora_on_save": true
   }'
 ```
@@ -179,51 +305,15 @@ curl http://127.0.0.1:8002/logs
 curl http://127.0.0.1:8002/livepreview
 ```
 
----
+WebSocket:
 
-## Dataset-Formate (CSV)
-
-### 1) `template_mode: "column"`
-
-Nutze eine Textspalte (Default: `text`).
-
-**Beispiel-CSV:**
-
-```csv
-text
-"Hallo, wie geht es dir?"
-"Erkläre mir LoRA in einfachen Worten."
+```text
+/ws/logs
 ```
-
-Start-Konfig:
-
-```json
-{
-  "template_mode": "column",
-  "column_name": "text"
-}
-```
-
-### 2) `template_mode: "chat"` (Threaded Dialog)
-
-Erwartet CSV mit Thread-IDs, z.B.:
-
-* `id`
-* `parent_id`
-* `system`
-* `Benutzer`
-* `Kontext`
-* `Assistentin`
-
-Das Lab rekonstruiert Konversationen über `parent_id` → `id` und rendert daraus Chat-Trainingstexte mit Rollen-Tokens.
-
-### 3) `template_mode: "dialogplus"`
-
-Ähnlich wie `chat`, aber mit konsequenten `</s>`-Trennern pro Turn.
 
 ---
 
-## Inference (eigene Endpoints)
+## Inference
 
 ### Modell laden
 
@@ -231,47 +321,58 @@ Das Lab rekonstruiert Konversationen über `parent_id` → `id` und rendert dara
 curl -X POST http://127.0.0.1:8002/load_inference \
   -H "Content-Type: application/json" \
   -d '{
-    "model_dir": "training_outputs/DEIN_OUTPUT_ORDNER",
+    "model_dir": "./training_outputs/DEIN_MODELL_ORDNER",
     "device": "auto"
   }'
 ```
 
-### Chat (non-stream)
+### Chat
 
 ```bash
 curl -X POST http://127.0.0.1:8002/chat \
   -H "Content-Type: application/json" \
   -d '{
-    "messages": [{"role":"user","content":"Sag Hallo!"}],
+    "messages": [
+      {"role":"user","content":"Sag Hallo!"}
+    ],
     "max_new_tokens": 128,
-    "temperature": 0.7
+    "temperature": 0.7,
+    "top_p": 0.9
   }'
 ```
 
-### Chat (stream)
+### Streaming-Chat
 
 ```bash
 curl -N -X POST http://127.0.0.1:8002/chat_stream \
   -H "Content-Type: application/json" \
   -d '{
-    "messages": [{"role":"user","content":"Erzähl mir eine kurze Geschichte."}],
+    "messages": [
+      {"role":"user","content":"Erzähl mir eine kurze Geschichte."}
+    ],
     "max_new_tokens": 128,
-    "temperature": 0.8
+    "temperature": 0.8,
+    "top_p": 0.9
   }'
 ```
 
 ---
 
-## OpenAI-kompatible API (`/v1/*`)
+## OpenAI-kompatible API
+
+Verfügbare Endpunkte:
+
+* `GET /v1/models`
+* `POST /v1/chat/completions`
+* `POST /v1/completions`
 
 ### Auth
 
-Setze Header:
+Standardmäßig:
 
-* `Authorization: Bearer matelix-local-dev-key`
-
-> Key ist aktuell im Code als `OPENAI_COMPAT_API_KEY = "matelix-local-dev-key"` gesetzt.
-> Wenn du ihn leer machst, ist Auth deaktiviert.
+```text
+Authorization: Bearer matelix-local-dev-key
+```
 
 ### Modelle listen
 
@@ -287,22 +388,26 @@ curl -X POST http://127.0.0.1:8002/v1/chat/completions \
   -H "Authorization: Bearer matelix-local-dev-key" \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "training_outputs/DEIN_OUTPUT_ORDNER",
-    "messages": [{"role":"user","content":"Schreibe einen kurzen Reim über KI."}],
+    "model": "./training_outputs/DEIN_MODELL_ORDNER",
+    "messages": [
+      {"role":"user","content":"Schreibe einen kurzen Reim über KI."}
+    ],
     "max_tokens": 128,
     "temperature": 0.7
   }'
 ```
 
-### Streaming (SSE)
+### Streaming SSE
 
 ```bash
 curl -N -X POST http://127.0.0.1:8002/v1/chat/completions \
   -H "Authorization: Bearer matelix-local-dev-key" \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "training_outputs/DEIN_OUTPUT_ORDNER",
-    "messages": [{"role":"user","content":"Gib mir 5 Ideen für ein FastAPI Projekt."}],
+    "model": "./training_outputs/DEIN_MODELL_ORDNER",
+    "messages": [
+      {"role":"user","content":"Gib mir 5 Ideen für ein FastAPI Projekt."}
+    ],
     "stream": true,
     "max_tokens": 200
   }'
@@ -310,34 +415,115 @@ curl -N -X POST http://127.0.0.1:8002/v1/chat/completions \
 
 ---
 
-## Sicherheitshinweise
+## Wichtige Parameter
 
-* `HF_TRUST_REMOTE_CODE = False` ist **bewusst** als Sicherheits-Voreinstellung gesetzt.
-* Wenn du ein Modell nutzt, das `trust_remote_code=True` benötigt, musst du das gezielt anpassen (auf eigenes Risiko).
-* CORS ist offen (`allow_origins=["*"]`) – für echte Deployments bitte einschränken.
+| Parameter                | Bedeutung                                    |
+| ------------------------ | -------------------------------------------- |
+| `model_dir`              | Hugging Face Repo-ID oder lokaler Modellpfad |
+| `csv_path`               | Pfad zur Trainings-CSV                       |
+| `template_mode`          | `chat`, `dialogplus`, `plain`                |
+| `max_seq_length`         | maximales Tokenfenster                       |
+| `max_history_turns`      | optionaler zusätzlicher Turn-Deckel          |
+| `rebuild_dataset_cache`  | Cache neu erzeugen                           |
+| `train_mode`             | `full` oder `lora`                           |
+| `lora_r`                 | LoRA Rank                                    |
+| `lora_alpha`             | LoRA Alpha                                   |
+| `precision_mode`         | `auto`, `fp32`, `fp16`, `bf16`               |
+| `gradient_checkpointing` | spart VRAM, kostet Laufzeit                  |
+
+---
+
+## DDP / Multi-GPU
+
+Beispiel:
+
+```json
+{
+  "ddp_enabled": true,
+  "nproc_per_node": 2,
+  "master_addr": "127.0.0.1",
+  "master_port": 29500
+}
+```
+
+Wenn mehrere CUDA-Geräte vorhanden sind, kann das Training verteilt gestartet werden.
+
+---
+
+## LoRA / Merge-Verhalten
+
+Beim Speichern gilt:
+
+* Adapter wird regulär gespeichert
+* falls `merge_lora_on_save=true`:
+
+  * zusätzlich wird ein Merge versucht
+* falls `merge_and_unload()` vom Modell nicht unterstützt wird:
+
+  * Training bleibt trotzdem erfolgreich
+  * Adapter bleibt normal nutzbar
 
 ---
 
 ## Troubleshooting
 
-* **CUDA wird nicht genutzt**: Prüfe `torch.cuda.is_available()` und passende Torch-Version.
-* **LoRA klappt nicht**: Stelle sicher, dass `peft` installiert ist und dass die Zielmodule erkannt werden. Im Log steht:
+### Kein erster Shard / kein Cache
 
-  * `[LoRA] Detected targets: ...`
-* **Dataset leer**: Prüfe CSV-Encoding (UTF-8), Spaltennamen und Pfade.
-* **Tokenizers parallelism warnings**: ist per `TOKENIZERS_PARALLELISM=false` deaktiviert.
+Mögliche Gründe:
+
+* CSV ist leer
+* Spaltennamen passen nicht
+* alle Samples sind größer als `max_seq_length`
+* Antwort oder Turns sind einzeln zu groß
+
+### LoRA Merge schlägt fehl
+
+Das ist nicht zwingend kritisch:
+
+* Adapter bleibt gespeichert
+* nur das zusätzliche `merged/` Modell fehlt dann
+
+### CUDA wird nicht genutzt
+
+Prüfen:
+
+* passende Torch-Version
+* CUDA-Installation
+* `torch.cuda.is_available()`
+
+### UI zeigt alte Daten
+
+Meist hilft:
+
+* Browser-Cache leeren
+* `rebuild_dataset_cache=true`
+* sicherstellen, dass die richtige `static/index.html` geladen wird
 
 ---
 
 ## Lizenz
 
-Dieses Projekt ist unter der **Apache License 2.0** lizenziert – siehe `LICENSE`.
+Dieses Projekt steht unter der **Apache License 2.0**.
+Siehe `LICENSE`.
 
 ---
 
-## Roadmap
+## Trademark
 
-* [ ] UI Dashboard (Training, Logs, Preview, Inference)
-* [ ] Multi-GPU / Distributed Training
-* [ ] Dataset-Validierung + Schema-Checks
-* [ ] Checkpoint-Resume
+**MaTeLiX AI** ist eine Marke / Brand der **TMP-SYSTEM-SERVICE GmbH**.
+
+---
+
+## Empfohlene Defaults
+
+```json
+{
+  "template_mode": "chat",
+  "max_seq_length": 1024,
+  "max_history_turns": null,
+  "rebuild_dataset_cache": true,
+  "train_mode": "lora",
+  "lora_r": 8,
+  "lora_alpha": 16
+}
+```
