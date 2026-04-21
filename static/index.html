@@ -60,6 +60,15 @@ input:focus, select:focus, textarea:focus {
   background: #0c2e20;
 }
 
+input[type="checkbox"] {
+  width: 20px;
+  height: 20px;
+  justify-self: end;
+  accent-color: #26ff88;
+  box-shadow: none;
+  padding: 0;
+}
+
 button.danger {
   background: linear-gradient(90deg,#5f1212,#2a0606);
   color: #ffd4d4;
@@ -131,20 +140,22 @@ button.danger:hover, button.danger:focus {
 }
 .status, .card .status {
   margin:1em 0 1.7em 0;
-  font-size:1.1em;
+  font-size:1.05em;
   background:rgba(40,255,80,0.06);
   border-radius:7px;
   padding:0.8em 1.1em;
   box-shadow:0 0 6px #1aff5b13;
+  display:grid;
+  grid-template-columns: auto 1fr;
+  gap: 0.35em 0.8em;
 }
 
-/* === SETTINGS-GRID TRAINING === */
 .settings-grid {
   display: grid;
-  grid-template-columns: 140px 1fr;
+  grid-template-columns: 185px 1fr;
   gap: 0.55em 1.1em;
   align-items: center;
-  max-width: 520px;
+  max-width: 580px;
   margin: 0 auto 1.4em auto;
 }
 .settings-grid label {
@@ -159,7 +170,7 @@ button.danger:hover, button.danger:focus {
 }
 .settings-grid input,
 .settings-grid select {
-  width: 55%;
+  width: 58%;
   min-width: 0;
   margin-bottom: 0;
   justify-self: end;
@@ -174,7 +185,7 @@ button.danger:hover, button.danger:focus {
     max-width: 99vw;
     gap: 0.55em 0.7em;
   }
-  .settings-grid label { margin-top: 0.7em; }
+  .settings-grid label { margin-top: 0.7em; white-space:normal; }
   .settings-grid input,
   .settings-grid select {
     width: 100%;
@@ -182,7 +193,6 @@ button.danger:hover, button.danger:focus {
   }
 }
 
-/* --- GLOBALE BUTTONS IM MATRIX-DESIGN --- */
 button {
   background: linear-gradient(90deg,#1ed976 10%,#064c25 90%);
   color: #0fffa8;
@@ -204,7 +214,6 @@ button:hover, button:focus {
   border-color: #47ffa0;
 }
 
-/* --- KLEINE SPEZIAL-KLASSE FÜR DOWNLOAD-BUTTONS --- */
 button.download-btn {
   font-size: 0.93em;
   padding: 0.25em 0.9em;
@@ -220,7 +229,6 @@ button.download-btn:hover, button.download-btn:focus {
   color: #aaffcb;
 }
 
-/* --- Weitere Styles --- */
 form label { font-family: 'Fira Mono', 'Consolas', monospace; }
 form label {
   margin: 8px 4px 8px 0;
@@ -297,7 +305,6 @@ form label {
   color: #2fffa0;
 }
 
-/* --- Matrix Spinner Overlay --- */
 #matrix-spinner-overlay {
   display: none;
   position: fixed;
@@ -384,7 +391,6 @@ form label {
   .card { max-width:99vw; min-width:95vw;}
 }
 
-/* --- Footer --- */
 #site-footer {
   background: #0b1c14;
   border-top: 2px solid var(--green);
@@ -439,8 +445,7 @@ form label {
 <div id="all-gpus-list" style="text-align:center; margin:0.5em 0 1em 0; color:#00ffd7;"></div>
 
 <div id="dashboard-main">
-  <!-- TRAINING CARD -->
-  <div class="card" style="max-width:520px;">
+  <div class="card" style="max-width:580px;">
     <h2>Training Setup</h2>
 
     <form id="settings" autocomplete="off" class="settings-grid">
@@ -460,15 +465,13 @@ form label {
       <label for="save_dir">Speicher-Ordner (Basis):</label>
       <input type="text" id="save_dir" value="./training_outputs">
 
-      <!-- TEMPLATE MODE -->
       <label for="template_mode">Vorlagen-Typ:</label>
       <select id="template_mode">
         <option value="chat" selected>Dialog (Chat-Template)</option>
         <option value="dialogplus">Dialog (Block-Template)</option>
-        <option value="text">Nur Textspalte</option>
+        <option value="plain">Nur Textspalte</option>
       </select>
 
-      <!-- column_name nur bei text -->
       <label for="column_name" id="column_field" class="column_row" style="display:none;">Spaltenname:</label>
       <input type="text" id="column_name" value="text" class="column_row" style="display:none; width:10em;">
 
@@ -493,8 +496,13 @@ form label {
       <label for="max_steps" title="Optionales Hard-Limit (leer lassen = aus)">Max Steps:</label>
       <input type="number" id="max_steps" placeholder="(optional)" min="1">
 
-      <label for="max_seq_length" title="Kontextfenster fürs Training (wichtig!)">Max Seq Length:</label>
+      <label for="max_seq_length" title="Tokenfenster fürs Training">Max Seq Length:</label>
       <input type="number" id="max_seq_length" value="1024" min="64">
+
+      <label for="max_history_turns" title="Optionaler zusätzlicher Deckel. Leer = automatisch nur nach Tokenfenster entscheiden.">
+        Max History Turns:
+      </label>
+      <input type="number" id="max_history_turns" placeholder="leer = auto" min="1">
 
       <label for="shuffle">Shuffle:</label>
       <input type="checkbox" id="shuffle">
@@ -502,7 +510,11 @@ form label {
       <label for="sort_by_length" title="Schneller: weniger Padding">Sort by Length:</label>
       <input type="checkbox" id="sort_by_length" checked>
 
-      <!-- N-Gramm -->
+      <label for="rebuild_dataset_cache" title="Alten tokenisierten Cache verwerfen und neu erzeugen.">
+        Cache neu aufbauen:
+      </label>
+      <input type="checkbox" id="rebuild_dataset_cache" checked>
+
       <label for="use_ngrams">N-Gramm-Optimierung:</label>
       <input type="checkbox" id="use_ngrams" title="Aktiviert N-Gramm-Tokenisierung für bessere Kompression">
 
@@ -532,7 +544,6 @@ form label {
 
       <label for="ngram_add_batch" class="ngram_row" style="display:none;">Add Batch:</label>
       <input type="number" id="ngram_add_batch" class="ngram_row" style="display:none;" value="64" min="1">
-      <!-- Ende N-Gramm -->
 
       <label for="precision_mode">Precision:</label>
       <select id="precision_mode" title="fp16/bf16 nur auf CUDA; MPS/CPU immer FP32">
@@ -560,6 +571,11 @@ form label {
       <label for="lora_alpha" class="lora_row" style="display:none;">LoRA Alpha:</label>
       <input type="number" id="lora_alpha" value="16" class="lora_row" style="display:none; width:7em;" min="1">
 
+      <label for="merge_lora_on_save" class="lora_row" style="display:none;" title="Versucht LoRA beim Speichern in ein merged Modell zu überführen.">
+        LoRA Merge beim Speichern:
+      </label>
+      <input type="checkbox" id="merge_lora_on_save" class="lora_row" style="display:none;" checked>
+
       <div></div>
       <div style="display: flex; gap:1.1em; flex-wrap:wrap;">
         <button type="submit">Training starten</button>
@@ -568,7 +584,6 @@ form label {
     </form>
   </div>
 
-  <!-- STATUS + LOSS -->
   <div class="card" style="max-width:520px;">
     <h3>Status</h3>
     <div class="status">
@@ -589,19 +604,16 @@ form label {
     </div>
   </div>
 
-  <!-- LOGS -->
   <div class="card" style="max-width:530px;">
     <h3>Logs</h3>
     <pre id="logbox"></pre>
   </div>
 
-  <!-- TRAINING HISTORY -->
   <div class="card" style="max-width:650px;">
     <h3>Bisherige Trainingsläufe</h3>
     <div id="trainingsHistory"><i>Lade Trainingshistorie…</i></div>
   </div>
 
-  <!-- CHAT -->
   <div class="card" style="max-width:650px;">
     <h3>Live-Chat mit geladenem Modell</h3>
     <div style="margin-bottom:0.8em;">
@@ -630,7 +642,6 @@ form label {
     </div>
   </div>
 
-  <!-- CSV FORMAT INFO -->
   <div class="card" style="max-width:650px; background:#0a1712; border:2px solid #13ff72; margin-bottom:2.5em;">
     <h3 style="margin-bottom:0.6em;">CSV-Dateiformate</h3>
     <div style="font-size:1.09em; color:#90ffc7;">
@@ -651,8 +662,8 @@ id,parent_id,system,Benutzer,Kontext,Assistentin
 3,,Du bist Übersetzer.,Übersetze: "Guten Morgen",,Auf Englisch: "Good morning".
       </pre>
 
-      <b>Nur-Text-Modus (template_mode=text):</b>
-      <button type="button" onclick="downloadExample('text')" class="download-btn">Beispiel-CSV herunterladen</button>
+      <b>Nur-Text-Modus (template_mode=plain):</b>
+      <button type="button" onclick="downloadExample('plain')" class="download-btn">Beispiel-CSV herunterladen</button>
       <pre style="background:#13231e; color:#17ff96; border-radius:6px; padding:0.7em;">
 text
 Das ist ein Beispielsatz für Pretraining.
@@ -660,7 +671,8 @@ Hier folgt eine weitere Trainingszeile.
       </pre>
 
       <div style="opacity:0.85; margin-top:0.6em;">
-        <b>Hinweis:</b> Bei <code>template_mode=text</code> wird nur <code>column_name</code> genutzt; parent_id/History-Felder werden ignoriert.
+        <b>Hinweis:</b> Bei <code>template_mode=chat</code> oder <code>dialogplus</code> werden jetzt automatisch nur so viele <b>komplette Turns</b> verwendet, wie ins Tokenfenster passen. Zu große Samples werden übersprungen. <br><br>
+        Bei <code>template_mode=plain</code> wird nur <code>column_name</code> genutzt; parent_id/History-Felder werden ignoriert.
       </div>
     </div>
   </div>
@@ -668,7 +680,7 @@ Hier folgt eine weitere Trainingszeile.
 </div>
 
 <footer id="site-footer">
-  <p>© 2026 TMP-SYSTEM-SERVICE GmbH – Alle Rechte vorbehalten. Version 6.1</p>
+  <p>© 2026 TMP-SYSTEM-SERVICE GmbH – Alle Rechte vorbehalten. Version 6.3</p>
 </footer>
 
 <div id="matrix-spinner-overlay">
@@ -681,7 +693,6 @@ Hier folgt eine weitere Trainingszeile.
 <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 
 <script>
-/* ========= Hintergrund (Matrix + EKG) ========= */
 function resizeMatrixCanvas() {
   const c = document.getElementById('matrix-bg-canvas');
   if (!c) return;
@@ -813,13 +824,18 @@ window.addEventListener('DOMContentLoaded', function() {
   animateEKG();
 });
 
-/* ========= Helpers ========= */
 function numberOrNull(v) {
   if (v === null || v === undefined) return null;
   const s = String(v).trim();
   if (!s) return null;
   const n = Number(s);
   return Number.isFinite(n) ? n : null;
+}
+
+function integerOrNull(v) {
+  const n = numberOrNull(v);
+  if (n === null) return null;
+  return Math.trunc(n);
 }
 
 function escapeHtml(s){
@@ -829,7 +845,6 @@ function escapeHtmlWithBreaks(s){
   return escapeHtml(s).replace(/\n/g, "<br>");
 }
 
-/* ========= Chat Devices ========= */
 async function populateChatDevices() {
   const sel = document.getElementById('chat_device');
   sel.innerHTML = '';
@@ -852,7 +867,6 @@ async function populateChatDevices() {
 }
 window.addEventListener('DOMContentLoaded', populateChatDevices);
 
-/* ========= Gauges (Chart.js robust) ========= */
 let cpuGauge=null, ramGauge=null, gpuGauge=null;
 
 function makeGauge(canvasEl, color) {
@@ -873,9 +887,7 @@ function setGaugeLabel(chart, label) {
   ctx.textAlign = "center";
   ctx.textBaseline = "middle";
   ctx.fillStyle = "#32ff78";
-  // kleiner Bereich in der Mitte
   ctx.clearRect(0, 0, chart.width, chart.height);
-  // Chart neu zeichnen (doughnut) und dann Label drüber
   chart.draw();
   ctx.fillText(label, chart.width/2, chart.height/1.36);
   ctx.restore();
@@ -944,14 +956,12 @@ window.addEventListener('DOMContentLoaded', () => {
   ramGauge = makeGauge(document.getElementById('ramGauge'), '#19f7ef');
   gpuGauge = makeGauge(document.getElementById('gpuGauge'), '#ffc800');
 
-  // Wenn Chart.js nicht geladen werden kann, trotzdem UI nicht crashen
   if (!cpuGauge || !ramGauge || !gpuGauge) return;
 
   pollSysStatus();
   setInterval(pollSysStatus, 2000);
 });
 
-/* ========= Livepreview ========= */
 let previewShort = "";
 let previewFull  = "";
 let previewExpanded = false;
@@ -985,7 +995,6 @@ document.getElementById("togglePreviewBtn").onclick = () => {
 };
 setInterval(pollLivePreview, 2000);
 
-/* ========= Status ========= */
 async function getStatus(){
   try{
     const s = await (await fetch('/status')).json();
@@ -1000,7 +1009,6 @@ async function getStatus(){
 }
 getStatus(); setInterval(getStatus,1500);
 
-/* ========= Loss Chart + Logs via WS (wss/ ws fix + reconnect) ========= */
 window.lossData=[]; window.lossSteps=[];
 let lossChart=null;
 
@@ -1053,7 +1061,6 @@ function connectLogsWS(){
   };
 
   ws.onclose = () => {
-    // reconnect
     setTimeout(connectLogsWS, 1200);
   };
   ws.onerror = () => {
@@ -1066,7 +1073,6 @@ window.addEventListener('DOMContentLoaded', () => {
   connectLogsWS();
 });
 
-/* ========= Device Auswahl (Training) ========= */
 let hw = {};
 window.addEventListener('DOMContentLoaded', async () => {
   try { hw = await (await fetch('/hardware')).json(); }
@@ -1084,14 +1090,11 @@ window.addEventListener('DOMContentLoaded', async () => {
   sel.value = hw.cuda ? "cuda" : (hw.mps ? "mps" : "cpu");
 });
 
-/* ========= UI Toggles ========= */
-// LoRA Felder togglen
 document.getElementById("train_mode").addEventListener("change", function() {
   const show = this.value === "lora";
   document.querySelectorAll('.lora_row').forEach(e => e.style.display = show ? "" : "none");
 });
 
-// N-Gramm-UI-Toggle
 document.getElementById("use_ngrams").addEventListener("change", function() {
   const show = this.checked;
   document.querySelectorAll('.ngram_row').forEach(e => e.style.display = show ? "" : "none");
@@ -1100,16 +1103,14 @@ window.addEventListener('DOMContentLoaded', function() {
   document.querySelectorAll('.ngram_row').forEach(e => e.style.display = "none");
 });
 
-// template_mode toggles: column_name
 function applyTemplateModeUI() {
   const mode = document.getElementById("template_mode").value;
-  const isText = mode === "text";
+  const isText = mode === "plain";
   document.querySelectorAll('.column_row').forEach(e => e.style.display = isText ? "" : "none");
 }
 document.getElementById("template_mode").addEventListener("change", applyTemplateModeUI);
 window.addEventListener('DOMContentLoaded', applyTemplateModeUI);
 
-/* ========= Trainingshistorie ========= */
 async function loadTrainings() {
   try {
     const res = await fetch('/trainings');
@@ -1133,7 +1134,6 @@ async function loadTrainings() {
 }
 window.addEventListener('DOMContentLoaded', loadTrainings);
 
-/* ========= Model Dropdown (Training) ========= */
 async function fillModelDropdown() {
   const select = document.getElementById('model_dir_select');
   const prev = select.value;
@@ -1160,12 +1160,10 @@ async function fillModelDropdown() {
     select.appendChild(localGroup);
   }
 
-  // restore selection if possible
   if ([...select.options].some(o => o.value === prev)) select.value = prev;
 }
 window.addEventListener('DOMContentLoaded', fillModelDropdown);
 
-/* ========= Dataset Dropdown ========= */
 async function fillDatasetDropdown() {
   const select = document.getElementById('csv_path_select');
   let data = [];
@@ -1209,7 +1207,6 @@ function updateCsvInput() {
 document.getElementById('csv_path_select').addEventListener('change', updateCsvInput);
 window.addEventListener('DOMContentLoaded', fillDatasetDropdown);
 
-/* ========= Custom model_dir input toggle ========= */
 const modelDirSelect = document.getElementById('model_dir_select');
 const modelDirInput = document.getElementById('model_dir');
 const modelDirLabel = document.getElementById('model_dir_label');
@@ -1229,11 +1226,9 @@ modelDirSelect.addEventListener('change', function() {
   }
 });
 
-/* ========= Training Submit (FIX: Backend-kompatibles Payload) ========= */
 document.getElementById("settings").onsubmit = async e => {
   e.preventDefault();
 
-  // Chart reset
   if (lossChart) {
     lossChart.data.labels = [];
     lossChart.data.datasets[0].data = [];
@@ -1242,7 +1237,8 @@ document.getElementById("settings").onsubmit = async e => {
   window.lossData = [];
   window.lossSteps = [];
 
-  const maxSteps = numberOrNull(document.getElementById("max_steps").value);
+  const maxSteps = integerOrNull(document.getElementById("max_steps").value);
+  const maxHistoryTurns = integerOrNull(document.getElementById("max_history_turns").value);
 
   const modelDir = (modelDirSelect.value === "custom" ? modelDirInput.value.trim() : modelDirSelect.value);
   if (!modelDir) { alert("Bitte model_dir angeben."); return; }
@@ -1253,7 +1249,6 @@ document.getElementById("settings").onsubmit = async e => {
 
   if (!csvPath) { alert("Bitte csv_path angeben."); return; }
 
-  // ✅ Nur Felder senden, die dein FastAPI TrainConfig (Server) akzeptiert
   const payload = {
     model_dir: modelDir,
     csv_path: csvPath,
@@ -1269,29 +1264,32 @@ document.getElementById("settings").onsubmit = async e => {
     gradient_accumulation_steps: parseInt(document.getElementById("gradient_accumulation_steps").value),
 
     num_train_epochs: parseFloat(document.getElementById("num_train_epochs").value || "3"),
-    max_steps: (maxSteps !== null ? parseInt(String(maxSteps)) : null),
+    max_steps: maxSteps,
 
     max_seq_length: parseInt(document.getElementById("max_seq_length").value || "1024"),
+    max_history_turns: maxHistoryTurns,
 
     shuffle: document.getElementById("shuffle").checked,
     sort_by_length: document.getElementById("sort_by_length").checked,
+    rebuild_dataset_cache: document.getElementById("rebuild_dataset_cache").checked,
 
     device: document.getElementById("device").value,
 
     train_mode: document.getElementById("train_mode").value,
-    lora_r: parseInt(document.getElementById("lora_r").value || '8'),
-    lora_alpha: parseInt(document.getElementById("lora_alpha").value || '16'),
+    lora_r: parseInt(document.getElementById("lora_r").value || "8"),
+    lora_alpha: parseInt(document.getElementById("lora_alpha").value || "16"),
 
     precision_mode: document.getElementById("precision_mode").value,
     gradient_checkpointing: document.getElementById("gradient_checkpointing").checked,
 
     dataloader_num_workers: 0,
-    merge_lora_on_save: true,
+    merge_lora_on_save: document.getElementById("merge_lora_on_save")
+      ? document.getElementById("merge_lora_on_save").checked
+      : true,
 
     max_grad_norm: 1.0,
     weight_decay: 0.01,
 
-    // N-Gramm
     use_ngrams: document.getElementById("use_ngrams").checked,
     ngram_max: parseInt(document.getElementById("ngram_max").value || "12"),
     ngram_top_k: parseInt(document.getElementById("ngram_top_k").value || "1500"),
@@ -1338,10 +1336,9 @@ document.getElementById("stopBtn").onclick = async function() {
   catch {}
 };
 
-/* ========= Download Beispiel CSVs ========= */
 window.downloadExample = function(mode) {
   let csvContent = "";
-  if (mode === "text") {
+  if (mode === "plain") {
     csvContent = `text
 Das ist ein Beispielsatz für Pretraining.
 Hier folgt eine weitere Trainingszeile.
@@ -1356,13 +1353,12 @@ Hier folgt eine weitere Trainingszeile.
   const blob = new Blob([csvContent], { type: "text/csv;charset=utf-8;" });
   const link = document.createElement("a");
   link.href = URL.createObjectURL(blob);
-  link.setAttribute("download", mode === "text" ? "text_beispiel.csv" : "row_sft_dialog_beispiel.csv");
+  link.setAttribute("download", mode === "plain" ? "text_beispiel.csv" : "row_sft_dialog_beispiel.csv");
   document.body.appendChild(link);
   link.click();
   document.body.removeChild(link);
 };
 
-/* ========= Chat UI ========= */
 let chatMessages = [];
 function renderChat() {
   const box = document.getElementById('chat_history');
@@ -1471,7 +1467,6 @@ document.getElementById('chat_send_btn').addEventListener('click', sendChat);
 document.getElementById('chat_input').addEventListener('keydown', (e)=>{ if(e.key==='Enter'){ e.preventDefault(); sendChat(); }});
 document.getElementById('chat_load_btn').addEventListener('click', loadChatModel);
 
-/* Chat-Modelldropdown befüllen */
 window.addEventListener('DOMContentLoaded', async () => {
   const sel = document.getElementById('chat_model_select');
   try{
