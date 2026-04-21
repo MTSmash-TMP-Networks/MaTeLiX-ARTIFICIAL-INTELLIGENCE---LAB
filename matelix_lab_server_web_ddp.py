@@ -158,19 +158,8 @@ def get_chat_template(template_mode: str = "chat") -> str:
 {% if add_generation_prompt %}[ASSISTANT]
 {% endif %}"""
 
-    if mode == "dialogplus":
-        return """{{ bos_token }}
-{% for message in messages %}
-{% if message.role == 'system' %}<|System|>
-{{ message.content }}</s>
-{% elif message.role == 'user' %}<|Benutzer|>
-{{ message.content }}</s>
-{% elif message.role == 'assistant' %}<|Assistentin|>
-{{ message.content }}</s>
-{% endif %}
-{% endfor %}
-{% if add_generation_prompt %}<|Assistentin|>
-{% endif %}"""
+    if mode in {"chat", "dialogplus"}:
+        return """{% for message in messages %}{% if loop.index0 != 0 and message['role'] == 'system' %}{{ raise_exception('Conversation roles must alternate system(optional)/user/assistant/user/assistant/...') }}{% elif messages[0]['role'] == 'system' and ((message['role'] == 'user' and (loop.index0 % 2 == 0)) or (message['role'] == 'assistant' and (loop.index0 % 2 == 1))) %}{{ raise_exception('Conversation roles must alternate system(optional)/user/assistant/user/assistant/...') }}{% elif messages[0]['role'] != 'system' and ((message['role'] == 'user' and (loop.index0 % 2 != 0)) or (message['role'] == 'assistant' and (loop.index0 % 2 != 1))) %}{{ raise_exception('Conversation roles must alternate system(optional)/user/assistant/user/assistant/...') }}{% endif %}{% if message['role'] == 'user' %}{{ '<|Benutzer|>' + message['content'].strip() + eos_token }}{% elif message['role'] == 'system' %}{{ '<|System|>' + message['content'].strip() + eos_token }}{% elif message['role'] == 'assistant' %}{{ '<|Assistentin|>' + message['content'].strip() + eos_token }}{% endif %}{% endfor %}{% if add_generation_prompt %}{{ '<|Assistentin|>' }}{% endif %}"""
 
     return """{% for message in messages %}{% if loop.index0 != 0 and message['role'] == 'system' %}{{ raise_exception('Conversation roles must alternate system(optional)/user/assistant/user/assistant/...') }}{% elif messages[0]['role'] == 'system' and ((message['role'] == 'user' and (loop.index0 % 2 == 0)) or (message['role'] == 'assistant' and (loop.index0 % 2 == 1))) %}{{ raise_exception('Conversation roles must alternate system(optional)/user/assistant/user/assistant/...') }}{% elif messages[0]['role'] != 'system' and ((message['role'] == 'user' and (loop.index0 % 2 != 0)) or (message['role'] == 'assistant' and (loop.index0 % 2 != 1))) %}{{ raise_exception('Conversation roles must alternate system(optional)/user/assistant/user/assistant/...') }}{% endif %}{% if message['role'] == 'user' %}{{ '<|Benutzer|>' + message['content'].strip() + eos_token }}{% elif message['role'] == 'system' %}{{ '<|System|>' + message['content'].strip() + eos_token }}{% elif message['role'] == 'assistant' %}{{ '<|Assistentin|>' + message['content'].strip() + eos_token }}{% endif %}{% endfor %}{% if add_generation_prompt %}{{ '<|Assistentin|>' }}{% endif %}"""
 
@@ -316,7 +305,7 @@ class WebTrainConfig(MatelixBaseModel):
     max_seq_length: int = 1024
     shuffle: bool = False
     sort_by_length: bool = True
-    max_history_turns: Optional[int] = 8
+    max_history_turns: Optional[int] = None
 
     device: str = "auto"
     train_mode: str = "full"
@@ -990,8 +979,25 @@ def load_inference_model(model_dir: str, device_name: str = "auto") -> Dict[str,
         if (Path(model_dir) / "merged" / "config.json").exists():
             effective_model_dir = str(Path(model_dir) / "merged")
 
+        template_mode = "chat"
+
+        template_info_path = Path(model_dir) / "template_info.json"
+        if not template_info_path.exists():
+            template_info_path = Path(effective_model_dir) / "template_info.json"
+
+        if template_info_path.exists():
+            try:
+                template_info = json.loads(template_info_path.read_text(encoding="utf-8"))
+                template_mode = (template_info.get("template_mode") or "chat").strip().lower()
+            except Exception:
+                template_mode = "chat"
+
         tok = AutoTokenizer.from_pretrained(effective_model_dir, trust_remote_code=False)
-        need_resize = prepare_tokenizer_for_matelix(tok, force_template=False, template_mode="chat")
+        need_resize = prepare_tokenizer_for_matelix(
+            tok,
+           force_template=True,
+            template_mode=template_mode,
+        )
 
         dtype = torch.float16 if dev.type == "cuda" else None
 
