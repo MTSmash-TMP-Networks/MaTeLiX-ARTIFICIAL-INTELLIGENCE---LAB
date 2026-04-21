@@ -14,7 +14,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-#!/usr/bin/env python3
 from __future__ import annotations
 
 import asyncio
@@ -50,10 +49,10 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Streamin
 from fastapi.staticfiles import StaticFiles
 
 try:
-    from pydantic import BaseModel, Field, ConfigDict, model_validator  # type: ignore
+    from pydantic import BaseModel, Field, ConfigDict  # type: ignore
     PYDANTIC_V2 = True
 except Exception:
-    from pydantic import BaseModel, Field, validator  # type: ignore
+    from pydantic import BaseModel, Field  # type: ignore
     ConfigDict = None  # type: ignore
     PYDANTIC_V2 = False
 
@@ -100,6 +99,8 @@ def configure_tf32(allow_tf32: bool) -> None:
             torch.set_float32_matmul_precision("highest")
         except Exception:
             pass
+
+
 csv.field_size_limit(1024 * 1024 * 128)
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -113,7 +114,7 @@ TRAINING_OUT_DIR.mkdir(parents=True, exist_ok=True)
 DATASETS_DIR.mkdir(parents=True, exist_ok=True)
 STATIC_DIR.mkdir(parents=True, exist_ok=True)
 
-app = FastAPI(title="MaTeLiX AI Lab (Web DDP)", version="5.5-web-ddp-fast")
+app = FastAPI(title="MaTeLiX AI Lab (Web DDP)", version="5.7-web-ddp-turn-aware-template")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -171,18 +172,7 @@ def get_chat_template(template_mode: str = "chat") -> str:
 {% if add_generation_prompt %}<|Assistentin|>
 {% endif %}"""
 
-    return """{{ bos_token }}
-{% for message in messages %}
-{% if message.role == 'system' %}<|System|>
-{{ message.content }}
-{% elif message.role == 'user' %}<|Benutzer|>
-{{ message.content }}
-{% elif message.role == 'assistant' %}<|Assistentin|>
-{{ message.content }}
-{% endif %}
-{% endfor %}
-{% if add_generation_prompt %}<|Assistentin|>
-{% else %}</s>{% endif %}"""
+    return """{% for message in messages %}{% if loop.index0 != 0 and message['role'] == 'system' %}{{ raise_exception('Conversation roles must alternate system(optional)/user/assistant/user/assistant/...') }}{% elif messages[0]['role'] == 'system' and ((message['role'] == 'user' and (loop.index0 % 2 == 0)) or (message['role'] == 'assistant' and (loop.index0 % 2 == 1))) %}{{ raise_exception('Conversation roles must alternate system(optional)/user/assistant/user/assistant/...') }}{% elif messages[0]['role'] != 'system' and ((message['role'] == 'user' and (loop.index0 % 2 != 0)) or (message['role'] == 'assistant' and (loop.index0 % 2 != 1))) %}{{ raise_exception('Conversation roles must alternate system(optional)/user/assistant/user/assistant/...') }}{% endif %}{% if message['role'] == 'user' %}{{ '<|Benutzer|>' + message['content'].strip() + eos_token }}{% elif message['role'] == 'system' %}{{ '<|System|>' + message['content'].strip() + eos_token }}{% elif message['role'] == 'assistant' %}{{ '<|Assistentin|>' + message['content'].strip() + eos_token }}{% endif %}{% endfor %}{% if add_generation_prompt %}{{ '<|Assistentin|>' }}{% endif %}"""
 
 
 DEFAULT_INDEX_HTML = """<!DOCTYPE html>
@@ -326,6 +316,7 @@ class WebTrainConfig(MatelixBaseModel):
     max_seq_length: int = 1024
     shuffle: bool = False
     sort_by_length: bool = True
+    max_history_turns: Optional[int] = 8
 
     device: str = "auto"
     train_mode: str = "full"
@@ -381,7 +372,6 @@ class WebTrainConfig(MatelixBaseModel):
     prefetch_factor: int = 2
     persistent_workers: bool = True
 
-    # Variant C / Shard-Tokenisierung
     use_dataset_cache: bool = True
     rebuild_dataset_cache: bool = False
     tokenized_shard_size: int = 5000
@@ -631,6 +621,7 @@ class DDPTrainingManager:
                 "effective_ddp_find_unused_parameters": worker_cfg["ddp_find_unused_parameters"],
                 "effective_template_mode": worker_cfg.get("template_mode", "chat"),
                 "effective_force_template": True,
+                "effective_max_history_turns": worker_cfg.get("max_history_turns"),
             },
         )
 
@@ -717,7 +708,8 @@ class DDPTrainingManager:
                 f"find_unused_parameters={worker_cfg['ddp_find_unused_parameters']} "
                 f"deterministic={worker_cfg.get('deterministic', False)} "
                 f"allow_tf32={worker_cfg.get('allow_tf32', True)} "
-                f"dataloader_num_workers={worker_cfg.get('dataloader_num_workers', 4)}"
+                f"dataloader_num_workers={worker_cfg.get('dataloader_num_workers', 4)} "
+                f"max_history_turns={worker_cfg.get('max_history_turns')}"
             )
 
         self.stdout_thread = threading.Thread(target=self._stdout_pump, args=(proc,), daemon=True)
@@ -1072,6 +1064,7 @@ def prepare_inputs(tokenizer, messages: List[Dict[str, Any]], system: Optional[s
     if hasattr(tokenizer, "apply_chat_template"):
         enc = tokenizer.apply_chat_template(msgs, tokenize=True, add_generation_prompt=True, return_tensors="pt")
     else:
+        eos = tokenizer.eos_token or "</s>"
         parts = []
         for m in msgs:
             role = (m.get("role") or "").strip().lower()
@@ -1079,12 +1072,12 @@ def prepare_inputs(tokenizer, messages: List[Dict[str, Any]], system: Optional[s
             if not content:
                 continue
             if role == "system":
-                parts.append("<|System|>\n" + content + "\n")
+                parts.append("<|System|>" + content + eos)
             elif role == "user":
-                parts.append("<|Benutzer|>\n" + content + "\n")
+                parts.append("<|Benutzer|>" + content + eos)
             elif role == "assistant":
-                parts.append("<|Assistentin|>\n" + content + "\n")
-        parts.append("<|Assistentin|>\n")
+                parts.append("<|Assistentin|>" + content + eos)
+        parts.append("<|Assistentin|>")
         enc = tokenizer("".join(parts), return_tensors="pt", add_special_tokens=False)
 
     pad_id = tokenizer.pad_token_id
@@ -1752,4 +1745,3 @@ def root(_: Request):
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8002)
-
