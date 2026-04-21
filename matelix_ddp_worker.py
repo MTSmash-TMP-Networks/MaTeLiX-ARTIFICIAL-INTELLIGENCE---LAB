@@ -52,6 +52,12 @@ from torch.optim.lr_scheduler import LambdaLR
 from torch.utils.data import DataLoader, IterableDataset
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
+from matelix_ngram_pipeline import (
+    NgramConfig,
+    build_or_load_ngram_state,
+    ngram_summary_text,
+)
+
 try:
     from peft import LoraConfig, PeftModel, TaskType, get_peft_model
     _PEFT_AVAILABLE = True
@@ -124,6 +130,19 @@ class TrainConfig:
     rebuild_dataset_cache: bool = False
     tokenized_shard_size: int = 5000
 
+    ngram_max: int = 12
+    ngram_top_k: int = 1500
+    ngram_min_chars: int = 16
+    ngram_min_words: int = 2
+    ngram_max_samples: int = 4000
+    ngram_budgeted: bool = True
+    ngram_target_fit: float = 0.98
+    ngram_eval_samples: int = 512
+    ngram_add_batch: int = 64
+    ngram_min_count: int = 2
+    ngram_max_token_chars: int = 384
+    ngram_max_tokens_per_text: int = 4096
+
     def normalize(self) -> None:
         if not self.output_dir:
             self.output_dir = self.save_dir
@@ -151,6 +170,17 @@ class TrainConfig:
         self.use_dataset_cache = bool(self.use_dataset_cache)
         self.rebuild_dataset_cache = bool(self.rebuild_dataset_cache)
         self.tokenized_shard_size = max(100, int(self.tokenized_shard_size))
+        self.ngram_max = max(2, int(self.ngram_max))
+        self.ngram_top_k = max(1, int(self.ngram_top_k))
+        self.ngram_min_chars = max(1, int(self.ngram_min_chars))
+        self.ngram_min_words = max(1, int(self.ngram_min_words))
+        self.ngram_max_samples = max(1, int(self.ngram_max_samples))
+        self.ngram_target_fit = float(self.ngram_target_fit)
+        self.ngram_eval_samples = max(1, int(self.ngram_eval_samples))
+        self.ngram_add_batch = max(1, int(self.ngram_add_batch))
+        self.ngram_min_count = max(1, int(self.ngram_min_count))
+        self.ngram_max_token_chars = max(8, int(self.ngram_max_token_chars))
+        self.ngram_max_tokens_per_text = max(32, int(self.ngram_max_tokens_per_text))
         if self.max_history_turns is not None:
             self.max_history_turns = max(1, int(self.max_history_turns))
 
@@ -767,6 +797,19 @@ def compute_shard_cache_dir(cfg: TrainConfig) -> Path:
         "max_history_turns": cfg.max_history_turns,
         "strict_whole_turns": True,
         "bucketed_shuffle": True,
+        "use_ngrams": bool(cfg.use_ngrams),
+        "ngram_max": int(cfg.ngram_max),
+        "ngram_top_k": int(cfg.ngram_top_k),
+        "ngram_min_chars": int(cfg.ngram_min_chars),
+        "ngram_min_words": int(cfg.ngram_min_words),
+        "ngram_max_samples": int(cfg.ngram_max_samples),
+        "ngram_budgeted": bool(cfg.ngram_budgeted),
+        "ngram_target_fit": float(cfg.ngram_target_fit),
+        "ngram_eval_samples": int(cfg.ngram_eval_samples),
+        "ngram_add_batch": int(cfg.ngram_add_batch),
+        "ngram_min_count": int(cfg.ngram_min_count),
+        "ngram_max_token_chars": int(cfg.ngram_max_token_chars),
+        "ngram_max_tokens_per_text": int(cfg.ngram_max_tokens_per_text),
     }
     key = hashlib.sha256(json.dumps(payload, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()[:24]
     cache_root = Path(cfg.output_dir or cfg.save_dir or "./training_outputs/worker_run").expanduser().resolve() / "dataset_cache"
@@ -848,6 +891,32 @@ def shard_producer_process_main(cfg_dict: Dict[str, Any], cache_dir_str: str) ->
         tokenizer = AutoTokenizer.from_pretrained(cfg.model_dir, trust_remote_code=False, use_fast=True)
         prepare_tokenizer(tokenizer, template_mode=cfg.template_mode, force_template=bool(cfg.force_template))
 
+        ngram_cfg = NgramConfig(
+            use_ngrams=cfg.use_ngrams,
+            ngram_max=cfg.ngram_max,
+            ngram_top_k=cfg.ngram_top_k,
+            ngram_min_chars=cfg.ngram_min_chars,
+            ngram_min_words=cfg.ngram_min_words,
+            ngram_max_samples=cfg.ngram_max_samples,
+            ngram_budgeted=cfg.ngram_budgeted,
+            ngram_target_fit=cfg.ngram_target_fit,
+            ngram_eval_samples=cfg.ngram_eval_samples,
+            ngram_add_batch=cfg.ngram_add_batch,
+            ngram_min_count=cfg.ngram_min_count,
+            ngram_max_token_chars=cfg.ngram_max_token_chars,
+            ngram_max_tokens_per_text=cfg.ngram_max_tokens_per_text,
+            template_mode=cfg.template_mode,
+            column_name=cfg.column_name,
+            csv_path=cfg.csv_path,
+        )
+
+        ngram_state = build_or_load_ngram_state(
+            tokenizer=tokenizer,
+            cfg=ngram_cfg,
+            outdir=cache_dir,
+            rebuild=bool(cfg.rebuild_dataset_cache),
+        )
+
         shard_size = int(cfg.tokenized_shard_size)
         shard_idx = 0
         global_start = 0
@@ -918,6 +987,9 @@ def shard_producer_process_main(cfg_dict: Dict[str, Any], cache_dir_str: str) ->
             "sort_by_length": bool(cfg.sort_by_length),
             "sort_buffer_size": sort_buffer_size,
             "bucketed_shuffle": True,
+            "use_ngrams": bool(cfg.use_ngrams),
+            "ngram_summary": ngram_summary_text(ngram_state),
+            "ngram_selected_count": int((ngram_state.stats or {}).get("selected_count", 0)) if ngram_state else 0,
         }
         producer_meta_path(cache_dir).write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
         producer_done_path(cache_dir).write_text(json.dumps({"done": True}, ensure_ascii=False), encoding="utf-8")
@@ -1162,6 +1234,33 @@ def build_model_and_tokenizer(cfg: TrainConfig, ctx: DistContext):
         force_template=bool(cfg.force_template),
     )
 
+    ngram_cfg = NgramConfig(
+        use_ngrams=cfg.use_ngrams,
+        ngram_max=cfg.ngram_max,
+        ngram_top_k=cfg.ngram_top_k,
+        ngram_min_chars=cfg.ngram_min_chars,
+        ngram_min_words=cfg.ngram_min_words,
+        ngram_max_samples=cfg.ngram_max_samples,
+        ngram_budgeted=cfg.ngram_budgeted,
+        ngram_target_fit=cfg.ngram_target_fit,
+        ngram_eval_samples=cfg.ngram_eval_samples,
+        ngram_add_batch=cfg.ngram_add_batch,
+        ngram_min_count=cfg.ngram_min_count,
+        ngram_max_token_chars=cfg.ngram_max_token_chars,
+        ngram_max_tokens_per_text=cfg.ngram_max_tokens_per_text,
+        template_mode=cfg.template_mode,
+        column_name=cfg.column_name,
+        csv_path=cfg.csv_path,
+    )
+
+    ngram_state = build_or_load_ngram_state(
+        tokenizer=tokenizer,
+        cfg=ngram_cfg,
+        outdir=Path(cfg.output_dir or cfg.save_dir or "./training_outputs/worker_run"),
+        rebuild=bool(cfg.rebuild_dataset_cache),
+    )
+    LOGGER.info(ngram_summary_text(ngram_state))
+
     load_dtype, fp16, bf16 = pick_precision(cfg, ctx.device)
     LOGGER.info("Precision: load_dtype=%s fp16=%s bf16=%s", load_dtype, fp16, bf16)
 
@@ -1188,7 +1287,7 @@ def build_model_and_tokenizer(cfg: TrainConfig, ctx: DistContext):
         _enable_gradient_checkpointing(model)
 
     model.to(ctx.device)
-    return model, tokenizer, fp16, bf16
+    return model, tokenizer, fp16, bf16, ngram_state
 
 
 def _enable_gradient_checkpointing(model: nn.Module) -> None:
@@ -1510,6 +1609,7 @@ def main() -> int:
     preview_writer = JsonPreviewWriter(preview_path, ctx)
 
     producer_proc: Optional[mp.Process] = None
+    ngram_state = None
 
     try:
         set_seed(cfg.seed + ctx.rank, deterministic=cfg.deterministic)
@@ -1518,7 +1618,7 @@ def main() -> int:
         LOGGER.info("Train mode: %s", cfg.train_mode)
         LOGGER.info("Config: %s", json.dumps(cfg.__dict__, ensure_ascii=False))
 
-        model, tokenizer, fp16, bf16 = build_model_and_tokenizer(cfg, ctx)
+        model, tokenizer, fp16, bf16, ngram_state = build_model_and_tokenizer(cfg, ctx)
 
         total_samples_est = count_examples_fast(cfg)
         if total_samples_est <= 0:
@@ -1588,6 +1688,7 @@ def main() -> int:
                 cfg.shuffle,
                 bool(cfg.shuffle and cfg.sort_by_length),
             )
+            LOGGER.info(ngram_summary_text(ngram_state))
 
         model = wrap_ddp(model, cfg, ctx)
         barrier(ctx)
@@ -1686,6 +1787,8 @@ def main() -> int:
                         "skipped_samples": meta.get("skipped_samples", 0),
                         "sort_by_length": bool(cfg.sort_by_length),
                         "bucketed_shuffle": True,
+                        "use_ngrams": bool(cfg.use_ngrams),
+                        "ngram_summary": ngram_summary_text(ngram_state),
                     },
                     ensure_ascii=False,
                     indent=2,
@@ -1719,6 +1822,8 @@ def main() -> int:
                     "skipped_samples": meta.get("skipped_samples", 0),
                     "sort_by_length": bool(cfg.sort_by_length),
                     "bucketed_shuffle": True,
+                    "use_ngrams": bool(cfg.use_ngrams),
+                    "ngram_summary": ngram_summary_text(ngram_state),
                 }
             )
             LOGGER.info("Training abgeschlossen. Modell gespeichert nach: %s", outdir)
