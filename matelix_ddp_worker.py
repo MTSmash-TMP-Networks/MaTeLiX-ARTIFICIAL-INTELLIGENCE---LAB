@@ -14,8 +14,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 from __future__ import annotations
 
 import argparse
@@ -40,7 +38,7 @@ from typing import Any, Dict, Iterator, List, Optional, Sequence, Tuple
 
 os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
 os.environ.setdefault("PYTHONUNBUFFERED", "1")
-os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
+os.environ.setdefault("PYTORCH_ALLOC_CONF", "expandable_segments:True")
 
 if os.environ.get("MATELIX_NCCL_BLOCKING_WAIT", "0") == "1":
     os.environ["TORCH_NCCL_BLOCKING_WAIT"] = "1"
@@ -72,10 +70,6 @@ csv.field_size_limit(1024 * 1024 * 128)
 LOGGER = logging.getLogger("matelix_ddp_worker")
 
 
-# ---------------------------------------------------------------------------
-# Config
-# ---------------------------------------------------------------------------
-
 @dataclass
 class TrainConfig:
     model_dir: str
@@ -97,6 +91,7 @@ class TrainConfig:
     max_steps: Optional[int] = None
     max_seq_length: int = 1024
     chunk_size: Optional[int] = None
+    max_history_turns: Optional[int] = None
 
     shuffle: bool = False
     sort_by_length: bool = True
@@ -156,6 +151,8 @@ class TrainConfig:
         self.use_dataset_cache = bool(self.use_dataset_cache)
         self.rebuild_dataset_cache = bool(self.rebuild_dataset_cache)
         self.tokenized_shard_size = max(100, int(self.tokenized_shard_size))
+        if self.max_history_turns is not None:
+            self.max_history_turns = max(1, int(self.max_history_turns))
 
 
 def _coerce_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
@@ -189,10 +186,6 @@ def load_cfg(path: str) -> TrainConfig:
     cfg.normalize()
     return cfg
 
-
-# ---------------------------------------------------------------------------
-# DDP / state
-# ---------------------------------------------------------------------------
 
 @dataclass
 class DistContext:
@@ -342,10 +335,6 @@ def unwrap_model(model: nn.Module) -> nn.Module:
     return model.module if isinstance(model, DDP) else model
 
 
-# ---------------------------------------------------------------------------
-# Logging / status files
-# ---------------------------------------------------------------------------
-
 class JsonStatusWriter:
     def __init__(self, path: Path, ctx: DistContext):
         self.path = path
@@ -404,10 +393,6 @@ def setup_logging(log_path: Path, ctx: DistContext) -> None:
     LOGGER.addHandler(sh)
 
 
-# ---------------------------------------------------------------------------
-# Tokenizer / dataset helpers
-# ---------------------------------------------------------------------------
-
 def normalize_id(val: Any) -> str:
     if val is None:
         return ""
@@ -453,18 +438,7 @@ def get_chat_template(template_mode: str) -> str:
 {% if add_generation_prompt %}<|Assistentin|>
 {% endif %}"""
 
-    return """{{ bos_token }}
-{% for message in messages %}
-{% if message.role == 'system' %}<|System|>
-{{ message.content }}
-{% elif message.role == 'user' %}<|Benutzer|>
-{{ message.content }}
-{% elif message.role == 'assistant' %}<|Assistentin|>
-{{ message.content }}
-{% endif %}
-{% endfor %}
-{% if add_generation_prompt %}<|Assistentin|>
-{% else %}</s>{% endif %}"""
+    return """{% for message in messages %}{% if loop.index0 != 0 and message['role'] == 'system' %}{{ raise_exception('Conversation roles must alternate system(optional)/user/assistant/user/assistant/...') }}{% elif messages[0]['role'] == 'system' and ((message['role'] == 'user' and (loop.index0 % 2 == 0)) or (message['role'] == 'assistant' and (loop.index0 % 2 == 1))) %}{{ raise_exception('Conversation roles must alternate system(optional)/user/assistant/user/assistant/...') }}{% elif messages[0]['role'] != 'system' and ((message['role'] == 'user' and (loop.index0 % 2 != 0)) or (message['role'] == 'assistant' and (loop.index0 % 2 != 1))) %}{{ raise_exception('Conversation roles must alternate system(optional)/user/assistant/user/assistant/...') }}{% endif %}{% if message['role'] == 'user' %}{{ '<|Benutzer|>' + message['content'].strip() + eos_token }}{% elif message['role'] == 'system' %}{{ '<|System|>' + message['content'].strip() + eos_token }}{% elif message['role'] == 'assistant' %}{{ '<|Assistentin|>' + message['content'].strip() + eos_token }}{% endif %}{% endfor %}{% if add_generation_prompt %}{{ '<|Assistentin|>' }}{% endif %}"""
 
 
 def prepare_tokenizer(tokenizer, template_mode: str = "chat", force_template: bool = True) -> bool:
@@ -485,6 +459,19 @@ def prepare_tokenizer(tokenizer, template_mode: str = "chat", force_template: bo
     return need_resize
 
 
+@dataclass
+class StructuredTurn:
+    role: str
+    content: str
+
+
+@dataclass
+class StructuredChatSample:
+    system: str
+    turns: List[StructuredTurn]
+    target_answer: str
+
+
 def column_iter(csv_path: str, column_name: str) -> Iterator[str]:
     with open(csv_path, "r", encoding="utf-8") as f:
         reader = csv.DictReader(f)
@@ -494,17 +481,22 @@ def column_iter(csv_path: str, column_name: str) -> Iterator[str]:
                 yield txt
 
 
-def chat_block_iter(csv_path: str, shuffle_threads: bool = False) -> Iterator[Tuple[str, str]]:
+def _load_thread_rows(csv_path: str) -> Tuple[List[Dict[str, Any]], Dict[str, Dict[str, Any]]]:
     with open(csv_path, "r", encoding="utf-8") as f:
         reader = csv.DictReader(f)
         rows: List[Dict[str, Any]] = []
         for idx, row in enumerate(reader):
+            row = dict(row)
             row["_rowidx"] = idx
             row["id"] = normalize_id(row.get("id", ""))
             row["parent_id"] = normalize_id(row.get("parent_id", ""))
             rows.append(row)
-
     id2row = {r["id"]: r for r in rows if r.get("id")}
+    return rows, id2row
+
+
+def _iter_candidate_chains(csv_path: str, shuffle_threads: bool = False) -> Iterator[List[Dict[str, Any]]]:
+    rows, id2row = _load_thread_rows(csv_path)
     candidates = [r for r in rows if (r.get("Assistentin") or "").strip() and r.get("id")]
     if not candidates:
         return
@@ -548,154 +540,185 @@ def chat_block_iter(csv_path: str, shuffle_threads: bool = False) -> Iterator[Tu
                 else:
                     break
             chain.reverse()
-            if not chain:
-                continue
-
-            target_idx = len(chain) - 1
-            answer = (chain[target_idx].get("Assistentin") or "").strip()
-            if not answer:
-                continue
-
-            system_text = (chain[0].get("system") or "").strip()
-            parts: List[str] = ["<s>\n"]
-            if system_text:
-                parts.extend(["<|System|>\n", system_text, "\n"])
-
-            for j in range(target_idx + 1):
-                turn = chain[j]
-                user = (turn.get("Benutzer") or "").strip()
-                ctx = (turn.get("Kontext") or "").strip()
-                asst = (turn.get("Assistentin") or "").strip()
-
-                if user:
-                    parts.append("<|Benutzer|>\n")
-                    parts.append(f"{ctx}\n{user}".strip() if ctx else user)
-                    parts.append("\n")
-
-                if j < target_idx and asst:
-                    parts.append("<|Assistentin|>\n")
-                    parts.append(asst)
-                    parts.append("\n")
-                elif j == target_idx:
-                    parts.append("<|Assistentin|>\n")
-
-            yield "".join(parts), answer + "\n</s>"
+            if chain:
+                yield chain
 
 
-def dialogplus_block_iter(csv_path: str, shuffle_threads: bool = False) -> Iterator[Tuple[str, str]]:
-    with open(csv_path, "r", encoding="utf-8") as f:
-        reader = csv.DictReader(f)
-        rows: List[Dict[str, Any]] = []
-        for idx, row in enumerate(reader):
-            row["_rowidx"] = idx
-            row["id"] = normalize_id(row.get("id", ""))
-            row["parent_id"] = normalize_id(row.get("parent_id", ""))
-            rows.append(row)
+def chat_structured_iter(csv_path: str, shuffle_threads: bool = False) -> Iterator[StructuredChatSample]:
+    for chain in _iter_candidate_chains(csv_path, shuffle_threads=shuffle_threads):
+        target_idx = len(chain) - 1
+        answer = (chain[target_idx].get("Assistentin") or "").strip()
+        if not answer:
+            continue
 
-    id2row = {r["id"]: r for r in rows if r.get("id")}
-    candidates = [r for r in rows if (r.get("Assistentin") or "").strip() and r.get("id")]
-    if not candidates:
-        return
+        system_text = (chain[0].get("system") or "").strip()
+        turns: List[StructuredTurn] = []
 
-    from functools import lru_cache
+        for j in range(target_idx + 1):
+            turn = chain[j]
+            user = (turn.get("Benutzer") or "").strip()
+            ctx = (turn.get("Kontext") or "").strip()
+            asst = (turn.get("Assistentin") or "").strip()
 
-    @lru_cache(maxsize=None)
-    def root_and_depth(rid: str) -> Tuple[str, int]:
-        depth = 0
-        cur = id2row.get(rid)
-        if not cur:
-            return ("", 0)
-        while True:
-            pid = cur.get("parent_id", "")
-            if not pid or pid not in id2row:
-                return (cur["id"], depth)
-            cur = id2row[pid]
-            depth += 1
+            if user:
+                turns.append(
+                    StructuredTurn(
+                        role="user",
+                        content=f"{ctx}\n{user}".strip() if ctx else user,
+                    )
+                )
 
-    threads: Dict[str, List[Tuple[int, int, Dict[str, Any]]]] = {}
-    for r in candidates:
-        root_id, depth = root_and_depth(r.get("id", ""))
-        threads.setdefault(root_id, []).append((depth, int(r["_rowidx"]), r))
+            if j < target_idx and asst:
+                turns.append(StructuredTurn(role="assistant", content=asst))
 
-    order = list(threads.keys())
-    if shuffle_threads:
-        random.shuffle(order)
-
-    for root_id in order:
-        items = sorted(threads[root_id], key=lambda x: (x[0], x[1]))
-        for _, _, target in items:
-            chain: List[Dict[str, Any]] = []
-            cur = target
-            seen = set()
-            while cur.get("id") and cur["id"] not in seen:
-                seen.add(cur["id"])
-                chain.append(cur)
-                pid = cur.get("parent_id", "")
-                if pid and pid in id2row:
-                    cur = id2row[pid]
-                else:
-                    break
-            chain.reverse()
-            if not chain:
-                continue
-
-            target_idx = len(chain) - 1
-            answer = (chain[target_idx].get("Assistentin") or "").strip()
-            if not answer:
-                continue
-
-            system_text = (chain[0].get("system") or "").strip()
-            parts: List[str] = []
-            if system_text:
-                parts.extend(["<|System|>\n", system_text, "\n</s>"])
-
-            for j in range(target_idx + 1):
-                turn = chain[j]
-                user = (turn.get("Benutzer") or "").strip()
-                ctx = (turn.get("Kontext") or "").strip()
-                asst = (turn.get("Assistentin") or "").strip()
-
-                if user:
-                    parts.append("\n<|Benutzer|>\n")
-                    parts.append(f"{ctx}\n{user}".strip() if ctx else user)
-                    parts.append("\n</s>")
-
-                if j < target_idx and asst:
-                    parts.append("\n<|Assistentin|>\n")
-                    parts.append(asst)
-                    parts.append("\n</s>")
-                elif j == target_idx:
-                    parts.append("\n<|Assistentin|>\n")
-
-            yield "".join(parts), answer + "\n</s>"
+        yield StructuredChatSample(system=system_text, turns=turns, target_answer=answer)
 
 
-def _find_first_subsequence(haystack: List[int], needle: List[int]) -> int:
-    if not haystack or not needle or len(needle) > len(haystack):
-        return -1
-    n = len(needle)
-    for i in range(0, len(haystack) - n + 1):
-        if haystack[i:i + n] == needle:
-            return i
-    return -1
+def dialogplus_structured_iter(csv_path: str, shuffle_threads: bool = False) -> Iterator[StructuredChatSample]:
+    for item in chat_structured_iter(csv_path, shuffle_threads=shuffle_threads):
+        yield item
 
 
-def _trim_window_to_turn_boundary(token_ids: List[int], max_len: int, turn_markers: List[List[int]]) -> List[int]:
-    if len(token_ids) <= max_len:
-        return token_ids
-    window = token_ids[-max_len:]
-    best_start = 0
-    for marker_ids in turn_markers:
-        pos = _find_first_subsequence(window, marker_ids)
-        if pos != -1:
-            best_start = max(best_start, pos)
-    trimmed = window[best_start:]
-    return trimmed if trimmed else window
+def _build_role_block(role: str, content: str, template_mode: str, eos_token: str) -> str:
+    content = (content or "").strip()
+    if role == "system":
+        return f"<|System|>{content}{eos_token}"
+    if role == "user":
+        return f"<|Benutzer|>{content}{eos_token}"
+    if role == "assistant":
+        return f"<|Assistentin|>{content}{eos_token}"
+    return content
 
 
-# ---------------------------------------------------------------------------
-# Schnelle Sample-Zählung
-# ---------------------------------------------------------------------------
+def _build_assistant_prefix(template_mode: str) -> str:
+    return "<|Assistentin|>"
+
+
+def _apply_history_limit(turns: List[StructuredTurn], max_history_turns: Optional[int]) -> List[StructuredTurn]:
+    if max_history_turns is None:
+        return turns
+    if len(turns) <= max_history_turns:
+        return turns
+    return turns[-max_history_turns:]
+
+
+def build_examples_stream(cfg: TrainConfig) -> Iterator[Any]:
+    if cfg.template_mode == "chat":
+        return chat_structured_iter(cfg.csv_path, shuffle_threads=bool(cfg.shuffle))
+    if cfg.template_mode == "dialogplus":
+        return dialogplus_structured_iter(cfg.csv_path, shuffle_threads=bool(cfg.shuffle))
+    return column_iter(cfg.csv_path, cfg.column_name)
+
+
+def pack_dialog_from_blocks_strict(
+    prompt_blocks: List[List[int]],
+    answer_ids: List[int],
+    max_seq_length: int,
+) -> Optional[Tuple[List[int], List[int]]]:
+    if max_seq_length <= 0:
+        raise ValueError("max_seq_length muss > 0 sein")
+
+    # Zielantwort muss vollständig reinpassen
+    if len(answer_ids) > max_seq_length:
+        return None
+
+    kept_prompt_blocks: List[List[int]] = []
+    used = len(answer_ids)
+
+    # ganze Blöcke rückwärts einpacken
+    for block_ids in reversed(prompt_blocks):
+        if not block_ids:
+            continue
+        if used + len(block_ids) <= max_seq_length:
+            kept_prompt_blocks.insert(0, block_ids)
+            used += len(block_ids)
+        else:
+            # kompletter Block passt nicht mehr -> nicht anschneiden
+            break
+
+    input_ids = [tok for part in kept_prompt_blocks for tok in part] + answer_ids
+    labels = ([-100] * (len(input_ids) - len(answer_ids))) + answer_ids.copy()
+
+    if not input_ids or len(input_ids) != len(labels):
+        return None
+
+    return input_ids, labels
+
+
+def tokenize_example(
+    item: StructuredChatSample | str,
+    tokenizer,
+    max_seq_length: int,
+    template_mode: str,
+    max_history_turns: Optional[int],
+) -> Optional[Dict[str, List[int]]]:
+    if isinstance(item, str):
+        ids = tokenizer(item, add_special_tokens=False)["input_ids"]
+        if len(ids) > max_seq_length:
+            return None
+        labels = ids.copy()
+        if len(ids) < 2:
+            eos_or_pad = tokenizer.eos_token_id or tokenizer.pad_token_id or 0
+            ids = ids + [eos_or_pad]
+            labels = labels + [eos_or_pad]
+        return {
+            "input_ids": ids,
+            "attention_mask": [1] * len(ids),
+            "labels": labels,
+        }
+
+    prompt_blocks: List[List[int]] = []
+    eos_token = tokenizer.eos_token or "</s>"
+
+    if item.system:
+        system_block = _build_role_block("system", item.system, template_mode, eos_token)
+        system_ids = tokenizer(system_block, add_special_tokens=False)["input_ids"]
+        if len(system_ids) > max_seq_length:
+            return None
+        prompt_blocks.append(system_ids)
+
+    limited_turns = _apply_history_limit(item.turns, max_history_turns)
+
+    for turn in limited_turns:
+        block = _build_role_block(turn.role, turn.content, template_mode, eos_token)
+        block_ids = tokenizer(block, add_special_tokens=False)["input_ids"]
+        if len(block_ids) > max_seq_length:
+            # einzelner Turn zu groß -> komplettes Sample verwerfen
+            return None
+        prompt_blocks.append(block_ids)
+
+    assistant_prefix = _build_assistant_prefix(template_mode)
+    assistant_prefix_ids = tokenizer(assistant_prefix, add_special_tokens=False)["input_ids"]
+    if len(assistant_prefix_ids) > max_seq_length:
+        return None
+    prompt_blocks.append(assistant_prefix_ids)
+
+    answer_ids = tokenizer(
+        (item.target_answer or "").strip() + eos_token,
+        add_special_tokens=False,
+    )["input_ids"]
+
+    packed = pack_dialog_from_blocks_strict(
+        prompt_blocks=prompt_blocks,
+        answer_ids=answer_ids,
+        max_seq_length=max_seq_length,
+    )
+    if packed is None:
+        return None
+
+    input_ids, labels = packed
+
+    if len(input_ids) < 2:
+        eos_or_pad = tokenizer.eos_token_id or tokenizer.pad_token_id or 0
+        input_ids = input_ids + [eos_or_pad]
+        labels = labels + [eos_or_pad]
+
+    return {
+        "input_ids": input_ids,
+        "attention_mask": [1] * len(input_ids),
+        "labels": labels,
+    }
+
 
 def count_examples_fast(cfg: TrainConfig) -> int:
     count = 0
@@ -724,18 +747,22 @@ def get_first_raw_example_preview(cfg: TrainConfig) -> Tuple[str, str]:
     except Exception:
         return "", ""
 
-    if isinstance(first_item, tuple):
-        prompt, answer = first_item
-        preview = prompt + answer
-    else:
-        preview = str(first_item)
+    try:
+        if isinstance(first_item, StructuredChatSample):
+            parts = []
+            if first_item.system:
+                parts.append(f"[SYSTEM]\n{first_item.system}")
+            for t in first_item.turns:
+                parts.append(f"[{t.role.upper()}]\n{t.content}")
+            parts.append(f"[TARGET_ASSISTANT]\n{first_item.target_answer}")
+            preview = "\n\n".join(parts)
+        else:
+            preview = str(first_item)
+    except Exception:
+        preview = ""
 
     return preview[:4000], preview[:20000]
 
-
-# ---------------------------------------------------------------------------
-# Shard Cache
-# ---------------------------------------------------------------------------
 
 def compute_shard_cache_dir(cfg: TrainConfig) -> Path:
     csv_path = Path(cfg.csv_path).expanduser().resolve()
@@ -750,83 +777,13 @@ def compute_shard_cache_dir(cfg: TrainConfig) -> Path:
         "column_name": cfg.column_name,
         "max_seq_length": int(cfg.max_seq_length),
         "sort_by_length": bool(cfg.sort_by_length),
+        "max_history_turns": cfg.max_history_turns,
+        "strict_whole_turns": True,
     }
     key = hashlib.sha256(json.dumps(payload, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()[:24]
     cache_root = Path(cfg.output_dir or cfg.save_dir or "./training_outputs/worker_run").expanduser().resolve() / "dataset_cache"
     cache_root.mkdir(parents=True, exist_ok=True)
     return cache_root / f"shards_{key}"
-
-
-def build_examples_stream(cfg: TrainConfig) -> Iterator[Any]:
-    if cfg.template_mode == "chat":
-        return chat_block_iter(cfg.csv_path, shuffle_threads=bool(cfg.shuffle))
-    if cfg.template_mode == "dialogplus":
-        return dialogplus_block_iter(cfg.csv_path, shuffle_threads=bool(cfg.shuffle))
-    return column_iter(cfg.csv_path, cfg.column_name)
-
-
-def tokenize_example(
-    item: Tuple[str, str] | str,
-    tokenizer,
-    max_seq_length: int,
-    turn_markers: List[List[int]],
-    assistant_marker_ids: List[int],
-) -> Dict[str, List[int]]:
-    def truncate_dialog_sample(prompt_ids: List[int], answer_ids: List[int]) -> Tuple[List[int], List[int]]:
-        total = len(prompt_ids) + len(answer_ids)
-
-        if total <= max_seq_length:
-            input_ids = prompt_ids + answer_ids
-            labels = ([-100] * len(prompt_ids)) + answer_ids
-            return input_ids, labels
-
-        if len(answer_ids) <= max_seq_length:
-            keep_prompt = max(0, max_seq_length - len(answer_ids))
-            trimmed_prompt = prompt_ids[-keep_prompt:] if keep_prompt > 0 else []
-            trimmed_prompt = _trim_window_to_turn_boundary(trimmed_prompt, len(trimmed_prompt), turn_markers)
-            input_ids = trimmed_prompt + answer_ids
-            labels = ([-100] * len(trimmed_prompt)) + answer_ids
-            return input_ids[-max_seq_length:], labels[-max_seq_length:]
-
-        assistant_turn = list(assistant_marker_ids) + list(answer_ids)
-        assistant_turn = _trim_window_to_turn_boundary(assistant_turn, max_seq_length, turn_markers)
-
-        marker_pos = _find_first_subsequence(assistant_turn, assistant_marker_ids)
-        if marker_pos == -1:
-            tail_budget = max(0, max_seq_length - len(assistant_marker_ids))
-            answer_tail = answer_ids[-tail_budget:] if tail_budget > 0 else []
-            assistant_turn = list(assistant_marker_ids) + answer_tail
-            marker_pos = 0
-
-        answer_start = marker_pos + len(assistant_marker_ids)
-        input_ids = assistant_turn[-max_seq_length:]
-        labels = ([-100] * answer_start) + input_ids[answer_start:]
-        labels = labels[-len(input_ids):]
-        return input_ids, labels
-
-    if isinstance(item, tuple):
-        prompt, answer = item
-        prompt_ids = tokenizer(prompt, add_special_tokens=False)["input_ids"]
-        answer_ids = tokenizer(answer, add_special_tokens=False)["input_ids"]
-        input_ids, labels = truncate_dialog_sample(prompt_ids, answer_ids)
-    else:
-        ids = tokenizer(item, add_special_tokens=False)["input_ids"]
-        ids = ids[-max_seq_length:]
-        ids = _trim_window_to_turn_boundary(ids, max_seq_length, turn_markers)
-        input_ids = ids
-        labels = ids.copy()
-
-    if len(input_ids) < 2:
-        eos_or_pad = tokenizer.eos_token_id or tokenizer.pad_token_id or 0
-        input_ids = input_ids + [eos_or_pad]
-        labels = labels + [eos_or_pad]
-
-    attention_mask = [1] * len(input_ids)
-    return {
-        "input_ids": input_ids,
-        "attention_mask": attention_mask,
-        "labels": labels,
-    }
 
 
 def shard_file_path(cache_dir: Path, shard_idx: int) -> Path:
@@ -855,15 +812,11 @@ def shard_producer_process_main(cfg_dict: Dict[str, Any], cache_dir_str: str) ->
         tokenizer = AutoTokenizer.from_pretrained(cfg.model_dir, trust_remote_code=False, use_fast=True)
         prepare_tokenizer(tokenizer, template_mode=cfg.template_mode, force_template=bool(cfg.force_template))
 
-        system_marker_ids = tokenizer("<|System|>\n", add_special_tokens=False)["input_ids"]
-        user_marker_ids = tokenizer("<|Benutzer|>\n", add_special_tokens=False)["input_ids"]
-        assistant_marker_ids = tokenizer("<|Assistentin|>\n", add_special_tokens=False)["input_ids"]
-        turn_markers = [system_marker_ids, user_marker_ids, assistant_marker_ids]
-
         shard_size = int(cfg.tokenized_shard_size)
         shard_idx = 0
         global_start = 0
         total_samples = 0
+        skipped_samples = 0
 
         current_samples: List[Dict[str, List[int]]] = []
         examples_iter = build_examples_stream(cfg)
@@ -873,9 +826,14 @@ def shard_producer_process_main(cfg_dict: Dict[str, Any], cache_dir_str: str) ->
                 item=item,
                 tokenizer=tokenizer,
                 max_seq_length=int(cfg.max_seq_length),
-                turn_markers=turn_markers,
-                assistant_marker_ids=assistant_marker_ids,
+                template_mode=cfg.template_mode,
+                max_history_turns=cfg.max_history_turns,
             )
+
+            if sample is None:
+                skipped_samples += 1
+                continue
+
             current_samples.append(sample)
             total_samples += 1
 
@@ -912,8 +870,11 @@ def shard_producer_process_main(cfg_dict: Dict[str, Any], cache_dir_str: str) ->
             "done": True,
             "num_shards": shard_idx,
             "total_samples": total_samples,
+            "skipped_samples": skipped_samples,
             "template_mode": cfg.template_mode,
             "max_seq_length": cfg.max_seq_length,
+            "max_history_turns": cfg.max_history_turns,
+            "strict_whole_turns": True,
         }
         producer_meta_path(cache_dir).write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
         producer_done_path(cache_dir).write_text(json.dumps({"done": True}, ensure_ascii=False), encoding="utf-8")
@@ -971,7 +932,10 @@ def wait_for_first_shard(cache_dir: Path, poll_sec: float = 1.0) -> None:
             if meta_p.exists():
                 meta = json.loads(meta_p.read_text(encoding="utf-8"))
                 if int(meta.get("num_shards", 0)) == 0:
-                    raise RuntimeError("Shard-Producer fertig, aber kein Shard erzeugt.")
+                    raise RuntimeError(
+                        f"Shard-Producer fertig, aber kein Shard erzeugt. "
+                        f"skipped_samples={meta.get('skipped_samples', 0)}"
+                    )
             raise RuntimeError("Shard-Producer beendet, aber erster Shard fehlt.")
         time.sleep(poll_sec)
 
@@ -1060,10 +1024,6 @@ class DataCollator:
         }
 
 
-# ---------------------------------------------------------------------------
-# Model / optimizer / scheduler
-# ---------------------------------------------------------------------------
-
 def pick_precision(cfg: TrainConfig, device: torch.device) -> Tuple[Optional[torch.dtype], bool, bool]:
     want = (cfg.precision_mode or "auto").lower().strip()
     if device.type != "cuda":
@@ -1095,23 +1055,23 @@ def apply_training_mode(model: nn.Module, cfg: TrainConfig) -> nn.Module:
 
     target_modules = []
     for name, module in model.named_modules():
-        leaf = name.split('.')[-1].lower()
+        leaf = name.split(".")[-1].lower()
         if isinstance(module, nn.Linear) and leaf in {
-            'q_proj', 'k_proj', 'v_proj', 'o_proj',
-            'gate_proj', 'up_proj', 'down_proj',
-            'query', 'key', 'value', 'dense',
-            'fc1', 'fc2', 'wq', 'wk', 'wv', 'wo',
+            "q_proj", "k_proj", "v_proj", "o_proj",
+            "gate_proj", "up_proj", "down_proj",
+            "query", "key", "value", "dense",
+            "fc1", "fc2", "wq", "wk", "wv", "wo",
         }:
-            target_modules.append(name.split('.')[-1])
+            target_modules.append(name.split(".")[-1])
     target_modules = sorted(set(target_modules))
     if not target_modules:
-        target_modules = ['q_proj', 'k_proj', 'v_proj', 'o_proj']
+        target_modules = ["q_proj", "k_proj", "v_proj", "o_proj"]
 
     peft_cfg = LoraConfig(
         r=int(cfg.lora_r),
         lora_alpha=int(cfg.lora_alpha),
         lora_dropout=0.05,
-        bias='none',
+        bias="none",
         task_type=TaskType.CAUSAL_LM,
         target_modules=target_modules,
     )
@@ -1120,7 +1080,7 @@ def apply_training_mode(model: nn.Module, cfg: TrainConfig) -> nn.Module:
         model.print_trainable_parameters()
     except Exception:
         pass
-    LOGGER.info('LoRA aktiv | r=%s alpha=%s targets=%s', cfg.lora_r, cfg.lora_alpha, ','.join(target_modules))
+    LOGGER.info("LoRA aktiv | r=%s alpha=%s targets=%s", cfg.lora_r, cfg.lora_alpha, ",".join(target_modules))
     return model
 
 
@@ -1256,10 +1216,6 @@ def wrap_ddp(model: nn.Module, cfg: TrainConfig, ctx: DistContext) -> nn.Module:
     return DDP(model, **kwargs)
 
 
-# ---------------------------------------------------------------------------
-# Training
-# ---------------------------------------------------------------------------
-
 def move_batch(batch: Dict[str, torch.Tensor], device: torch.device) -> Dict[str, torch.Tensor]:
     return {k: v.to(device, non_blocking=(device.type == "cuda")) for k, v in batch.items()}
 
@@ -1314,11 +1270,8 @@ def train_epoch(
     running_updates = 0
     reached_max_steps = False
     accum_counter = 0
-    batch_idx = 0
 
     for batch in loader:
-        batch_idx += 1
-
         if sync_stop(SHUTDOWN.stop, ctx):
             break
 
@@ -1327,9 +1280,12 @@ def train_epoch(
         if ctx.is_main and preview_writer is not None:
             try:
                 input_ids_cpu = batch["input_ids"].detach().to("cpu")
+                attention_mask_cpu = batch["attention_mask"].detach().to("cpu")
                 texts = []
-                for ids in input_ids_cpu:
-                    txt = tokenizer.decode(ids.tolist(), skip_special_tokens=False)
+                for ids, mask in zip(input_ids_cpu, attention_mask_cpu):
+                    valid_len = int(mask.sum().item())
+                    trimmed_ids = ids[:valid_len]
+                    txt = tokenizer.decode(trimmed_ids.tolist(), skip_special_tokens=False)
                     texts.append(txt)
                 preview_text = "\n\n---\n\n".join(texts)
                 preview_writer.write(preview_text[:4000], preview_text[:20000])
@@ -1431,10 +1387,6 @@ def train_epoch(
     avg_loss = running_loss / max(1, running_updates)
     return avg_loss, global_step, reached_max_steps
 
-
-# ---------------------------------------------------------------------------
-# Main
-# ---------------------------------------------------------------------------
 
 def main() -> int:
     parser = argparse.ArgumentParser()
@@ -1558,6 +1510,10 @@ def main() -> int:
                 scheduler_total_steps,
                 cfg.lr_decay_factor,
             )
+            LOGGER.info(
+                "Strict whole-turn packing aktiv | max_history_turns=%s | no partial turns | oversize samples skipped",
+                cfg.max_history_turns,
+            )
 
         model = wrap_ddp(model, cfg, ctx)
         barrier(ctx)
@@ -1602,11 +1558,24 @@ def main() -> int:
         if ctx.is_main:
             save_target = unwrap_model(model)
             mode = (cfg.train_mode or "full").lower().strip()
-            if mode == "lora" and _PEFT_AVAILABLE and isinstance(save_target, PeftModel):
+
+            if mode == "lora" and _PEFT_AVAILABLE:
                 save_target.save_pretrained(outdir)
+                tokenizer.save_pretrained(outdir)
+
                 if cfg.merge_lora_on_save:
                     try:
-                        merged_target = save_target.merge_and_unload()
+                        merge_source = save_target
+
+                        if hasattr(merge_source, "merge_and_unload"):
+                            merged_target = merge_source.merge_and_unload()
+                        elif hasattr(unwrap_model(model), "merge_and_unload"):
+                            merged_target = unwrap_model(model).merge_and_unload()
+                        else:
+                            raise AttributeError(
+                                f"{merge_source.__class__.__name__} unterstützt merge_and_unload() nicht"
+                            )
+
                         merged_dir = outdir / "merged"
                         merged_dir.mkdir(parents=True, exist_ok=True)
                         merged_target.save_pretrained(merged_dir)
@@ -1614,9 +1583,18 @@ def main() -> int:
                         LOGGER.info("Gemergtes LoRA-Modell gespeichert nach: %s", merged_dir)
                     except Exception as merge_exc:
                         LOGGER.warning("LoRA-Merge beim Speichern fehlgeschlagen: %s", merge_exc)
+                        LOGGER.warning("Adapter wurde trotzdem normal gespeichert: %s", outdir)
             else:
                 save_target.save_pretrained(outdir)
-            tokenizer.save_pretrained(outdir)
+                tokenizer.save_pretrained(outdir)
+
+            meta = {}
+            meta_path = producer_meta_path(cache_dir)
+            if meta_path.exists():
+                try:
+                    meta = json.loads(meta_path.read_text(encoding="utf-8"))
+                except Exception:
+                    meta = {}
 
             (outdir / "template_info.json").write_text(
                 json.dumps(
@@ -1629,6 +1607,9 @@ def main() -> int:
                             "eos_token": tokenizer.eos_token,
                             "bos_token": tokenizer.bos_token,
                         },
+                        "max_history_turns": cfg.max_history_turns,
+                        "strict_whole_turns": True,
+                        "skipped_samples": meta.get("skipped_samples", 0),
                     },
                     ensure_ascii=False,
                     indent=2,
@@ -1657,6 +1638,9 @@ def main() -> int:
                     "train_mode": cfg.train_mode,
                     "lora_r": cfg.lora_r,
                     "lora_alpha": cfg.lora_alpha,
+                    "max_history_turns": cfg.max_history_turns,
+                    "strict_whole_turns": True,
+                    "skipped_samples": meta.get("skipped_samples", 0),
                 }
             )
             LOGGER.info("Training abgeschlossen. Modell gespeichert nach: %s", outdir)
