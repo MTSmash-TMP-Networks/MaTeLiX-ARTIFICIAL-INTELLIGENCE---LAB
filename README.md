@@ -6,74 +6,120 @@
 ![Transformers](https://img.shields.io/badge/Transformers-Hugging%20Face-FFD21E)
 ![License](https://img.shields.io/badge/License-Apache%202.0-blue)
 
-Lokales **LLM Training- und Inference-Lab** mit **FastAPI**, **Web-UI**, **DDP-/Multi-GPU-Training**, **LoRA**, **Live-Logs**, **Live-Preview** und einer **OpenAI-kompatiblen API**.
+Local **LLM training and inference lab** with **FastAPI**, **Web UI**, **DDP / Multi-GPU training**, **LoRA**, **live logs**, **live preview** and an **OpenAI-compatible API**.
 
-> Entwickelt für lokales Fine-Tuning, Chat-Datasets, Text-Datasets und kontrollierte Inference-Workflows.
+> Built for local fine-tuning, chat datasets, text datasets and controlled inference workflows.
 
 ---
 
-## Inhaltsverzeichnis
+## Table of Contents
 
+- [Overview](#overview)
 - [Features](#features)
-- [Projektstruktur](#projektstruktur)
+- [Screenshots](#screenshots)
+- [Project Structure](#project-structure)
 - [Installation](#installation)
 - [Start](#start)
-- [Web-UI](#web-ui)
-- [Dataset-Formate](#dataset-formate)
+- [Web UI](#web-ui)
+- [Dataset Formats](#dataset-formats)
 - [Strict Whole-Turn Packing](#strict-whole-turn-packing)
 - [Training](#training)
 - [Inference](#inference)
-- [OpenAI-kompatible API](#openai-kompatible-api)
-- [Wichtige Parameter](#wichtige-parameter)
+- [OpenAI-compatible API](#openai-compatible-api)
+- [Important Parameters](#important-parameters)
 - [DDP / Multi-GPU](#ddp--multi-gpu)
-- [LoRA / Merge-Verhalten](#lora--merge-verhalten)
+- [LoRA / Merge Behavior](#lora--merge-behavior)
 - [Troubleshooting](#troubleshooting)
-- [Lizenz](#lizenz)
+- [License](#license)
+- [Trademark](#trademark)
+
+---
+
+## Overview
+
+**MaTeLiX ARTIFICIAL INTELLIGENCE - LAB** is a local environment for:
+
+- supervised fine-tuning of LLMs
+- chat and text dataset processing
+- LoRA or full training
+- DDP / multi-GPU execution
+- browser-based training control
+- local inference and streaming chat
+- OpenAI-style API access
+
+It is designed for practical local experiments with reproducible outputs, cached tokenized datasets and a lightweight but powerful browser UI.
 
 ---
 
 ## Features
 
 ### Training
-- Full Fine-Tuning oder LoRA Fine-Tuning
-- Single-GPU, CPU, MPS oder **DDP / Multi-GPU**
-- CSV-basierte Trainingsdaten
-- Trainingsstatus, Logs und Live-Preview
-- Stop-Funktion für laufende Trainings
-- automatische Trainingsoutputs pro Run
+- Full fine-tuning or LoRA fine-tuning
+- CPU, MPS, single-GPU or **DDP / multi-GPU**
+- CSV-based datasets
+- live training status
+- stop mechanism for running jobs
+- structured training outputs per run
 
-### Dataset-Verarbeitung
-- `chat`, `dialogplus`, `plain`
-- Thread-Rekonstruktion über `id` / `parent_id`
+### Dataset Processing
+- supports:
+  - `chat`
+  - `dialogplus`
+  - `plain`
+- reconstructs thread chains via `id` / `parent_id`
 - **strict whole-turn packing**
-- keine halben Turns / keine halb abgeschnittenen Dialoge
-- Oversize-Samples werden übersprungen
-- tokenisierte **Shard-Caches** für schnellere Folge-Trainings
+- no partial dialog turns
+- oversized samples are skipped cleanly
+- tokenized **shard cache** for faster re-runs
 
-### Tokenizer / Template
-- automatische Rollen-Tokens:
+### Tokenizer / Templates
+- automatically adds:
   - `<|System|>`
   - `<|Benutzer|>`
   - `<|Assistentin|>`
-- automatisches `pad_token`-Handling
-- eigenes MaTeLiX Chat-Template
-- strikte Rollenvalidierung im Chat-Modus
+- auto pad-token handling if missing
+- custom MaTeLiX chat template
+- strict role validation in chat mode
 
 ### Inference
-- Modell laden / entladen
-- normaler Chat
-- Streaming-Chat
-- LoRA-Adapter oder reguläre Modelle laden
-- bevorzugt aktuelles / letztes Modell
+- load / unload model
+- standard chat
+- streaming chat
+- base model or LoRA adapter loading
+- prefers the latest available trained model
 
-### API / UI
-- FastAPI-Backend
-- OpenAI-kompatible `/v1/*` Endpunkte
-- Web-UI mit Hardware-Anzeige, Logs, Loss-Kurve und Chat
+### UI / API
+- FastAPI backend
+- OpenAI-compatible `/v1/*` endpoints
+- Web UI with:
+  - hardware stats
+  - training setup
+  - logs
+  - loss chart
+  - live sample preview
+  - browser chat
 
 ---
 
-## Projektstruktur
+## Screenshots
+
+### Dashboard / Training UI
+
+![Dashboard Overview](docs/screenshots/dashboard-overview.png)
+
+### Training Status / Logs
+
+![Training Status](docs/screenshots/training-status.png)
+
+### Browser Chat / Inference
+
+![Browser Chat](docs/screenshots/browser-chat.png)
+
+> Put your screenshots into `docs/screenshots/` using exactly these filenames, or adjust the paths above.
+
+---
+
+## Project Structure
 
 ```text
 .
@@ -83,6 +129,11 @@ Lokales **LLM Training- und Inference-Lab** mit **FastAPI**, **Web-UI**, **DDP-/
 │  └─ *.csv
 ├─ static/
 │  └─ index.html
+├─ docs/
+│  └─ screenshots/
+│     ├─ dashboard-overview.png
+│     ├─ training-status.png
+│     └─ browser-chat.png
 ├─ training_outputs/
 │  └─ <model>_YYYY-MM-DD_HH-MM-SS/
 │     ├─ train_config.json
@@ -92,7 +143,7 @@ Lokales **LLM Training- und Inference-Lab** mit **FastAPI**, **Web-UI**, **DDP-/
 │     ├─ livepreview.json
 │     ├─ dataset_cache/
 │     ├─ template_info.json
-│     ├─ merged/                # falls LoRA-Merge erfolgreich
+│     ├─ merged/
 │     └─ ...
 └─ README.md
 ````
@@ -101,15 +152,18 @@ Lokales **LLM Training- und Inference-Lab** mit **FastAPI**, **Web-UI**, **DDP-/
 
 ## Installation
 
-### Voraussetzungen
+### Requirements
 
-* Python 3.10+ empfohlen
+* Python 3.10+
 * PyTorch
 * `transformers`
 * `fastapi`
 * `uvicorn`
 * `psutil`
-* optional: `peft` für LoRA
+* optional:
+
+  * `peft` for LoRA support
+  * CUDA for GPU / DDP training
 
 ### Setup
 
@@ -124,13 +178,15 @@ Windows:
 .venv\Scripts\activate
 ```
 
-Pakete installieren:
+Install dependencies:
 
 ```bash
 pip install -U pip
 pip install fastapi uvicorn pydantic psutil torch transformers tokenizers
 pip install peft
 ```
+
+> For CUDA, install the matching PyTorch build for your system.
 
 ---
 
@@ -140,7 +196,7 @@ pip install peft
 python matelix_lab_server_web_ddp.py
 ```
 
-Danach:
+Default URL:
 
 ```text
 http://127.0.0.1:8002/
@@ -148,34 +204,36 @@ http://127.0.0.1:8002/
 
 ---
 
-## Web-UI
+## Web UI
 
-Die Oberfläche liegt unter:
+The browser UI is served from:
 
 ```text
 /static/index.html
 ```
 
-Funktionen der UI:
+Main UI features:
 
-* Modellauswahl
-* Dataset-Auswahl
-* Trainingsparameter
-* optionaler History-Deckel
-* Cache-Neuaufbau
-* LoRA-Optionen
-* Live-Logs
-* Loss-Kurve
-* Live-Preview
-* Browser-Chat mit geladenem Modell
+* model selection
+* dataset selection
+* training configuration
+* optional history cap
+* cache rebuild toggle
+* LoRA options
+* live logs
+* loss chart
+* live sample preview
+* browser-based inference chat
 
 ---
 
-## Dataset-Formate
+## Dataset Formats
 
 ## 1. `template_mode="plain"`
 
-Für reine Textdaten.
+For plain text datasets.
+
+Example:
 
 ```csv
 text
@@ -183,7 +241,7 @@ Das ist ein Beispielsatz.
 Noch ein Beispielsatz.
 ```
 
-Beispiel:
+Typical config:
 
 ```json
 {
@@ -196,9 +254,9 @@ Beispiel:
 
 ## 2. `template_mode="chat"`
 
-Für Chat-/Thread-Datasets.
+For threaded chat datasets.
 
-Erwartete Felder:
+Expected fields:
 
 * `id`
 * `parent_id`
@@ -207,7 +265,7 @@ Erwartete Felder:
 * `Kontext` (optional)
 * `Assistentin`
 
-Beispiel:
+Example:
 
 ```csv
 id,parent_id,system,Benutzer,Kontext,Assistentin
@@ -220,29 +278,31 @@ id,parent_id,system,Benutzer,Kontext,Assistentin
 
 ## 3. `template_mode="dialogplus"`
 
-Wie `chat`, aber blockorientiert.
+Works similar to `chat`, but uses a block-style conversation format.
 
-Auch hier gilt:
+Also applies:
 
-* ganze Turns
-* keine halben Blöcke
-* zu große Samples werden übersprungen
+* whole-turn packing
+* no partial blocks
+* oversized samples are skipped
 
 ---
 
 ## Strict Whole-Turn Packing
 
-Die aktuelle Logik ist **tokenbudget-gesteuert**:
+This version no longer relies on a fixed history window as the primary logic.
 
-* komplette Turns werden rückwärts gesammelt
-* nur vollständige Blöcke werden übernommen
-* Antwort bleibt vollständig
-* kein harter Cut mitten im Turn
-* zu große Samples werden verworfen
+Instead it is **token-budget driven**:
 
-### Empfehlung
+* complete turns are collected from the end backwards
+* only full blocks are included
+* assistant target stays complete
+* no cutting in the middle of a turn
+* oversized samples are skipped
 
-Für normale Chat-Datasets:
+### Recommended behavior
+
+For most chat datasets:
 
 ```json
 {
@@ -250,18 +310,18 @@ Für normale Chat-Datasets:
 }
 ```
 
-Das bedeutet:
+That means:
 
-* nur das Tokenfenster entscheidet
-* kein künstlicher Zusatzdeckel
+* only the token window decides
+* no extra artificial turn cap
 
-Optional kann `max_history_turns` gesetzt werden, wenn zusätzlich begrenzt werden soll.
+You can still set `max_history_turns` if you want an additional hard limit.
 
 ---
 
 ## Training
 
-### Beispiel: Chat / LoRA
+### Example: Chat / LoRA
 
 ```bash
 curl -X POST http://127.0.0.1:8002/start \
@@ -291,7 +351,7 @@ curl -X POST http://127.0.0.1:8002/start \
   }'
 ```
 
-### Training stoppen
+### Stop training
 
 ```bash
 curl -X POST http://127.0.0.1:8002/stop
@@ -315,7 +375,7 @@ WebSocket:
 
 ## Inference
 
-### Modell laden
+### Load a model
 
 ```bash
 curl -X POST http://127.0.0.1:8002/load_inference \
@@ -341,7 +401,7 @@ curl -X POST http://127.0.0.1:8002/chat \
   }'
 ```
 
-### Streaming-Chat
+### Streaming Chat
 
 ```bash
 curl -N -X POST http://127.0.0.1:8002/chat_stream \
@@ -358,9 +418,9 @@ curl -N -X POST http://127.0.0.1:8002/chat_stream \
 
 ---
 
-## OpenAI-kompatible API
+## OpenAI-compatible API
 
-Verfügbare Endpunkte:
+Available endpoints:
 
 * `GET /v1/models`
 * `POST /v1/chat/completions`
@@ -368,20 +428,20 @@ Verfügbare Endpunkte:
 
 ### Auth
 
-Standardmäßig:
+Default local API key:
 
 ```text
 Authorization: Bearer matelix-local-dev-key
 ```
 
-### Modelle listen
+### List models
 
 ```bash
 curl http://127.0.0.1:8002/v1/models \
   -H "Authorization: Bearer matelix-local-dev-key"
 ```
 
-### Chat Completions
+### Chat completions
 
 ```bash
 curl -X POST http://127.0.0.1:8002/v1/chat/completions \
@@ -415,27 +475,27 @@ curl -N -X POST http://127.0.0.1:8002/v1/chat/completions \
 
 ---
 
-## Wichtige Parameter
+## Important Parameters
 
-| Parameter                | Bedeutung                                    |
-| ------------------------ | -------------------------------------------- |
-| `model_dir`              | Hugging Face Repo-ID oder lokaler Modellpfad |
-| `csv_path`               | Pfad zur Trainings-CSV                       |
-| `template_mode`          | `chat`, `dialogplus`, `plain`                |
-| `max_seq_length`         | maximales Tokenfenster                       |
-| `max_history_turns`      | optionaler zusätzlicher Turn-Deckel          |
-| `rebuild_dataset_cache`  | Cache neu erzeugen                           |
-| `train_mode`             | `full` oder `lora`                           |
-| `lora_r`                 | LoRA Rank                                    |
-| `lora_alpha`             | LoRA Alpha                                   |
-| `precision_mode`         | `auto`, `fp32`, `fp16`, `bf16`               |
-| `gradient_checkpointing` | spart VRAM, kostet Laufzeit                  |
+| Parameter                | Meaning                                  |
+| ------------------------ | ---------------------------------------- |
+| `model_dir`              | Hugging Face repo ID or local model path |
+| `csv_path`               | path to training CSV                     |
+| `template_mode`          | `chat`, `dialogplus`, `plain`            |
+| `max_seq_length`         | maximum token window                     |
+| `max_history_turns`      | optional extra turn cap                  |
+| `rebuild_dataset_cache`  | rebuild tokenized cache                  |
+| `train_mode`             | `full` or `lora`                         |
+| `lora_r`                 | LoRA rank                                |
+| `lora_alpha`             | LoRA alpha                               |
+| `precision_mode`         | `auto`, `fp32`, `fp16`, `bf16`           |
+| `gradient_checkpointing` | reduces VRAM usage, slower               |
 
 ---
 
 ## DDP / Multi-GPU
 
-Beispiel:
+Example:
 
 ```json
 {
@@ -446,75 +506,76 @@ Beispiel:
 }
 ```
 
-Wenn mehrere CUDA-Geräte vorhanden sind, kann das Training verteilt gestartet werden.
+If multiple CUDA GPUs are available, distributed training can be enabled.
 
 ---
 
-## LoRA / Merge-Verhalten
+## LoRA / Merge Behavior
 
-Beim Speichern gilt:
+On save:
 
-* Adapter wird regulär gespeichert
-* falls `merge_lora_on_save=true`:
+* adapter is always saved normally
+* if `merge_lora_on_save=true`
 
-  * zusätzlich wird ein Merge versucht
-* falls `merge_and_unload()` vom Modell nicht unterstützt wird:
+  * the system also tries to create a merged model
+* if `merge_and_unload()` is not supported by the model class
 
-  * Training bleibt trotzdem erfolgreich
-  * Adapter bleibt normal nutzbar
+  * training still succeeds
+  * adapter remains usable
 
 ---
 
 ## Troubleshooting
 
-### Kein erster Shard / kein Cache
+### No shard created / no usable samples
 
-Mögliche Gründe:
+Possible reasons:
 
-* CSV ist leer
-* Spaltennamen passen nicht
-* alle Samples sind größer als `max_seq_length`
-* Antwort oder Turns sind einzeln zu groß
+* CSV is empty
+* wrong column names
+* all samples are larger than `max_seq_length`
+* target answers are too long
+* individual turns are too large
 
-### LoRA Merge schlägt fehl
+### LoRA merge fails
 
-Das ist nicht zwingend kritisch:
+Usually not fatal:
 
-* Adapter bleibt gespeichert
-* nur das zusätzliche `merged/` Modell fehlt dann
+* adapter is still saved
+* only the additional merged model is missing
 
-### CUDA wird nicht genutzt
+### CUDA is not used
 
-Prüfen:
+Check:
 
-* passende Torch-Version
-* CUDA-Installation
+* correct PyTorch build
+* CUDA installation
 * `torch.cuda.is_available()`
 
-### UI zeigt alte Daten
+### UI still shows outdated behavior
 
-Meist hilft:
+Usually solved by:
 
-* Browser-Cache leeren
+* hard refresh / clear browser cache
 * `rebuild_dataset_cache=true`
-* sicherstellen, dass die richtige `static/index.html` geladen wird
+* verifying that the correct `static/index.html` is loaded
 
 ---
 
-## Lizenz
+## License
 
-Dieses Projekt steht unter der **Apache License 2.0**.
-Siehe `LICENSE`.
+This project is licensed under the **Apache License 2.0**.
+See `LICENSE`.
 
 ---
 
 ## Trademark
 
-**MaTeLiX AI** ist eine Marke / Brand der **TMP-SYSTEM-SERVICE GmbH**.
+**MaTeLiX AI** is a trademark / brand of **TMP-SYSTEM-SERVICE GmbH**.
 
 ---
 
-## Empfohlene Defaults
+## Recommended Defaults
 
 ```json
 {
