@@ -6,6 +6,9 @@
 ![Transformers](https://img.shields.io/badge/Transformers-Hugging%20Face-FFD21E)
 ![License](https://img.shields.io/badge/License-Apache%202.0-blue)
 
+<img width="3323" height="1471" alt="Screenshot 2026-04-21 at 12-03-11 MaTeLiX ARTIFICIAL INTELLIGENCE - LAB" src="https://github.com/user-attachments/assets/61530cb9-7cb3-49c2-a02b-0ca4871e3924" />
+
+
 Local **LLM training and inference lab** with **FastAPI**, **Web UI**, **DDP / Multi-GPU training**, **LoRA**, **live logs**, **live preview** and an **OpenAI-compatible API**.
 
 > Built for local fine-tuning, chat datasets, text datasets and controlled inference workflows.
