@@ -48,7 +48,6 @@ import torch.distributed as dist
 from torch import nn
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.optim import AdamW
-from torch.optim.lr_scheduler import LambdaLR
 from torch.utils.data import DataLoader, IterableDataset
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
@@ -90,7 +89,13 @@ class TrainConfig:
 
     learning_rate: float = 2e-4
     lr_schedule: str = "cosine"
-    lr_decay_factor: float = 4.0
+    lr_decay_factor: float = 1.0
+    warmup_steps: int = 0
+    warmup_ratio: float = 0.0
+    min_lr_ratio: float = 0.0
+    lr_adjust_interval_steps: int = 25
+    lr_adjust_min_change: float = 0.05
+
     per_device_train_batch_size: int = 1
     gradient_accumulation_steps: int = 8
     num_train_epochs: float = 3.0
@@ -156,6 +161,11 @@ class TrainConfig:
         self.weight_decay = float(self.weight_decay)
         self.num_train_epochs = float(self.num_train_epochs)
         self.lr_decay_factor = max(0.01, float(self.lr_decay_factor))
+        self.warmup_steps = max(0, int(self.warmup_steps))
+        self.warmup_ratio = max(0.0, float(self.warmup_ratio))
+        self.min_lr_ratio = min(1.0, max(0.0, float(self.min_lr_ratio)))
+        self.lr_adjust_interval_steps = max(1, int(self.lr_adjust_interval_steps))
+        self.lr_adjust_min_change = max(0.0, float(self.lr_adjust_min_change))
         self.seed = int(self.seed)
         self.dataloader_num_workers = int(self.dataloader_num_workers)
         self.ddp_timeout_minutes = int(self.ddp_timeout_minutes)
@@ -199,7 +209,7 @@ def _coerce_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
         "keep_last_k_checkpoints", "validate_every_epoch",
         "early_stopping_patience", "early_stopping_min_delta",
         "log_every_steps", "compile_model", "compile_mode",
-        "scheduler", "warmup_steps", "warmup_ratio", "min_lr_ratio",
+        "scheduler",
     }
     for k in list(payload.keys()):
         if k in ignore_keys:
@@ -833,6 +843,16 @@ def producer_meta_path(cache_dir: Path) -> Path:
     return cache_dir / "_producer_meta.json"
 
 
+def producer_progress_path(cache_dir: Path) -> Path:
+    return cache_dir / "_producer_progress.json"
+
+
+def _atomic_write_json(path: Path, payload: Dict[str, Any]) -> None:
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    tmp.replace(path)
+
+
 def _write_shard(cache_dir: Path, shard_idx: int, global_start: int, samples: List[Dict[str, Any]]) -> None:
     payload = {
         "shard_idx": shard_idx,
@@ -881,6 +901,26 @@ def _flush_pending_samples(
     return pending_samples, current_samples, shard_idx, global_start
 
 
+def _write_producer_progress(
+    cache_dir: Path,
+    *,
+    seen_samples: int,
+    tokenized_samples: int,
+    skipped_samples: int,
+    shard_idx: int,
+    done: bool,
+) -> None:
+    payload = {
+        "seen_samples": int(seen_samples),
+        "tokenized_samples": int(tokenized_samples),
+        "skipped_samples": int(skipped_samples),
+        "num_shards_written": int(shard_idx),
+        "done": bool(done),
+        "updated_at": time.time(),
+    }
+    _atomic_write_json(producer_progress_path(cache_dir), payload)
+
+
 def shard_producer_process_main(cfg_dict: Dict[str, Any], cache_dir_str: str) -> None:
     try:
         cfg = TrainConfig(**cfg_dict)
@@ -922,6 +962,7 @@ def shard_producer_process_main(cfg_dict: Dict[str, Any], cache_dir_str: str) ->
         global_start = 0
         total_samples = 0
         skipped_samples = 0
+        seen_samples = 0
 
         current_samples: List[Dict[str, Any]] = []
         pending_samples: List[Dict[str, Any]] = []
@@ -933,7 +974,18 @@ def shard_producer_process_main(cfg_dict: Dict[str, Any], cache_dir_str: str) ->
 
         examples_iter = build_examples_stream(cfg)
 
+        _write_producer_progress(
+            cache_dir,
+            seen_samples=0,
+            tokenized_samples=0,
+            skipped_samples=0,
+            shard_idx=0,
+            done=False,
+        )
+
         for item in examples_iter:
+            seen_samples += 1
+
             sample = tokenize_example(
                 item=item,
                 tokenizer=tokenizer,
@@ -944,6 +996,15 @@ def shard_producer_process_main(cfg_dict: Dict[str, Any], cache_dir_str: str) ->
 
             if sample is None:
                 skipped_samples += 1
+                if seen_samples % 100 == 0:
+                    _write_producer_progress(
+                        cache_dir,
+                        seen_samples=seen_samples,
+                        tokenized_samples=total_samples,
+                        skipped_samples=skipped_samples,
+                        shard_idx=shard_idx,
+                        done=False,
+                    )
                 continue
 
             pending_samples.append(sample)
@@ -958,6 +1019,14 @@ def shard_producer_process_main(cfg_dict: Dict[str, Any], cache_dir_str: str) ->
                     global_start=global_start,
                     shard_size=shard_size,
                     sort_by_length=bool(cfg.sort_by_length),
+                )
+                _write_producer_progress(
+                    cache_dir,
+                    seen_samples=seen_samples,
+                    tokenized_samples=total_samples,
+                    skipped_samples=skipped_samples,
+                    shard_idx=shard_idx,
+                    done=False,
                 )
 
         if pending_samples:
@@ -975,10 +1044,20 @@ def shard_producer_process_main(cfg_dict: Dict[str, Any], cache_dir_str: str) ->
             _write_shard(cache_dir, shard_idx, global_start, current_samples)
             shard_idx += 1
 
+        _write_producer_progress(
+            cache_dir,
+            seen_samples=seen_samples,
+            tokenized_samples=total_samples,
+            skipped_samples=skipped_samples,
+            shard_idx=shard_idx,
+            done=True,
+        )
+
         meta = {
             "done": True,
             "num_shards": shard_idx,
             "total_samples": total_samples,
+            "seen_samples": seen_samples,
             "skipped_samples": skipped_samples,
             "template_mode": cfg.template_mode,
             "max_seq_length": cfg.max_seq_length,
@@ -991,8 +1070,8 @@ def shard_producer_process_main(cfg_dict: Dict[str, Any], cache_dir_str: str) ->
             "ngram_summary": ngram_summary_text(ngram_state),
             "ngram_selected_count": int((ngram_state.stats or {}).get("selected_count", 0)) if ngram_state else 0,
         }
-        producer_meta_path(cache_dir).write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
-        producer_done_path(cache_dir).write_text(json.dumps({"done": True}, ensure_ascii=False), encoding="utf-8")
+        _atomic_write_json(producer_meta_path(cache_dir), meta)
+        _atomic_write_json(producer_done_path(cache_dir), {"done": True})
 
     except Exception as e:
         producer_error_path(Path(cache_dir_str)).write_text(
@@ -1013,6 +1092,7 @@ def start_shard_producer(cfg: TrainConfig, cache_dir: Path, ctx: DistContext) ->
 
     done_file = producer_done_path(cache_dir)
     error_file = producer_error_path(cache_dir)
+    progress_file = producer_progress_path(cache_dir)
 
     if error_file.exists():
         error_file.unlink(missing_ok=True)
@@ -1025,6 +1105,7 @@ def start_shard_producer(cfg: TrainConfig, cache_dir: Path, ctx: DistContext) ->
         p.unlink(missing_ok=True)
     done_file.unlink(missing_ok=True)
     producer_meta_path(cache_dir).unlink(missing_ok=True)
+    progress_file.unlink(missing_ok=True)
 
     proc = mp.Process(
         target=shard_producer_process_main,
@@ -1053,6 +1134,15 @@ def wait_for_first_shard(cache_dir: Path, poll_sec: float = 1.0) -> None:
                     )
             raise RuntimeError("Shard-Producer beendet, aber erster Shard fehlt.")
         time.sleep(poll_sec)
+
+
+def read_json_if_exists(path: Path) -> Optional[Dict[str, Any]]:
+    try:
+        if path.exists():
+            return json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+    return None
 
 
 def _make_bucketed_shuffle_order(samples: List[Dict[str, Any]], rng: random.Random) -> List[int]:
@@ -1338,24 +1428,146 @@ def build_optimizer(model: nn.Module, cfg: TrainConfig) -> torch.optim.Optimizer
         )
 
 
-def build_scheduler(
-    optimizer: torch.optim.Optimizer,
-    total_steps: int,
-    schedule: str,
-) -> LambdaLR:
-    schedule = (schedule or "cosine").lower().strip()
+class AdaptiveLRScheduler:
+    def __init__(
+        self,
+        optimizer: torch.optim.Optimizer,
+        *,
+        base_lr: float,
+        schedule: str,
+        total_steps: int,
+        warmup_steps: int = 0,
+        min_lr_ratio: float = 0.0,
+        lr_decay_factor: float = 1.0,
+    ) -> None:
+        self.optimizer = optimizer
+        self.base_lr = float(base_lr)
+        self.schedule = (schedule or "cosine").lower().strip()
+        self.total_steps = max(1, int(total_steps))
+        self.warmup_steps = max(0, int(warmup_steps))
+        self.min_lr_ratio = min(1.0, max(0.0, float(min_lr_ratio)))
+        self.lr_decay_factor = max(0.01, float(lr_decay_factor))
+        self.last_lr = self.base_lr
 
-    def _lambda(step: int) -> float:
-        if total_steps <= 0:
+        self._apply_lr(self.get_lr_for_step(0))
+
+    def _apply_lr(self, lr: float) -> float:
+        lr = float(max(0.0, lr))
+        for group in self.optimizer.param_groups:
+            group["lr"] = lr
+        self.last_lr = lr
+        return lr
+
+    def update_total_steps(self, total_steps: int) -> bool:
+        total_steps = max(1, int(total_steps))
+        changed = total_steps != self.total_steps
+        self.total_steps = total_steps
+        return changed
+
+    def get_lr_scale(self, step: int) -> float:
+        step = max(0, int(step))
+        warmup_steps = max(0, min(self.warmup_steps, self.total_steps - 1 if self.total_steps > 1 else 0))
+
+        if warmup_steps > 0 and step < warmup_steps:
+            return max(1e-12, float(step + 1) / float(warmup_steps))
+
+        if self.total_steps <= warmup_steps:
             return 1.0
-        progress = min(1.0, max(0.0, step / max(1, total_steps)))
-        if schedule == "linear":
-            return max(0.0, 1.0 - progress)
-        if schedule == "cosine":
-            return 0.5 * (1.0 + math.cos(math.pi * progress))
-        return 1.0
 
-    return LambdaLR(optimizer, _lambda)
+        decay_span = max(1, int(math.ceil((self.total_steps - warmup_steps) * self.lr_decay_factor)))
+        decay_step = max(0, step - warmup_steps)
+        progress = min(1.0, decay_step / float(decay_span))
+
+        if self.schedule == "linear":
+            value = 1.0 - progress
+        elif self.schedule == "cosine":
+            value = 0.5 * (1.0 + math.cos(math.pi * progress))
+        else:
+            value = 1.0
+
+        return max(self.min_lr_ratio, float(value))
+
+    def get_lr_for_step(self, step: int) -> float:
+        return self.base_lr * self.get_lr_scale(step)
+
+    def step(self, global_step: int) -> float:
+        lr = self.get_lr_for_step(global_step)
+        return self._apply_lr(lr)
+
+    def state_dict(self) -> Dict[str, Any]:
+        return {
+            "base_lr": self.base_lr,
+            "schedule": self.schedule,
+            "total_steps": self.total_steps,
+            "warmup_steps": self.warmup_steps,
+            "min_lr_ratio": self.min_lr_ratio,
+            "lr_decay_factor": self.lr_decay_factor,
+            "last_lr": self.last_lr,
+        }
+
+
+def estimate_total_steps_from_samples(total_samples: int, cfg: TrainConfig, ctx: DistContext) -> int:
+    total_samples = max(1, int(total_samples))
+    local_samples = int(math.ceil(total_samples / max(1, ctx.world_size)))
+    batches_per_epoch = max(1, int(math.ceil(local_samples / max(1, cfg.per_device_train_batch_size))))
+    updates_per_epoch = max(1, int(math.ceil(batches_per_epoch / max(1, cfg.gradient_accumulation_steps))))
+
+    if cfg.max_steps is not None:
+        return max(1, int(cfg.max_steps))
+
+    return max(1, int(math.ceil(cfg.num_train_epochs * updates_per_epoch)))
+
+
+def maybe_adjust_scheduler_from_progress(
+    scheduler: AdaptiveLRScheduler,
+    cfg: TrainConfig,
+    ctx: DistContext,
+    cache_dir: Path,
+    csv_total_samples_est: int,
+    global_step: int,
+    force: bool = False,
+) -> Tuple[bool, int, Dict[str, Any]]:
+    progress = read_json_if_exists(producer_progress_path(cache_dir)) or {}
+    meta = read_json_if_exists(producer_meta_path(cache_dir)) or {}
+
+    effective_total_samples = max(1, int(csv_total_samples_est))
+    source = "csv_estimate"
+
+    if meta:
+        total_samples_real = int(meta.get("total_samples", 0))
+        if total_samples_real > 0:
+            effective_total_samples = total_samples_real
+            source = "producer_meta_final"
+    elif progress:
+        seen_samples = int(progress.get("seen_samples", 0))
+        tokenized_samples = int(progress.get("tokenized_samples", 0))
+        if seen_samples > 0 and tokenized_samples > 0 and csv_total_samples_est > 0:
+            projected = int(round(csv_total_samples_est * (tokenized_samples / float(seen_samples))))
+            if projected > 0:
+                effective_total_samples = projected
+                source = "producer_progress_projected"
+
+    proposed_total_steps = estimate_total_steps_from_samples(effective_total_samples, cfg, ctx)
+    current_total_steps = max(1, int(scheduler.total_steps))
+
+    rel_change = abs(proposed_total_steps - current_total_steps) / float(max(1, current_total_steps))
+    should_update = force or (proposed_total_steps != current_total_steps and rel_change >= cfg.lr_adjust_min_change)
+
+    info = {
+        "source": source,
+        "effective_total_samples": int(effective_total_samples),
+        "proposed_total_steps": int(proposed_total_steps),
+        "current_total_steps": int(current_total_steps),
+        "relative_change": float(rel_change),
+        "progress": progress,
+        "meta": meta,
+    }
+
+    if should_update:
+        scheduler.update_total_steps(proposed_total_steps)
+        scheduler.step(global_step)
+
+    return should_update, proposed_total_steps, info
 
 
 def wrap_ddp(model: nn.Module, cfg: TrainConfig, ctx: DistContext) -> nn.Module:
@@ -1411,13 +1623,15 @@ def train_epoch(
     model: nn.Module,
     loader: DataLoader,
     optimizer: torch.optim.Optimizer,
-    scheduler: Optional[LambdaLR],
+    scheduler: AdaptiveLRScheduler,
     scaler: Any,
     cfg: TrainConfig,
     ctx: DistContext,
     epoch: int,
     global_step: int,
-    total_steps: int,
+    total_steps_ref: Dict[str, int],
+    csv_total_samples_est: int,
+    cache_dir: Path,
     train_start_time: float,
     status_writer: JsonStatusWriter,
     preview_writer: Optional[JsonPreviewWriter],
@@ -1439,6 +1653,7 @@ def train_epoch(
     running_updates = 0
     reached_max_steps = False
     accum_counter = 0
+    last_micro_loss_value: Optional[float] = None
 
     for batch in loader:
         if sync_stop(SHUTDOWN.stop, ctx):
@@ -1469,6 +1684,8 @@ def train_epoch(
             if not torch.isfinite(loss):
                 raise FloatingPointError(f"Nicht-finite Loss erkannt: {float(loss.detach().item())}")
 
+            loss_value = float(loss.detach().item())
+            last_micro_loss_value = loss_value
             loss_to_backprop = loss / cfg.gradient_accumulation_steps
 
             if scaler is not None and getattr(scaler, "is_enabled", lambda: False)():
@@ -1499,23 +1716,44 @@ def train_epoch(
                 optimizer.step()
 
             optimizer.zero_grad(set_to_none=True)
-            if scheduler is not None:
-                scheduler.step()
-
             global_step += 1
             accum_counter = 0
+
+            if (global_step % cfg.lr_adjust_interval_steps) == 0:
+                changed, proposed_total_steps, info = maybe_adjust_scheduler_from_progress(
+                    scheduler=scheduler,
+                    cfg=cfg,
+                    ctx=ctx,
+                    cache_dir=cache_dir,
+                    csv_total_samples_est=csv_total_samples_est,
+                    global_step=global_step,
+                    force=False,
+                )
+                total_steps_ref["value"] = scheduler.total_steps
+                if ctx.is_main and changed:
+                    LOGGER.info(
+                        "Scheduler angepasst | source=%s total_steps=%s -> %s rel_change=%.4f samples=%s",
+                        info["source"],
+                        info["current_total_steps"],
+                        proposed_total_steps,
+                        info["relative_change"],
+                        info["effective_total_samples"],
+                    )
+
+            lr = scheduler.step(global_step)
+            total_steps_ref["value"] = scheduler.total_steps
+
             running_updates += 1
             reduced_loss = all_reduce_mean(float(loss.detach().item()), ctx)
             running_loss += reduced_loss
 
             if ctx.is_main:
-                lr = optimizer.param_groups[0]["lr"]
                 elapsed = max(1e-6, time.time() - train_start_time)
                 steps_done = max(1, global_step)
-                steps_left = max(0, int(total_steps) - int(global_step))
+                steps_left = max(0, int(total_steps_ref["value"]) - int(global_step))
                 sec_per_step = elapsed / steps_done
                 eta = format_eta(sec_per_step * steps_left)
-                LOGGER.info("Step %d | Loss: %.6f | LR: %s", global_step, reduced_loss, lr)
+                LOGGER.info("Step %d | Loss: %.6f | LR: %s | total_steps=%s", global_step, reduced_loss, lr, total_steps_ref["value"])
                 status_writer.write(
                     {
                         "running": True,
@@ -1526,11 +1764,14 @@ def train_epoch(
                         "tokens_per_step": int(cfg.max_seq_length * cfg.per_device_train_batch_size * cfg.gradient_accumulation_steps * max(1, ctx.world_size)),
                         "total_tokens": int(global_step * cfg.max_seq_length * cfg.per_device_train_batch_size * cfg.gradient_accumulation_steps * max(1, ctx.world_size)),
                         "epoch": epoch,
-                        "total_steps": int(total_steps),
+                        "total_steps": int(total_steps_ref["value"]),
                     }
                 )
 
             if cfg.max_steps is not None and global_step >= int(cfg.max_steps):
+                reached_max_steps = True
+                break
+            if global_step >= int(total_steps_ref["value"]):
                 reached_max_steps = True
                 break
 
@@ -1547,11 +1788,60 @@ def train_epoch(
             optimizer.step()
 
         optimizer.zero_grad(set_to_none=True)
-        if scheduler is not None:
-            scheduler.step()
-
         global_step += 1
+
+        changed, proposed_total_steps, info = maybe_adjust_scheduler_from_progress(
+            scheduler=scheduler,
+            cfg=cfg,
+            ctx=ctx,
+            cache_dir=cache_dir,
+            csv_total_samples_est=csv_total_samples_est,
+            global_step=global_step,
+            force=False,
+        )
+        total_steps_ref["value"] = scheduler.total_steps
+        if ctx.is_main and changed:
+            LOGGER.info(
+                "Scheduler angepasst | source=%s total_steps=%s -> %s rel_change=%.4f samples=%s",
+                info["source"],
+                info["current_total_steps"],
+                proposed_total_steps,
+                info["relative_change"],
+                info["effective_total_samples"],
+            )
+
+        lr = scheduler.step(global_step)
+        total_steps_ref["value"] = scheduler.total_steps
+
         running_updates += 1
+        reduced_loss = all_reduce_mean(float(last_micro_loss_value or 0.0), ctx)
+        running_loss += reduced_loss
+
+        if ctx.is_main:
+            elapsed = max(1e-6, time.time() - train_start_time)
+            steps_done = max(1, global_step)
+            steps_left = max(0, int(total_steps_ref["value"]) - int(global_step))
+            sec_per_step = elapsed / steps_done
+            eta = format_eta(sec_per_step * steps_left)
+            LOGGER.info("Step %d | Loss: %.6f | LR: %s | total_steps=%s", global_step, reduced_loss, lr, total_steps_ref["value"])
+            status_writer.write(
+                {
+                    "running": True,
+                    "step": global_step,
+                    "loss": reduced_loss,
+                    "learning_rate": lr,
+                    "eta": eta,
+                    "tokens_per_step": int(cfg.max_seq_length * cfg.per_device_train_batch_size * cfg.gradient_accumulation_steps * max(1, ctx.world_size)),
+                    "total_tokens": int(global_step * cfg.max_seq_length * cfg.per_device_train_batch_size * cfg.gradient_accumulation_steps * max(1, ctx.world_size)),
+                    "epoch": epoch,
+                    "total_steps": int(total_steps_ref["value"]),
+                }
+            )
+
+        if cfg.max_steps is not None and global_step >= int(cfg.max_steps):
+            reached_max_steps = True
+        if global_step >= int(total_steps_ref["value"]):
+            reached_max_steps = True
 
     avg_loss = running_loss / max(1, running_updates)
     return avg_loss, global_step, reached_max_steps
@@ -1651,12 +1941,12 @@ def main() -> int:
         )
         collator = DataCollator(tokenizer.pad_token_id or tokenizer.eos_token_id or 0, pad_to_multiple_of=8)
 
-        local_samples_est = int(math.ceil(total_samples_est / max(1, ctx.world_size)))
-        batches_per_epoch_est = max(1, int(math.ceil(local_samples_est / max(1, cfg.per_device_train_batch_size))))
-        updates_per_epoch = max(1, int(math.ceil(batches_per_epoch_est / max(1, cfg.gradient_accumulation_steps))))
-        total_steps = int(cfg.max_steps) if cfg.max_steps is not None else max(1, int(math.ceil(cfg.num_train_epochs * updates_per_epoch)))
+        initial_total_steps = estimate_total_steps_from_samples(total_samples_est, cfg, ctx)
 
-        scheduler_total_steps = max(1, int(math.ceil(total_steps / max(0.01, cfg.lr_decay_factor))))
+        effective_warmup_steps = cfg.warmup_steps
+        if effective_warmup_steps <= 0 and cfg.warmup_ratio > 0.0:
+            effective_warmup_steps = int(math.ceil(initial_total_steps * cfg.warmup_ratio))
+        effective_warmup_steps = max(0, min(effective_warmup_steps, max(0, initial_total_steps - 1)))
 
         loader = DataLoader(
             dataset,
@@ -1667,16 +1957,43 @@ def main() -> int:
         )
 
         optimizer = build_optimizer(model, cfg)
-        scheduler = build_scheduler(optimizer, scheduler_total_steps, cfg.lr_schedule)
+        scheduler = AdaptiveLRScheduler(
+            optimizer=optimizer,
+            base_lr=cfg.learning_rate,
+            schedule=cfg.lr_schedule,
+            total_steps=initial_total_steps,
+            warmup_steps=effective_warmup_steps,
+            min_lr_ratio=cfg.min_lr_ratio,
+            lr_decay_factor=cfg.lr_decay_factor,
+        )
         scaler = make_scaler(fp16=fp16, device=ctx.device)
+
+        changed, proposed_total_steps, info = maybe_adjust_scheduler_from_progress(
+            scheduler=scheduler,
+            cfg=cfg,
+            ctx=ctx,
+            cache_dir=cache_dir,
+            csv_total_samples_est=total_samples_est,
+            global_step=0,
+            force=True,
+        )
+        total_steps_ref = {"value": scheduler.total_steps}
 
         if ctx.is_main:
             LOGGER.info(
-                "Scheduler: schedule=%s total_steps=%s scheduler_total_steps=%s lr_decay_factor=%s",
+                "Scheduler initialisiert | schedule=%s total_steps=%s warmup_steps=%s min_lr_ratio=%s lr_decay_factor=%s source=%s",
                 cfg.lr_schedule,
-                total_steps,
-                scheduler_total_steps,
+                scheduler.total_steps,
+                effective_warmup_steps,
+                cfg.min_lr_ratio,
                 cfg.lr_decay_factor,
+                info["source"],
+            )
+            LOGGER.info(
+                "Samples initial | csv_estimate=%s effective_samples=%s proposed_total_steps=%s",
+                total_samples_est,
+                info["effective_total_samples"],
+                proposed_total_steps,
             )
             LOGGER.info(
                 "Strict whole-turn packing aktiv | max_history_turns=%s | no partial turns | oversize samples skipped",
@@ -1699,6 +2016,11 @@ def main() -> int:
 
         epochs = max(1, int(math.ceil(cfg.num_train_epochs)))
         for epoch in range(epochs):
+            if cfg.max_steps is not None and global_step >= int(cfg.max_steps):
+                break
+            if global_step >= int(total_steps_ref["value"]):
+                break
+
             dataset.set_epoch(epoch)
 
             avg_loss, global_step, reached_max_steps = train_epoch(
@@ -1711,7 +2033,9 @@ def main() -> int:
                 ctx=ctx,
                 epoch=epoch,
                 global_step=global_step,
-                total_steps=total_steps,
+                total_steps_ref=total_steps_ref,
+                csv_total_samples_est=total_samples_est,
+                cache_dir=cache_dir,
                 train_start_time=train_start_time,
                 status_writer=status_writer,
                 preview_writer=preview_writer,
@@ -1727,8 +2051,30 @@ def main() -> int:
 
         barrier(ctx)
 
+        changed, proposed_total_steps, info = maybe_adjust_scheduler_from_progress(
+            scheduler=scheduler,
+            cfg=cfg,
+            ctx=ctx,
+            cache_dir=cache_dir,
+            csv_total_samples_est=total_samples_est,
+            global_step=global_step,
+            force=True,
+        )
+        total_steps_ref["value"] = scheduler.total_steps
+        if ctx.is_main and changed:
+            LOGGER.info(
+                "Finale Scheduler-Anpassung | source=%s total_steps=%s",
+                info["source"],
+                total_steps_ref["value"],
+            )
+
         if producer_proc is not None and producer_proc.is_alive():
             producer_proc.join(timeout=5)
+
+        final_meta = read_json_if_exists(producer_meta_path(cache_dir)) or {}
+        final_progress = read_json_if_exists(producer_progress_path(cache_dir)) or {}
+        final_total_samples = int(final_meta.get("total_samples", final_progress.get("tokenized_samples", total_samples_est)))
+        final_skipped_samples = int(final_meta.get("skipped_samples", final_progress.get("skipped_samples", 0)))
 
         if ctx.is_main:
             save_target = unwrap_model(model)
@@ -1763,14 +2109,6 @@ def main() -> int:
                 save_target.save_pretrained(outdir)
                 tokenizer.save_pretrained(outdir)
 
-            meta = {}
-            meta_path = producer_meta_path(cache_dir)
-            if meta_path.exists():
-                try:
-                    meta = json.loads(meta_path.read_text(encoding="utf-8"))
-                except Exception:
-                    meta = {}
-
             (outdir / "template_info.json").write_text(
                 json.dumps(
                     {
@@ -1784,7 +2122,7 @@ def main() -> int:
                         },
                         "max_history_turns": cfg.max_history_turns,
                         "strict_whole_turns": True,
-                        "skipped_samples": meta.get("skipped_samples", 0),
+                        "skipped_samples": final_skipped_samples,
                         "sort_by_length": bool(cfg.sort_by_length),
                         "bucketed_shuffle": True,
                         "use_ngrams": bool(cfg.use_ngrams),
@@ -1813,17 +2151,22 @@ def main() -> int:
                     "use_dataset_cache": cfg.use_dataset_cache,
                     "cache_dir": str(cache_dir),
                     "lr_decay_factor": cfg.lr_decay_factor,
-                    "scheduler_total_steps": scheduler_total_steps,
+                    "scheduler_total_steps": int(total_steps_ref["value"]),
+                    "warmup_steps": effective_warmup_steps,
+                    "min_lr_ratio": cfg.min_lr_ratio,
                     "train_mode": cfg.train_mode,
                     "lora_r": cfg.lora_r,
                     "lora_alpha": cfg.lora_alpha,
                     "max_history_turns": cfg.max_history_turns,
                     "strict_whole_turns": True,
-                    "skipped_samples": meta.get("skipped_samples", 0),
+                    "csv_total_samples_est": int(total_samples_est),
+                    "total_samples_real": int(final_total_samples),
+                    "skipped_samples": int(final_skipped_samples),
                     "sort_by_length": bool(cfg.sort_by_length),
                     "bucketed_shuffle": True,
                     "use_ngrams": bool(cfg.use_ngrams),
                     "ngram_summary": ngram_summary_text(ngram_state),
+                    "scheduler_state": scheduler.state_dict(),
                 }
             )
             LOGGER.info("Training abgeschlossen. Modell gespeichert nach: %s", outdir)
