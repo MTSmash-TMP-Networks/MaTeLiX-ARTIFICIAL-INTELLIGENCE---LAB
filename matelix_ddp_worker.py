@@ -96,6 +96,11 @@ class TrainConfig:
     lr_adjust_interval_steps: int = 25
     lr_adjust_min_change: float = 0.05
 
+    adaptive_scheduler: bool = True
+    adaptive_scheduler_freeze_on_producer_done: bool = True
+    adaptive_scheduler_never_increase_lr: bool = True
+    adaptive_scheduler_only_extend_steps: bool = True
+
     per_device_train_batch_size: int = 1
     gradient_accumulation_steps: int = 8
     num_train_epochs: float = 3.0
@@ -148,6 +153,10 @@ class TrainConfig:
     ngram_max_token_chars: int = 384
     ngram_max_tokens_per_text: int = 4096
 
+    log_cuda_memory: bool = True
+    cuda_memory_log_interval_steps: int = 25
+    cuda_empty_cache_interval_steps: int = 0
+
     def normalize(self) -> None:
         if not self.output_dir:
             self.output_dir = self.save_dir
@@ -166,6 +175,10 @@ class TrainConfig:
         self.min_lr_ratio = min(1.0, max(0.0, float(self.min_lr_ratio)))
         self.lr_adjust_interval_steps = max(1, int(self.lr_adjust_interval_steps))
         self.lr_adjust_min_change = max(0.0, float(self.lr_adjust_min_change))
+        self.adaptive_scheduler = bool(self.adaptive_scheduler)
+        self.adaptive_scheduler_freeze_on_producer_done = bool(self.adaptive_scheduler_freeze_on_producer_done)
+        self.adaptive_scheduler_never_increase_lr = bool(self.adaptive_scheduler_never_increase_lr)
+        self.adaptive_scheduler_only_extend_steps = bool(self.adaptive_scheduler_only_extend_steps)
         self.seed = int(self.seed)
         self.dataloader_num_workers = int(self.dataloader_num_workers)
         self.ddp_timeout_minutes = int(self.ddp_timeout_minutes)
@@ -191,6 +204,9 @@ class TrainConfig:
         self.ngram_min_count = max(1, int(self.ngram_min_count))
         self.ngram_max_token_chars = max(8, int(self.ngram_max_token_chars))
         self.ngram_max_tokens_per_text = max(32, int(self.ngram_max_tokens_per_text))
+        self.log_cuda_memory = bool(self.log_cuda_memory)
+        self.cuda_memory_log_interval_steps = max(1, int(self.cuda_memory_log_interval_steps))
+        self.cuda_empty_cache_interval_steps = max(0, int(self.cuda_empty_cache_interval_steps))
         if self.max_history_turns is not None:
             self.max_history_turns = max(1, int(self.max_history_turns))
 
@@ -1145,26 +1161,68 @@ def read_json_if_exists(path: Path) -> Optional[Dict[str, Any]]:
     return None
 
 
-def _make_bucketed_shuffle_order(samples: List[Dict[str, Any]], rng: random.Random) -> List[int]:
-    order = list(range(len(samples)))
-    if not order:
-        return order
+def cuda_memory_snapshot(device: torch.device) -> Optional[Dict[str, Any]]:
+    if device.type != "cuda" or not torch.cuda.is_available():
+        return None
+    try:
+        idx = device.index if device.index is not None else torch.cuda.current_device()
+        return {
+            "device_index": int(idx),
+            "allocated_mb": round(torch.cuda.memory_allocated(idx) / (1024 * 1024), 2),
+            "reserved_mb": round(torch.cuda.memory_reserved(idx) / (1024 * 1024), 2),
+            "max_allocated_mb": round(torch.cuda.max_memory_allocated(idx) / (1024 * 1024), 2),
+            "max_reserved_mb": round(torch.cuda.max_memory_reserved(idx) / (1024 * 1024), 2),
+        }
+    except Exception:
+        return None
 
-    if not all(("seq_len" in s) for s in samples):
-        rng.shuffle(order)
-        return order
 
-    order.sort(key=lambda i: int(samples[i].get("seq_len") or len(samples[i]["input_ids"])))
+def maybe_log_cuda_memory(
+    *,
+    cfg: TrainConfig,
+    ctx: DistContext,
+    global_step: int,
+    prefix: str,
+) -> Optional[Dict[str, Any]]:
+    if not cfg.log_cuda_memory:
+        return None
+    if ctx.device.type != "cuda":
+        return None
+    if global_step < 0:
+        return None
+    if (global_step % cfg.cuda_memory_log_interval_steps) != 0:
+        return None
 
-    bucket_size = max(8, min(64, len(order)))
-    buckets = [order[i:i + bucket_size] for i in range(0, len(order), bucket_size)]
+    snap = cuda_memory_snapshot(ctx.device)
+    if snap and ctx.is_main:
+        LOGGER.info(
+            "%s CUDA memory | dev=%s allocated=%s MB reserved=%s MB max_allocated=%s MB max_reserved=%s MB",
+            prefix,
+            snap["device_index"],
+            snap["allocated_mb"],
+            snap["reserved_mb"],
+            snap["max_allocated_mb"],
+            snap["max_reserved_mb"],
+        )
+    return snap
 
-    for bucket in buckets:
-        rng.shuffle(bucket)
 
-    rng.shuffle(buckets)
-
-    return [idx for bucket in buckets for idx in bucket]
+def maybe_empty_cuda_cache(cfg: TrainConfig, ctx: DistContext, global_step: int) -> None:
+    if cfg.cuda_empty_cache_interval_steps <= 0:
+        return
+    if ctx.device.type != "cuda":
+        return
+    if global_step <= 0:
+        return
+    if (global_step % cfg.cuda_empty_cache_interval_steps) != 0:
+        return
+    try:
+        torch.cuda.empty_cache()
+        if ctx.is_main:
+            LOGGER.info("torch.cuda.empty_cache() ausgeführt bei step=%s", global_step)
+    except Exception as exc:
+        if ctx.is_main:
+            LOGGER.warning("empty_cache fehlgeschlagen bei step=%s: %s", global_step, exc)
 
 
 class TokenizedShardIterableDataset(IterableDataset):
@@ -1190,7 +1248,6 @@ class TokenizedShardIterableDataset(IterableDataset):
 
     def __iter__(self):
         shard_idx = 0
-
         while True:
             path = shard_file_path(self.cache_dir, shard_idx)
 
@@ -1231,6 +1288,26 @@ class TokenizedShardIterableDataset(IterableDataset):
                 }
 
             shard_idx += 1
+
+
+def _make_bucketed_shuffle_order(samples: List[Dict[str, Any]], rng: random.Random) -> List[int]:
+    order = list(range(len(samples)))
+    if not order:
+        return order
+
+    if not all(("seq_len" in s) for s in samples):
+        rng.shuffle(order)
+        return order
+
+    order.sort(key=lambda i: int(samples[i].get("seq_len") or len(samples[i]["input_ids"])))
+
+    bucket_size = max(8, min(64, len(order)))
+    buckets = [order[i:i + bucket_size] for i in range(0, len(order), bucket_size)]
+
+    for bucket in buckets:
+        rng.shuffle(bucket)
+    rng.shuffle(buckets)
+    return [idx for bucket in buckets for idx in bucket]
 
 
 class DataCollator:
@@ -1439,6 +1516,9 @@ class AdaptiveLRScheduler:
         warmup_steps: int = 0,
         min_lr_ratio: float = 0.0,
         lr_decay_factor: float = 1.0,
+        adaptive_enabled: bool = True,
+        never_increase_lr: bool = True,
+        only_extend_steps: bool = True,
     ) -> None:
         self.optimizer = optimizer
         self.base_lr = float(base_lr)
@@ -1447,21 +1527,34 @@ class AdaptiveLRScheduler:
         self.warmup_steps = max(0, int(warmup_steps))
         self.min_lr_ratio = min(1.0, max(0.0, float(min_lr_ratio)))
         self.lr_decay_factor = max(0.01, float(lr_decay_factor))
+        self.adaptive_enabled = bool(adaptive_enabled)
+        self.never_increase_lr = bool(never_increase_lr)
+        self.only_extend_steps = bool(only_extend_steps)
+        self.frozen = False
         self.last_lr = self.base_lr
+        self.max_total_steps_seen = self.total_steps
+        self.last_effective_total_samples = None
+        self._apply_lr(self.get_lr_for_step(0), global_step=0)
 
-        self._apply_lr(self.get_lr_for_step(0))
-
-    def _apply_lr(self, lr: float) -> float:
+    def _apply_lr(self, lr: float, global_step: int) -> float:
         lr = float(max(0.0, lr))
+        if self.never_increase_lr and global_step > 0:
+            lr = min(lr, float(self.last_lr))
         for group in self.optimizer.param_groups:
             group["lr"] = lr
         self.last_lr = lr
         return lr
 
+    def freeze(self) -> None:
+        self.frozen = True
+
     def update_total_steps(self, total_steps: int) -> bool:
         total_steps = max(1, int(total_steps))
+        if self.only_extend_steps:
+            total_steps = max(self.total_steps, total_steps)
         changed = total_steps != self.total_steps
         self.total_steps = total_steps
+        self.max_total_steps_seen = max(self.max_total_steps_seen, self.total_steps)
         return changed
 
     def get_lr_scale(self, step: int) -> float:
@@ -1491,8 +1584,7 @@ class AdaptiveLRScheduler:
         return self.base_lr * self.get_lr_scale(step)
 
     def step(self, global_step: int) -> float:
-        lr = self.get_lr_for_step(global_step)
-        return self._apply_lr(lr)
+        return self._apply_lr(self.get_lr_for_step(global_step), global_step=global_step)
 
     def state_dict(self) -> Dict[str, Any]:
         return {
@@ -1503,6 +1595,12 @@ class AdaptiveLRScheduler:
             "min_lr_ratio": self.min_lr_ratio,
             "lr_decay_factor": self.lr_decay_factor,
             "last_lr": self.last_lr,
+            "adaptive_enabled": self.adaptive_enabled,
+            "never_increase_lr": self.never_increase_lr,
+            "only_extend_steps": self.only_extend_steps,
+            "frozen": self.frozen,
+            "max_total_steps_seen": self.max_total_steps_seen,
+            "last_effective_total_samples": self.last_effective_total_samples,
         }
 
 
@@ -1529,6 +1627,7 @@ def maybe_adjust_scheduler_from_progress(
 ) -> Tuple[bool, int, Dict[str, Any]]:
     progress = read_json_if_exists(producer_progress_path(cache_dir)) or {}
     meta = read_json_if_exists(producer_meta_path(cache_dir)) or {}
+    producer_done = bool(progress.get("done") or meta.get("done"))
 
     effective_total_samples = max(1, int(csv_total_samples_est))
     source = "csv_estimate"
@@ -1549,9 +1648,7 @@ def maybe_adjust_scheduler_from_progress(
 
     proposed_total_steps = estimate_total_steps_from_samples(effective_total_samples, cfg, ctx)
     current_total_steps = max(1, int(scheduler.total_steps))
-
     rel_change = abs(proposed_total_steps - current_total_steps) / float(max(1, current_total_steps))
-    should_update = force or (proposed_total_steps != current_total_steps and rel_change >= cfg.lr_adjust_min_change)
 
     info = {
         "source": source,
@@ -1561,13 +1658,94 @@ def maybe_adjust_scheduler_from_progress(
         "relative_change": float(rel_change),
         "progress": progress,
         "meta": meta,
+        "producer_done": producer_done,
+        "adaptive_active": bool(cfg.adaptive_scheduler and not scheduler.frozen),
     }
 
-    if should_update:
-        scheduler.update_total_steps(proposed_total_steps)
-        scheduler.step(global_step)
+    if not cfg.adaptive_scheduler:
+        scheduler.last_effective_total_samples = int(effective_total_samples)
+        return False, current_total_steps, info
 
-    return should_update, proposed_total_steps, info
+    if scheduler.frozen and not force:
+        scheduler.last_effective_total_samples = int(effective_total_samples)
+        return False, current_total_steps, info
+
+    should_update = force or (proposed_total_steps != current_total_steps and rel_change >= cfg.lr_adjust_min_change)
+    changed = False
+
+    if should_update:
+        changed = scheduler.update_total_steps(proposed_total_steps)
+        scheduler.last_effective_total_samples = int(effective_total_samples)
+        if changed:
+            scheduler.step(global_step)
+
+    if producer_done and cfg.adaptive_scheduler_freeze_on_producer_done:
+        scheduler.freeze()
+
+    return changed, scheduler.total_steps, info
+
+
+def _build_live_runtime_fields(
+    *,
+    scheduler: AdaptiveLRScheduler,
+    cache_dir: Path,
+    csv_total_samples_est: int,
+    cfg: TrainConfig,
+) -> Dict[str, Any]:
+    progress = read_json_if_exists(producer_progress_path(cache_dir)) or {}
+    meta = read_json_if_exists(producer_meta_path(cache_dir)) or {}
+
+    source = "csv_estimate"
+    effective_total_samples = int(max(1, csv_total_samples_est))
+
+    if meta:
+        total_samples_real = int(meta.get("total_samples", 0))
+        if total_samples_real > 0:
+            effective_total_samples = total_samples_real
+            source = "producer_meta_final"
+    elif progress:
+        seen_samples = int(progress.get("seen_samples", 0))
+        tokenized_samples = int(progress.get("tokenized_samples", 0))
+        if seen_samples > 0 and tokenized_samples > 0 and csv_total_samples_est > 0:
+            projected = int(round(csv_total_samples_est * (tokenized_samples / float(seen_samples))))
+            if projected > 0:
+                effective_total_samples = projected
+                source = "producer_progress_projected"
+
+    current_total_steps = max(1, int(scheduler.total_steps))
+    rel_change = 0.0
+
+    total_samples_real = None
+    skipped_samples = None
+
+    if meta:
+        if meta.get("total_samples") is not None:
+            total_samples_real = int(meta["total_samples"])
+        if meta.get("skipped_samples") is not None:
+            skipped_samples = int(meta["skipped_samples"])
+    elif progress:
+        if progress.get("tokenized_samples") is not None:
+            total_samples_real = int(progress["tokenized_samples"])
+        if progress.get("skipped_samples") is not None:
+            skipped_samples = int(progress["skipped_samples"])
+
+    return {
+        "csv_total_samples_est": int(csv_total_samples_est),
+        "total_samples_real": total_samples_real,
+        "skipped_samples": skipped_samples,
+        "producer_progress": progress,
+        "producer_meta": meta,
+        "scheduler_state": scheduler.state_dict(),
+        "scheduler_source": source,
+        "projected_samples": int(effective_total_samples),
+        "scheduler_rel_change": float(rel_change),
+        "producer_done": bool(progress.get("done") or meta.get("done")),
+        "adaptive_scheduler": bool(cfg.adaptive_scheduler),
+        "adaptive_scheduler_frozen": bool(scheduler.frozen),
+        "adaptive_scheduler_never_increase_lr": bool(cfg.adaptive_scheduler_never_increase_lr),
+        "adaptive_scheduler_only_extend_steps": bool(cfg.adaptive_scheduler_only_extend_steps),
+        "scheduler_mode": f"{'adaptive_' if cfg.adaptive_scheduler else ''}{cfg.lr_schedule}",
+    }
 
 
 def wrap_ddp(model: nn.Module, cfg: TrainConfig, ctx: DistContext) -> nn.Module:
@@ -1701,7 +1879,7 @@ def train_epoch(
             raise RuntimeError(f"CUDA OOM im Trainingsschritt. Empfehlung: kleinere max_seq_length oder Batch. Original: {oom}")
 
         accum_counter += 1
-        should_step = (accum_counter >= cfg.gradient_accumulation_steps)
+        should_step = accum_counter >= cfg.gradient_accumulation_steps
 
         if should_step:
             if scaler is not None and getattr(scaler, "is_enabled", lambda: False)():
@@ -1732,16 +1910,25 @@ def train_epoch(
                 total_steps_ref["value"] = scheduler.total_steps
                 if ctx.is_main and changed:
                     LOGGER.info(
-                        "Scheduler angepasst | source=%s total_steps=%s -> %s rel_change=%.4f samples=%s",
+                        "Scheduler angepasst | source=%s total_steps=%s -> %s rel_change=%.4f samples=%s frozen=%s",
                         info["source"],
                         info["current_total_steps"],
                         proposed_total_steps,
                         info["relative_change"],
                         info["effective_total_samples"],
+                        scheduler.frozen,
                     )
 
             lr = scheduler.step(global_step)
             total_steps_ref["value"] = scheduler.total_steps
+
+            maybe_empty_cuda_cache(cfg, ctx, global_step)
+            cuda_mem = maybe_log_cuda_memory(
+                cfg=cfg,
+                ctx=ctx,
+                global_step=global_step,
+                prefix=f"step={global_step}",
+            )
 
             running_updates += 1
             reduced_loss = all_reduce_mean(float(loss.detach().item()), ctx)
@@ -1753,20 +1940,45 @@ def train_epoch(
                 steps_left = max(0, int(total_steps_ref["value"]) - int(global_step))
                 sec_per_step = elapsed / steps_done
                 eta = format_eta(sec_per_step * steps_left)
-                LOGGER.info("Step %d | Loss: %.6f | LR: %s | total_steps=%s", global_step, reduced_loss, lr, total_steps_ref["value"])
-                status_writer.write(
-                    {
-                        "running": True,
-                        "step": global_step,
-                        "loss": reduced_loss,
-                        "learning_rate": lr,
-                        "eta": eta,
-                        "tokens_per_step": int(cfg.max_seq_length * cfg.per_device_train_batch_size * cfg.gradient_accumulation_steps * max(1, ctx.world_size)),
-                        "total_tokens": int(global_step * cfg.max_seq_length * cfg.per_device_train_batch_size * cfg.gradient_accumulation_steps * max(1, ctx.world_size)),
-                        "epoch": epoch,
-                        "total_steps": int(total_steps_ref["value"]),
-                    }
+
+                LOGGER.info(
+                    "Step %d | Loss: %.6f | LR: %s | total_steps=%s",
+                    global_step, reduced_loss, lr, total_steps_ref["value"]
                 )
+
+                payload = {
+                    "running": True,
+                    "step": global_step,
+                    "loss": reduced_loss,
+                    "learning_rate": lr,
+                    "eta": eta,
+                    "tokens_per_step": int(
+                        cfg.max_seq_length
+                        * cfg.per_device_train_batch_size
+                        * cfg.gradient_accumulation_steps
+                        * max(1, ctx.world_size)
+                    ),
+                    "total_tokens": int(
+                        global_step
+                        * cfg.max_seq_length
+                        * cfg.per_device_train_batch_size
+                        * cfg.gradient_accumulation_steps
+                        * max(1, ctx.world_size)
+                    ),
+                    "epoch": epoch,
+                    "total_steps": int(total_steps_ref["value"]),
+                    "scheduler_total_steps": int(total_steps_ref["value"]),
+                    "cuda_memory": cuda_mem,
+                }
+                payload.update(
+                    _build_live_runtime_fields(
+                        scheduler=scheduler,
+                        cache_dir=cache_dir,
+                        csv_total_samples_est=csv_total_samples_est,
+                        cfg=cfg,
+                    )
+                )
+                status_writer.write(payload)
 
             if cfg.max_steps is not None and global_step >= int(cfg.max_steps):
                 reached_max_steps = True
@@ -1802,16 +2014,25 @@ def train_epoch(
         total_steps_ref["value"] = scheduler.total_steps
         if ctx.is_main and changed:
             LOGGER.info(
-                "Scheduler angepasst | source=%s total_steps=%s -> %s rel_change=%.4f samples=%s",
+                "Scheduler angepasst | source=%s total_steps=%s -> %s rel_change=%.4f samples=%s frozen=%s",
                 info["source"],
                 info["current_total_steps"],
                 proposed_total_steps,
                 info["relative_change"],
                 info["effective_total_samples"],
+                scheduler.frozen,
             )
 
         lr = scheduler.step(global_step)
         total_steps_ref["value"] = scheduler.total_steps
+
+        maybe_empty_cuda_cache(cfg, ctx, global_step)
+        cuda_mem = maybe_log_cuda_memory(
+            cfg=cfg,
+            ctx=ctx,
+            global_step=global_step,
+            prefix=f"step={global_step}",
+        )
 
         running_updates += 1
         reduced_loss = all_reduce_mean(float(last_micro_loss_value or 0.0), ctx)
@@ -1823,25 +2044,45 @@ def train_epoch(
             steps_left = max(0, int(total_steps_ref["value"]) - int(global_step))
             sec_per_step = elapsed / steps_done
             eta = format_eta(sec_per_step * steps_left)
-            LOGGER.info("Step %d | Loss: %.6f | LR: %s | total_steps=%s", global_step, reduced_loss, lr, total_steps_ref["value"])
-            status_writer.write(
-                {
-                    "running": True,
-                    "step": global_step,
-                    "loss": reduced_loss,
-                    "learning_rate": lr,
-                    "eta": eta,
-                    "tokens_per_step": int(cfg.max_seq_length * cfg.per_device_train_batch_size * cfg.gradient_accumulation_steps * max(1, ctx.world_size)),
-                    "total_tokens": int(global_step * cfg.max_seq_length * cfg.per_device_train_batch_size * cfg.gradient_accumulation_steps * max(1, ctx.world_size)),
-                    "epoch": epoch,
-                    "total_steps": int(total_steps_ref["value"]),
-                }
+
+            LOGGER.info(
+                "Step %d | Loss: %.6f | LR: %s | total_steps=%s",
+                global_step, reduced_loss, lr, total_steps_ref["value"]
             )
 
-        if cfg.max_steps is not None and global_step >= int(cfg.max_steps):
-            reached_max_steps = True
-        if global_step >= int(total_steps_ref["value"]):
-            reached_max_steps = True
+            payload = {
+                "running": True,
+                "step": global_step,
+                "loss": reduced_loss,
+                "learning_rate": lr,
+                "eta": eta,
+                "tokens_per_step": int(
+                    cfg.max_seq_length
+                    * cfg.per_device_train_batch_size
+                    * cfg.gradient_accumulation_steps
+                    * max(1, ctx.world_size)
+                ),
+                "total_tokens": int(
+                    global_step
+                    * cfg.max_seq_length
+                    * cfg.per_device_train_batch_size
+                    * cfg.gradient_accumulation_steps
+                    * max(1, ctx.world_size)
+                ),
+                "epoch": epoch,
+                "total_steps": int(total_steps_ref["value"]),
+                "scheduler_total_steps": int(total_steps_ref["value"]),
+                "cuda_memory": cuda_mem,
+            }
+            payload.update(
+                _build_live_runtime_fields(
+                    scheduler=scheduler,
+                    cache_dir=cache_dir,
+                    csv_total_samples_est=csv_total_samples_est,
+                    cfg=cfg,
+                )
+            )
+            status_writer.write(payload)
 
     avg_loss = running_loss / max(1, running_updates)
     return avg_loss, global_step, reached_max_steps
@@ -1904,7 +2145,10 @@ def main() -> int:
     try:
         set_seed(cfg.seed + ctx.rank, deterministic=cfg.deterministic)
 
-        LOGGER.info("Worker gestartet | rank=%s local_rank=%s world_size=%s device=%s", ctx.rank, ctx.local_rank, ctx.world_size, ctx.device)
+        LOGGER.info(
+            "Worker gestartet | rank=%s local_rank=%s world_size=%s device=%s",
+            ctx.rank, ctx.local_rank, ctx.world_size, ctx.device
+        )
         LOGGER.info("Train mode: %s", cfg.train_mode)
         LOGGER.info("Config: %s", json.dumps(cfg.__dict__, ensure_ascii=False))
 
@@ -1965,6 +2209,9 @@ def main() -> int:
             warmup_steps=effective_warmup_steps,
             min_lr_ratio=cfg.min_lr_ratio,
             lr_decay_factor=cfg.lr_decay_factor,
+            adaptive_enabled=cfg.adaptive_scheduler,
+            never_increase_lr=cfg.adaptive_scheduler_never_increase_lr,
+            only_extend_steps=cfg.adaptive_scheduler_only_extend_steps,
         )
         scaler = make_scaler(fp16=fp16, device=ctx.device)
 
@@ -1981,13 +2228,17 @@ def main() -> int:
 
         if ctx.is_main:
             LOGGER.info(
-                "Scheduler initialisiert | schedule=%s total_steps=%s warmup_steps=%s min_lr_ratio=%s lr_decay_factor=%s source=%s",
+                "Scheduler initialisiert | schedule=%s total_steps=%s warmup_steps=%s min_lr_ratio=%s lr_decay_factor=%s source=%s adaptive=%s freeze_on_done=%s never_increase_lr=%s only_extend_steps=%s",
                 cfg.lr_schedule,
                 scheduler.total_steps,
                 effective_warmup_steps,
                 cfg.min_lr_ratio,
                 cfg.lr_decay_factor,
                 info["source"],
+                cfg.adaptive_scheduler,
+                cfg.adaptive_scheduler_freeze_on_producer_done,
+                cfg.adaptive_scheduler_never_increase_lr,
+                cfg.adaptive_scheduler_only_extend_steps,
             )
             LOGGER.info(
                 "Samples initial | csv_estimate=%s effective_samples=%s proposed_total_steps=%s",
@@ -2005,7 +2256,61 @@ def main() -> int:
                 cfg.shuffle,
                 bool(cfg.shuffle and cfg.sort_by_length),
             )
+            LOGGER.info(
+                "CUDA memory diagnostics | enabled=%s interval_steps=%s empty_cache_interval_steps=%s",
+                cfg.log_cuda_memory,
+                cfg.cuda_memory_log_interval_steps,
+                cfg.cuda_empty_cache_interval_steps,
+            )
             LOGGER.info(ngram_summary_text(ngram_state))
+
+            initial_cuda_mem = cuda_memory_snapshot(ctx.device)
+            if initial_cuda_mem:
+                LOGGER.info(
+                    "initial CUDA memory | dev=%s allocated=%s MB reserved=%s MB max_allocated=%s MB max_reserved=%s MB",
+                    initial_cuda_mem["device_index"],
+                    initial_cuda_mem["allocated_mb"],
+                    initial_cuda_mem["reserved_mb"],
+                    initial_cuda_mem["max_allocated_mb"],
+                    initial_cuda_mem["max_reserved_mb"],
+                )
+
+            payload = {
+                "running": True,
+                "step": 0,
+                "loss": None,
+                "learning_rate": optimizer.param_groups[0]["lr"],
+                "eta": "",
+                "tokens_per_step": int(
+                    cfg.max_seq_length
+                    * cfg.per_device_train_batch_size
+                    * cfg.gradient_accumulation_steps
+                    * max(1, ctx.world_size)
+                ),
+                "total_tokens": 0,
+                "epoch": 0,
+                "total_steps": int(total_steps_ref["value"]),
+                "scheduler_total_steps": int(total_steps_ref["value"]),
+                "warmup_steps": int(effective_warmup_steps),
+                "cuda_memory": initial_cuda_mem,
+                "log_cuda_memory": bool(cfg.log_cuda_memory),
+                "cuda_memory_log_interval_steps": int(cfg.cuda_memory_log_interval_steps),
+                "cuda_empty_cache_interval_steps": int(cfg.cuda_empty_cache_interval_steps),
+                "adaptive_scheduler": bool(cfg.adaptive_scheduler),
+                "adaptive_scheduler_frozen": bool(scheduler.frozen),
+                "adaptive_scheduler_never_increase_lr": bool(cfg.adaptive_scheduler_never_increase_lr),
+                "adaptive_scheduler_only_extend_steps": bool(cfg.adaptive_scheduler_only_extend_steps),
+                "scheduler_mode": f"{'adaptive_' if cfg.adaptive_scheduler else ''}{cfg.lr_schedule}",
+            }
+            payload.update(
+                _build_live_runtime_fields(
+                    scheduler=scheduler,
+                    cache_dir=cache_dir,
+                    csv_total_samples_est=total_samples_est,
+                    cfg=cfg,
+                )
+            )
+            status_writer.write(payload)
 
         model = wrap_ddp(model, cfg, ctx)
         barrier(ctx)
@@ -2063,9 +2368,10 @@ def main() -> int:
         total_steps_ref["value"] = scheduler.total_steps
         if ctx.is_main and changed:
             LOGGER.info(
-                "Finale Scheduler-Anpassung | source=%s total_steps=%s",
+                "Finale Scheduler-Anpassung | source=%s total_steps=%s frozen=%s",
                 info["source"],
                 total_steps_ref["value"],
+                scheduler.frozen,
             )
 
         if producer_proc is not None and producer_proc.is_alive():
@@ -2075,6 +2381,7 @@ def main() -> int:
         final_progress = read_json_if_exists(producer_progress_path(cache_dir)) or {}
         final_total_samples = int(final_meta.get("total_samples", final_progress.get("tokenized_samples", total_samples_est)))
         final_skipped_samples = int(final_meta.get("skipped_samples", final_progress.get("skipped_samples", 0)))
+        final_cuda_mem = cuda_memory_snapshot(ctx.device)
 
         if ctx.is_main:
             save_target = unwrap_model(model)
@@ -2134,41 +2441,67 @@ def main() -> int:
                 encoding="utf-8",
             )
 
-            status_writer.write(
-                {
-                    "running": False,
-                    "step": global_step,
-                    "loss": last_loss,
-                    "learning_rate": optimizer.param_groups[0]["lr"],
-                    "eta": "",
-                    "tokens_per_step": int(cfg.max_seq_length * cfg.per_device_train_batch_size * cfg.gradient_accumulation_steps * max(1, ctx.world_size)),
-                    "total_tokens": int(global_step * cfg.max_seq_length * cfg.per_device_train_batch_size * cfg.gradient_accumulation_steps * max(1, ctx.world_size)),
-                    "done": True,
-                    "template_mode": cfg.template_mode,
-                    "force_template": cfg.force_template,
-                    "deterministic": cfg.deterministic,
-                    "allow_tf32": cfg.allow_tf32,
-                    "use_dataset_cache": cfg.use_dataset_cache,
-                    "cache_dir": str(cache_dir),
-                    "lr_decay_factor": cfg.lr_decay_factor,
-                    "scheduler_total_steps": int(total_steps_ref["value"]),
-                    "warmup_steps": effective_warmup_steps,
-                    "min_lr_ratio": cfg.min_lr_ratio,
-                    "train_mode": cfg.train_mode,
-                    "lora_r": cfg.lora_r,
-                    "lora_alpha": cfg.lora_alpha,
-                    "max_history_turns": cfg.max_history_turns,
-                    "strict_whole_turns": True,
-                    "csv_total_samples_est": int(total_samples_est),
-                    "total_samples_real": int(final_total_samples),
-                    "skipped_samples": int(final_skipped_samples),
-                    "sort_by_length": bool(cfg.sort_by_length),
-                    "bucketed_shuffle": True,
-                    "use_ngrams": bool(cfg.use_ngrams),
-                    "ngram_summary": ngram_summary_text(ngram_state),
-                    "scheduler_state": scheduler.state_dict(),
-                }
-            )
+            final_payload = {
+                "running": False,
+                "step": global_step,
+                "loss": last_loss,
+                "learning_rate": optimizer.param_groups[0]["lr"],
+                "eta": "",
+                "tokens_per_step": int(
+                    cfg.max_seq_length
+                    * cfg.per_device_train_batch_size
+                    * cfg.gradient_accumulation_steps
+                    * max(1, ctx.world_size)
+                ),
+                "total_tokens": int(
+                    global_step
+                    * cfg.max_seq_length
+                    * cfg.per_device_train_batch_size
+                    * cfg.gradient_accumulation_steps
+                    * max(1, ctx.world_size)
+                ),
+                "done": True,
+                "template_mode": cfg.template_mode,
+                "force_template": cfg.force_template,
+                "deterministic": cfg.deterministic,
+                "allow_tf32": cfg.allow_tf32,
+                "use_dataset_cache": cfg.use_dataset_cache,
+                "cache_dir": str(cache_dir),
+                "lr_decay_factor": cfg.lr_decay_factor,
+                "scheduler_total_steps": int(total_steps_ref["value"]),
+                "total_steps": int(total_steps_ref["value"]),
+                "warmup_steps": effective_warmup_steps,
+                "min_lr_ratio": cfg.min_lr_ratio,
+                "train_mode": cfg.train_mode,
+                "lora_r": cfg.lora_r,
+                "lora_alpha": cfg.lora_alpha,
+                "max_history_turns": cfg.max_history_turns,
+                "strict_whole_turns": True,
+                "sort_by_length": bool(cfg.sort_by_length),
+                "bucketed_shuffle": True,
+                "use_ngrams": bool(cfg.use_ngrams),
+                "ngram_summary": ngram_summary_text(ngram_state),
+                "scheduler_state": scheduler.state_dict(),
+                "cuda_memory": final_cuda_mem,
+                "log_cuda_memory": bool(cfg.log_cuda_memory),
+                "cuda_memory_log_interval_steps": int(cfg.cuda_memory_log_interval_steps),
+                "cuda_empty_cache_interval_steps": int(cfg.cuda_empty_cache_interval_steps),
+                "csv_total_samples_est": int(total_samples_est),
+                "total_samples_real": int(final_total_samples),
+                "skipped_samples": int(final_skipped_samples),
+                "producer_progress": final_progress,
+                "producer_meta": final_meta,
+                "scheduler_source": info["source"],
+                "projected_samples": int(info["effective_total_samples"]),
+                "scheduler_rel_change": float(info["relative_change"]),
+                "producer_done": bool(final_progress.get("done") or final_meta.get("done")),
+                "adaptive_scheduler": bool(cfg.adaptive_scheduler),
+                "adaptive_scheduler_frozen": bool(scheduler.frozen),
+                "adaptive_scheduler_never_increase_lr": bool(cfg.adaptive_scheduler_never_increase_lr),
+                "adaptive_scheduler_only_extend_steps": bool(cfg.adaptive_scheduler_only_extend_steps),
+                "scheduler_mode": f"{'adaptive_' if cfg.adaptive_scheduler else ''}{cfg.lr_schedule}",
+            }
+            status_writer.write(final_payload)
             LOGGER.info("Training abgeschlossen. Modell gespeichert nach: %s", outdir)
 
         barrier(ctx)
