@@ -149,6 +149,10 @@ button.danger:hover, button.danger:focus {
   grid-template-columns: auto 1fr;
   gap: 0.35em 0.8em;
 }
+.status.compact {
+  grid-template-columns: auto 1fr;
+  font-size: 0.98em;
+}
 
 .settings-grid {
   display: grid;
@@ -484,6 +488,36 @@ form label {
         <option value="linear">Linear</option>
       </select>
 
+      <label for="lr_decay_factor">LR Decay Factor:</label>
+      <input type="number" step="0.01" id="lr_decay_factor" value="1.0" min="0.01">
+
+      <label for="warmup_steps">Warmup Steps:</label>
+      <input type="number" id="warmup_steps" value="0" min="0">
+
+      <label for="warmup_ratio">Warmup Ratio:</label>
+      <input type="number" step="0.01" id="warmup_ratio" value="0.03" min="0" max="1">
+
+      <label for="min_lr_ratio">Min LR Ratio:</label>
+      <input type="number" step="0.01" id="min_lr_ratio" value="0.05" min="0" max="1">
+
+      <label for="lr_adjust_interval_steps">LR Adjust Interval:</label>
+      <input type="number" id="lr_adjust_interval_steps" value="25" min="1">
+
+      <label for="lr_adjust_min_change">LR Adjust Min Change:</label>
+      <input type="number" step="0.01" id="lr_adjust_min_change" value="0.05" min="0" max="1">
+
+      <label for="adaptive_scheduler">Adaptive Scheduler:</label>
+      <input type="checkbox" id="adaptive_scheduler" checked>
+
+      <label for="adaptive_scheduler_freeze_on_producer_done">Freeze wenn Producer fertig:</label>
+      <input type="checkbox" id="adaptive_scheduler_freeze_on_producer_done" checked>
+
+      <label for="adaptive_scheduler_never_increase_lr">LR nie erhöhen:</label>
+      <input type="checkbox" id="adaptive_scheduler_never_increase_lr" checked>
+
+      <label for="adaptive_scheduler_only_extend_steps">Nur Steps verlängern:</label>
+      <input type="checkbox" id="adaptive_scheduler_only_extend_steps" checked>
+
       <label for="per_device_train_batch_size">Batchgröße:</label>
       <input type="number" id="per_device_train_batch_size" value="1" min="1">
 
@@ -556,6 +590,15 @@ form label {
       <label for="gradient_checkpointing" title="Spart VRAM, kostet Laufzeit (nur sinnvoll CUDA).">Grad Checkpointing:</label>
       <input type="checkbox" id="gradient_checkpointing">
 
+      <label for="log_cuda_memory">CUDA Memory Logging:</label>
+      <input type="checkbox" id="log_cuda_memory" checked>
+
+      <label for="cuda_memory_log_interval_steps">CUDA Memory Log Interval:</label>
+      <input type="number" id="cuda_memory_log_interval_steps" value="25" min="1">
+
+      <label for="cuda_empty_cache_interval_steps">CUDA Empty Cache Interval:</label>
+      <input type="number" id="cuda_empty_cache_interval_steps" value="0" min="0">
+
       <label for="device">Device:</label>
       <select id="device"></select>
 
@@ -589,12 +632,46 @@ form label {
     <div class="status">
       <b>Status:</b> <span id="status">-</span>
       <b>Step:</b> <span id="step">-</span>
+      <b>Step Fortschritt:</b> <span id="step_progress">-</span>
+      <b>Epoche:</b> <span id="epoch_progress">-</span>
+      <b>Updates / Epoche:</b> <span id="updates_per_epoch">-</span>
       <b>Loss:</b> <span id="loss">-</span>
       <b>Lernrate:</b> <span id="learning_rate_display">-</span>
       <b>Restzeit:</b> <span id="eta">-</span>
       <b>Tokens/Step:</b> <span id="tokens_per_step">-</span>
       <b>Total Tokens:</b> <span id="total_tokens">-</span>
+      <b>Scheduler Steps:</b> <span id="scheduler_total_steps">-</span>
+      <b>CSV Sample Estimate:</b> <span id="csv_total_samples_est">-</span>
+      <b>Real Samples:</b> <span id="total_samples_real">-</span>
+      <b>Skipped Samples:</b> <span id="skipped_samples">-</span>
+      <b>CUDA Allocated:</b> <span id="cuda_allocated_mb">-</span>
+      <b>CUDA Reserved:</b> <span id="cuda_reserved_mb">-</span>
+      <b>CUDA Max Allocated:</b> <span id="cuda_max_allocated_mb">-</span>
+      <b>CUDA Max Reserved:</b> <span id="cuda_max_reserved_mb">-</span>
     </div>
+
+    <div style="margin:-0.7em 0 1.3em 0;">
+      <div style="height:12px; background:#0b1f15; border:1px solid #1fff7a66; border-radius:999px; overflow:hidden; box-shadow:inset 0 0 8px #19ff7a22;">
+        <div id="step_progress_bar" style="height:100%; width:0%; background:linear-gradient(90deg,#13ff72,#39ffb0); box-shadow:0 0 12px #18ff7a88;"></div>
+      </div>
+    </div>
+
+    <h3>Adaptive Scheduler / Producer</h3>
+    <div class="status compact">
+      <b>Scheduler Mode:</b> <span id="scheduler_mode">-</span>
+      <b>Scheduler Source:</b> <span id="scheduler_source">-</span>
+      <b>Adaptive Scheduler:</b> <span id="adaptive_scheduler_status">-</span>
+      <b>Freeze aktiv:</b> <span id="adaptive_scheduler_frozen">-</span>
+      <b>LR nie erhöhen:</b> <span id="adaptive_scheduler_never_increase_lr">-</span>
+      <b>Nur Steps verlängern:</b> <span id="adaptive_scheduler_only_extend_steps">-</span>
+      <b>Projected Samples:</b> <span id="projected_samples">-</span>
+      <b>Seen Samples:</b> <span id="producer_seen_samples">-</span>
+      <b>Tokenized Samples:</b> <span id="producer_tokenized_samples">-</span>
+      <b>Shards Written:</b> <span id="producer_num_shards">-</span>
+      <b>Producer Done:</b> <span id="producer_done">-</span>
+      <b>Rel. Change:</b> <span id="scheduler_rel_change">-</span>
+    </div>
+
     <h3>Loss-Kurve</h3>
     <canvas id="lossChart" height="250"></canvas>
     <h3>Aktuelles Trainings-Sample</h3>
@@ -680,7 +757,7 @@ Hier folgt eine weitere Trainingszeile.
 </div>
 
 <footer id="site-footer">
-  <p>© 2026 TMP-SYSTEM-SERVICE GmbH – Alle Rechte vorbehalten. Version 6.3</p>
+  <p>© 2026 TMP-SYSTEM-SERVICE GmbH – Alle Rechte vorbehalten. Version 6.7</p>
 </footer>
 
 <div id="matrix-spinner-overlay">
@@ -836,6 +913,23 @@ function integerOrNull(v) {
   const n = numberOrNull(v);
   if (n === null) return null;
   return Math.trunc(n);
+}
+
+function fmtValue(v) {
+  if (v === null || v === undefined || v === "") return "-";
+  return String(v);
+}
+function fmtBool(v) {
+  if (v === null || v === undefined) return "-";
+  return v ? "ja" : "nein";
+}
+function fmtNum(v, digits = null) {
+  if (typeof v !== "number" || !Number.isFinite(v)) return "-";
+  return digits === null ? String(v) : v.toFixed(digits);
+}
+function fmtMb(v) {
+  if (typeof v !== "number" || !Number.isFinite(v)) return "-";
+  return `${v} MB`;
 }
 
 function escapeHtml(s){
@@ -998,13 +1092,96 @@ setInterval(pollLivePreview, 2000);
 async function getStatus(){
   try{
     const s = await (await fetch('/status')).json();
+
     document.getElementById("status").textContent = s.running ? "läuft" : "gestoppt";
-    document.getElementById("step").textContent = (typeof s.step==="number" && s.step>0) ? s.step : "-";
-    document.getElementById("loss").textContent = (typeof s.loss==="number" && s.loss>0) ? s.loss.toFixed(6) : "-";
+
+    const totalSteps = (typeof s.scheduler_total_steps === "number" && s.scheduler_total_steps > 0)
+      ? s.scheduler_total_steps
+      : ((typeof s.total_steps === "number" && s.total_steps > 0) ? s.total_steps : null);
+
+    const currentStep = (typeof s.step === "number" && s.step >= 0) ? s.step : null;
+
+    document.getElementById("step").textContent = currentStep !== null ? currentStep : "-";
+    document.getElementById("loss").textContent = (typeof s.loss==="number" && Number.isFinite(s.loss)) ? s.loss.toFixed(6) : "-";
     document.getElementById("learning_rate_display").textContent = (typeof s.learning_rate==="number") ? s.learning_rate : "-";
     document.getElementById("eta").textContent = s.eta || "-";
     document.getElementById("tokens_per_step").textContent = s.tokens_per_step || "-";
     document.getElementById("total_tokens").textContent = s.total_tokens || "-";
+
+    document.getElementById("scheduler_total_steps").textContent = fmtValue(totalSteps);
+    document.getElementById("csv_total_samples_est").textContent = fmtValue(s.csv_total_samples_est);
+    document.getElementById("total_samples_real").textContent = fmtValue(s.total_samples_real);
+    document.getElementById("skipped_samples").textContent = fmtValue(s.skipped_samples);
+
+    if (currentStep !== null && totalSteps !== null) {
+      const pct = Math.max(0, Math.min(100, (currentStep / totalSteps) * 100));
+      document.getElementById("step_progress").textContent = `${currentStep} / ${totalSteps} (${pct.toFixed(1)}%)`;
+      const bar = document.getElementById("step_progress_bar");
+      if (bar) bar.style.width = pct.toFixed(2) + "%";
+    } else {
+      document.getElementById("step_progress").textContent = "-";
+      const bar = document.getElementById("step_progress_bar");
+      if (bar) bar.style.width = "0%";
+    }
+
+    const cfg = s.config || {};
+    const epochsConfigured = numberOrNull(cfg.num_train_epochs);
+    const batchSize = Math.max(1, numberOrNull(cfg.per_device_train_batch_size) || 1);
+    const gradAccum = Math.max(1, numberOrNull(cfg.gradient_accumulation_steps) || 1);
+    const worldSize = Math.max(1, numberOrNull(s.world_size) || 1);
+
+    const realSamples = numberOrNull(s.total_samples_real);
+    const estSamples = numberOrNull(s.csv_total_samples_est);
+    const effectiveSamples = realSamples !== null && realSamples > 0 ? realSamples : estSamples;
+
+    let updatesPerEpoch = null;
+    if (effectiveSamples !== null && effectiveSamples > 0) {
+      const localSamples = Math.ceil(effectiveSamples / worldSize);
+      const batchesPerEpoch = Math.ceil(localSamples / batchSize);
+      updatesPerEpoch = Math.max(1, Math.ceil(batchesPerEpoch / gradAccum));
+    }
+
+    if (updatesPerEpoch !== null) {
+      document.getElementById("updates_per_epoch").textContent = String(updatesPerEpoch);
+    } else {
+      document.getElementById("updates_per_epoch").textContent = "-";
+    }
+
+    if (currentStep !== null && updatesPerEpoch !== null && epochsConfigured !== null) {
+      const epochFloat = (currentStep / Math.max(1, updatesPerEpoch));
+      const epochDisplay = Math.min(epochsConfigured, epochFloat);
+      document.getElementById("epoch_progress").textContent = `${epochDisplay.toFixed(2)} / ${epochsConfigured}`;
+    } else {
+      document.getElementById("epoch_progress").textContent = "-";
+    }
+
+    const producerProgress = s.producer_progress || {};
+    const producerMeta = s.producer_meta || {};
+
+    document.getElementById("scheduler_mode").textContent = fmtValue(s.scheduler_mode);
+    document.getElementById("scheduler_source").textContent = fmtValue(s.scheduler_source);
+    document.getElementById("adaptive_scheduler_status").textContent = fmtBool(s.adaptive_scheduler);
+    document.getElementById("adaptive_scheduler_frozen").textContent = fmtBool(s.adaptive_scheduler_frozen);
+    document.getElementById("adaptive_scheduler_never_increase_lr").textContent = fmtBool(s.adaptive_scheduler_never_increase_lr);
+    document.getElementById("adaptive_scheduler_only_extend_steps").textContent = fmtBool(s.adaptive_scheduler_only_extend_steps);
+
+    document.getElementById("projected_samples").textContent = fmtValue(s.projected_samples);
+    document.getElementById("producer_seen_samples").textContent = fmtValue(producerProgress.seen_samples);
+    document.getElementById("producer_tokenized_samples").textContent = fmtValue(producerProgress.tokenized_samples);
+    document.getElementById("producer_num_shards").textContent = fmtValue(
+      producerMeta.num_shards ?? producerProgress.num_shards_written
+    );
+    document.getElementById("producer_done").textContent = fmtBool(
+      s.producer_done ?? producerMeta.done ?? producerProgress.done
+    );
+    document.getElementById("scheduler_rel_change").textContent = fmtNum(s.scheduler_rel_change, 4);
+
+    const cudaMem = s.cuda_memory || {};
+    document.getElementById("cuda_allocated_mb").textContent = fmtMb(cudaMem.allocated_mb);
+    document.getElementById("cuda_reserved_mb").textContent = fmtMb(cudaMem.reserved_mb);
+    document.getElementById("cuda_max_allocated_mb").textContent = fmtMb(cudaMem.max_allocated_mb);
+    document.getElementById("cuda_max_reserved_mb").textContent = fmtMb(cudaMem.max_reserved_mb);
+
   } catch {}
 }
 getStatus(); setInterval(getStatus,1500);
@@ -1259,6 +1436,17 @@ document.getElementById("settings").onsubmit = async e => {
 
     learning_rate: parseFloat(document.getElementById("learning_rate").value),
     lr_schedule: document.getElementById("lr_schedule").value,
+    lr_decay_factor: parseFloat(document.getElementById("lr_decay_factor").value || "1.0"),
+    warmup_steps: parseInt(document.getElementById("warmup_steps").value || "0"),
+    warmup_ratio: parseFloat(document.getElementById("warmup_ratio").value || "0.0"),
+    min_lr_ratio: parseFloat(document.getElementById("min_lr_ratio").value || "0.0"),
+    lr_adjust_interval_steps: parseInt(document.getElementById("lr_adjust_interval_steps").value || "25"),
+    lr_adjust_min_change: parseFloat(document.getElementById("lr_adjust_min_change").value || "0.05"),
+
+    adaptive_scheduler: document.getElementById("adaptive_scheduler").checked,
+    adaptive_scheduler_freeze_on_producer_done: document.getElementById("adaptive_scheduler_freeze_on_producer_done").checked,
+    adaptive_scheduler_never_increase_lr: document.getElementById("adaptive_scheduler_never_increase_lr").checked,
+    adaptive_scheduler_only_extend_steps: document.getElementById("adaptive_scheduler_only_extend_steps").checked,
 
     per_device_train_batch_size: parseInt(document.getElementById("per_device_train_batch_size").value),
     gradient_accumulation_steps: parseInt(document.getElementById("gradient_accumulation_steps").value),
@@ -1281,6 +1469,10 @@ document.getElementById("settings").onsubmit = async e => {
 
     precision_mode: document.getElementById("precision_mode").value,
     gradient_checkpointing: document.getElementById("gradient_checkpointing").checked,
+
+    log_cuda_memory: document.getElementById("log_cuda_memory").checked,
+    cuda_memory_log_interval_steps: parseInt(document.getElementById("cuda_memory_log_interval_steps").value || "25"),
+    cuda_empty_cache_interval_steps: parseInt(document.getElementById("cuda_empty_cache_interval_steps").value || "0"),
 
     dataloader_num_workers: 0,
     merge_lora_on_save: document.getElementById("merge_lora_on_save")
