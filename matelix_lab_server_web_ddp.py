@@ -114,7 +114,7 @@ TRAINING_OUT_DIR.mkdir(parents=True, exist_ok=True)
 DATASETS_DIR.mkdir(parents=True, exist_ok=True)
 STATIC_DIR.mkdir(parents=True, exist_ok=True)
 
-app = FastAPI(title="MaTeLiX AI Lab (Web DDP)", version="5.7-web-ddp-turn-aware-template")
+app = FastAPI(title="MaTeLiX AI Lab (Web DDP)", version="6.1-web-ddp-adaptive-scheduler")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -264,6 +264,27 @@ class TrainingState:
         self.error: Optional[str] = None
         self.world_size: int = 1
         self.exit_code: Optional[int] = None
+
+        self.cuda_memory: Optional[Dict[str, Any]] = None
+        self.scheduler_total_steps: Optional[int] = None
+        self.csv_total_samples_est: Optional[int] = None
+        self.total_samples_real: Optional[int] = None
+        self.skipped_samples: Optional[int] = None
+        self.producer_progress: Optional[Dict[str, Any]] = None
+        self.producer_meta: Optional[Dict[str, Any]] = None
+        self.scheduler_state: Optional[Dict[str, Any]] = None
+        self.scheduler_source: Optional[str] = None
+        self.projected_samples: Optional[int] = None
+        self.scheduler_rel_change: Optional[float] = None
+        self.warmup_steps: Optional[int] = None
+
+        self.adaptive_scheduler: Optional[bool] = None
+        self.adaptive_scheduler_frozen: Optional[bool] = None
+        self.adaptive_scheduler_never_increase_lr: Optional[bool] = None
+        self.adaptive_scheduler_only_extend_steps: Optional[bool] = None
+        self.scheduler_mode: Optional[str] = None
+        self.producer_done: Optional[bool] = None
+
         self.log = LogStore()
 
     def snapshot(self) -> Dict[str, Any]:
@@ -282,6 +303,24 @@ class TrainingState:
                 "error": self.error,
                 "world_size": self.world_size,
                 "exit_code": self.exit_code,
+                "cuda_memory": self.cuda_memory,
+                "scheduler_total_steps": self.scheduler_total_steps,
+                "csv_total_samples_est": self.csv_total_samples_est,
+                "total_samples_real": self.total_samples_real,
+                "skipped_samples": self.skipped_samples,
+                "producer_progress": self.producer_progress,
+                "producer_meta": self.producer_meta,
+                "scheduler_state": self.scheduler_state,
+                "scheduler_source": self.scheduler_source,
+                "projected_samples": self.projected_samples,
+                "scheduler_rel_change": self.scheduler_rel_change,
+                "warmup_steps": self.warmup_steps,
+                "adaptive_scheduler": self.adaptive_scheduler,
+                "adaptive_scheduler_frozen": self.adaptive_scheduler_frozen,
+                "adaptive_scheduler_never_increase_lr": self.adaptive_scheduler_never_increase_lr,
+                "adaptive_scheduler_only_extend_steps": self.adaptive_scheduler_only_extend_steps,
+                "scheduler_mode": self.scheduler_mode,
+                "producer_done": self.producer_done,
             }
 
 
@@ -298,6 +337,18 @@ class WebTrainConfig(MatelixBaseModel):
 
     learning_rate: float = 2e-5
     lr_schedule: str = "cosine"
+    lr_decay_factor: float = 1.0
+    warmup_steps: int = 0
+    warmup_ratio: float = 0.03
+    min_lr_ratio: float = 0.05
+    lr_adjust_interval_steps: int = 25
+    lr_adjust_min_change: float = 0.05
+
+    adaptive_scheduler: bool = True
+    adaptive_scheduler_freeze_on_producer_done: bool = True
+    adaptive_scheduler_never_increase_lr: bool = True
+    adaptive_scheduler_only_extend_steps: bool = True
+
     per_device_train_batch_size: int = 1
     gradient_accumulation_steps: int = 8
     num_train_epochs: float = 3.0
@@ -364,6 +415,10 @@ class WebTrainConfig(MatelixBaseModel):
     use_dataset_cache: bool = True
     rebuild_dataset_cache: bool = False
     tokenized_shard_size: int = 5000
+
+    log_cuda_memory: bool = True
+    cuda_memory_log_interval_steps: int = 25
+    cuda_empty_cache_interval_steps: int = 0
 
 
 def get_new_output_dir(model_name: str, base_dir: Optional[Path] = None) -> Path:
@@ -487,22 +542,68 @@ class DDPTrainingManager:
     def _merge_state_payload(self, payload: Dict[str, Any], source: str = "unknown") -> None:
         with self.state.lock:
             self.state.step = int(payload.get("step") or self.state.step or 0)
+
             if payload.get("loss") is not None:
                 self.state.loss = payload.get("loss")
             if payload.get("learning_rate") is not None:
                 self.state.learning_rate = payload.get("learning_rate")
+
             self.state.eta = payload.get("eta") or self.state.eta or ""
+
             if payload.get("tokens_per_step") is not None:
                 self.state.tokens_per_step = payload.get("tokens_per_step")
             self.state.total_tokens = int(payload.get("total_tokens") or self.state.total_tokens or 0)
+
             self.state.last_preview = (payload.get("preview") or self.state.last_preview or "")[:4000]
-            self.state.last_preview_full = (payload.get("preview_full") or self.state.last_preview_full or self.state.last_preview or "")[:20000]
+            self.state.last_preview_full = (
+                payload.get("preview_full") or self.state.last_preview_full or self.state.last_preview or ""
+            )[:20000]
+
             self.state.save_dir = payload.get("save_dir") or self.state.save_dir
             self.state.status_text = payload.get("status") or self.state.status_text
             self.state.error = payload.get("error") or self.state.error
             self.state.world_size = int(payload.get("world_size") or self.state.world_size or 1)
+
+            if payload.get("cuda_memory") is not None:
+                self.state.cuda_memory = payload.get("cuda_memory")
+            if payload.get("scheduler_total_steps") is not None:
+                self.state.scheduler_total_steps = int(payload.get("scheduler_total_steps"))
+            if payload.get("csv_total_samples_est") is not None:
+                self.state.csv_total_samples_est = int(payload.get("csv_total_samples_est"))
+            if payload.get("total_samples_real") is not None:
+                self.state.total_samples_real = int(payload.get("total_samples_real"))
+            if payload.get("skipped_samples") is not None:
+                self.state.skipped_samples = int(payload.get("skipped_samples"))
+            if payload.get("producer_progress") is not None:
+                self.state.producer_progress = payload.get("producer_progress")
+            if payload.get("producer_meta") is not None:
+                self.state.producer_meta = payload.get("producer_meta")
+            if payload.get("scheduler_state") is not None:
+                self.state.scheduler_state = payload.get("scheduler_state")
+            if payload.get("scheduler_source") is not None:
+                self.state.scheduler_source = payload.get("scheduler_source")
+            if payload.get("projected_samples") is not None:
+                self.state.projected_samples = int(payload.get("projected_samples"))
+            if payload.get("scheduler_rel_change") is not None:
+                self.state.scheduler_rel_change = float(payload.get("scheduler_rel_change"))
+            if payload.get("warmup_steps") is not None:
+                self.state.warmup_steps = int(payload.get("warmup_steps"))
+            if payload.get("adaptive_scheduler") is not None:
+                self.state.adaptive_scheduler = bool(payload.get("adaptive_scheduler"))
+            if payload.get("adaptive_scheduler_frozen") is not None:
+                self.state.adaptive_scheduler_frozen = bool(payload.get("adaptive_scheduler_frozen"))
+            if payload.get("adaptive_scheduler_never_increase_lr") is not None:
+                self.state.adaptive_scheduler_never_increase_lr = bool(payload.get("adaptive_scheduler_never_increase_lr"))
+            if payload.get("adaptive_scheduler_only_extend_steps") is not None:
+                self.state.adaptive_scheduler_only_extend_steps = bool(payload.get("adaptive_scheduler_only_extend_steps"))
+            if payload.get("scheduler_mode") is not None:
+                self.state.scheduler_mode = str(payload.get("scheduler_mode"))
+            if payload.get("producer_done") is not None:
+                self.state.producer_done = bool(payload.get("producer_done"))
+
             if self.proc is not None:
                 self.state.running = self.proc.poll() is None and bool(payload.get("running", self.state.running))
+
             if self.run_dir is None and self.state.save_dir:
                 try:
                     self.run_dir = Path(self.state.save_dir)
@@ -687,6 +788,26 @@ class DDPTrainingManager:
             self.state.error = None
             self.state.world_size = nproc
             self.state.exit_code = None
+
+            self.state.cuda_memory = None
+            self.state.scheduler_total_steps = None
+            self.state.csv_total_samples_est = None
+            self.state.total_samples_real = None
+            self.state.skipped_samples = None
+            self.state.producer_progress = None
+            self.state.producer_meta = None
+            self.state.scheduler_state = None
+            self.state.scheduler_source = None
+            self.state.projected_samples = None
+            self.state.scheduler_rel_change = None
+            self.state.warmup_steps = None
+            self.state.adaptive_scheduler = None
+            self.state.adaptive_scheduler_frozen = None
+            self.state.adaptive_scheduler_never_increase_lr = None
+            self.state.adaptive_scheduler_only_extend_steps = None
+            self.state.scheduler_mode = None
+            self.state.producer_done = None
+
             self.state.log.clear()
             self.state.log.set_file(run_dir / "training.log")
             self.state.log.append("Training gestartet.")
@@ -698,7 +819,14 @@ class DDPTrainingManager:
                 f"deterministic={worker_cfg.get('deterministic', False)} "
                 f"allow_tf32={worker_cfg.get('allow_tf32', True)} "
                 f"dataloader_num_workers={worker_cfg.get('dataloader_num_workers', 4)} "
-                f"max_history_turns={worker_cfg.get('max_history_turns')}"
+                f"max_history_turns={worker_cfg.get('max_history_turns')} "
+                f"log_cuda_memory={worker_cfg.get('log_cuda_memory', True)} "
+                f"cuda_memory_log_interval_steps={worker_cfg.get('cuda_memory_log_interval_steps', 25)} "
+                f"cuda_empty_cache_interval_steps={worker_cfg.get('cuda_empty_cache_interval_steps', 0)} "
+                f"adaptive_scheduler={worker_cfg.get('adaptive_scheduler', True)} "
+                f"adaptive_scheduler_freeze_on_producer_done={worker_cfg.get('adaptive_scheduler_freeze_on_producer_done', True)} "
+                f"adaptive_scheduler_never_increase_lr={worker_cfg.get('adaptive_scheduler_never_increase_lr', True)} "
+                f"adaptive_scheduler_only_extend_steps={worker_cfg.get('adaptive_scheduler_only_extend_steps', True)}"
             )
 
         self.stdout_thread = threading.Thread(target=self._stdout_pump, args=(proc,), daemon=True)
@@ -995,7 +1123,7 @@ def load_inference_model(model_dir: str, device_name: str = "auto") -> Dict[str,
         tok = AutoTokenizer.from_pretrained(effective_model_dir, trust_remote_code=False)
         need_resize = prepare_tokenizer_for_matelix(
             tok,
-           force_template=True,
+            force_template=True,
             template_mode=template_mode,
         )
 
