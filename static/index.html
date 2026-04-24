@@ -455,7 +455,7 @@ form label {
     <form id="settings" autocomplete="off" class="settings-grid">
       <label for="model_dir_select">Modell wählen:</label>
       <select id="model_dir_select">
-        <option value="MTSmash/EvaGPT-German-0.7B">EvaGPT-German-0.7B</option>
+        <option value="MTSmash/EvaGPT-German-1B-10-4-2026-7">EvaGPT-German-1B</option>
         <option value="custom">Anderes Modell (Pfad angeben)</option>
       </select>
 
@@ -471,8 +471,7 @@ form label {
 
       <label for="template_mode">Vorlagen-Typ:</label>
       <select id="template_mode">
-        <option value="chat" selected>Dialog (Chat-Template)</option>
-        <option value="dialogplus">Dialog (Block-Template)</option>
+        <option value="dialogplus" selected>Dialog (Chat-Template)</option>
         <option value="plain">Nur Textspalte</option>
       </select>
 
@@ -579,6 +578,54 @@ form label {
       <label for="ngram_add_batch" class="ngram_row" style="display:none;">Add Batch:</label>
       <input type="number" id="ngram_add_batch" class="ngram_row" style="display:none;" value="64" min="1">
 
+      <label for="ngram_conflict_overlap_ratio" class="ngram_row" style="display:none;">Conflict Overlap Ratio:</label>
+      <input type="number" step="0.01" id="ngram_conflict_overlap_ratio" class="ngram_row" style="display:none;" value="0.8" min="0" max="1">
+
+      <label for="ngram_prefer_longest_match" class="ngram_row" style="display:none;">Prefer Longest Match:</label>
+      <input type="checkbox" id="ngram_prefer_longest_match" class="ngram_row" style="display:none;" checked>
+
+      <label for="ngram_use_code_lines" class="ngram_row" style="display:none;">Code-Zeilen nutzen:</label>
+      <input type="checkbox" id="ngram_use_code_lines" class="ngram_row" style="display:none;" checked>
+
+      <label for="ngram_code_line_min_chars" class="ngram_row" style="display:none;">Code-Zeile Min. Zeichen:</label>
+      <input type="number" id="ngram_code_line_min_chars" class="ngram_row" style="display:none;" value="12" min="1">
+
+      <label for="ngram_code_line_min_count" class="ngram_row" style="display:none;">Code-Zeile Min. Count:</label>
+      <input type="number" id="ngram_code_line_min_count" class="ngram_row" style="display:none;" value="2" min="1">
+
+      <label for="ngram_code_line_top_k" class="ngram_row" style="display:none;">Code-Zeile Top-K:</label>
+      <input type="number" id="ngram_code_line_top_k" class="ngram_row" style="display:none;" value="400" min="1">
+
+      <label for="ngram_code_line_score_boost" class="ngram_row" style="display:none;">Code-Zeile Score Boost:</label>
+      <input type="number" step="0.01" id="ngram_code_line_score_boost" class="ngram_row" style="display:none;" value="1.35" min="0">
+
+      <label for="ngram_code_pattern_boost" class="ngram_row" style="display:none;">Code-Pattern Boost:</label>
+      <input type="checkbox" id="ngram_code_pattern_boost" class="ngram_row" style="display:none;" checked>
+
+      <label for="ngram_code_pattern_extra_boost" class="ngram_row" style="display:none;">Code-Pattern Extra Boost:</label>
+      <input type="number" step="0.01" id="ngram_code_pattern_extra_boost" class="ngram_row" style="display:none;" value="1.2" min="0">
+
+      <label for="ngram_focus_oversize_samples" class="ngram_row" style="display:none;">Oversize-Samples priorisieren:</label>
+      <input type="checkbox" id="ngram_focus_oversize_samples" class="ngram_row" style="display:none;" checked>
+
+      <label for="ngram_oversize_sample_boost" class="ngram_row" style="display:none;">Oversize Sample Boost:</label>
+      <input type="number" step="0.1" id="ngram_oversize_sample_boost" class="ngram_row" style="display:none;" value="4.0" min="0">
+
+      <label for="ngram_near_limit_threshold" class="ngram_row" style="display:none;">Near-Limit Threshold:</label>
+      <input type="number" step="0.01" id="ngram_near_limit_threshold" class="ngram_row" style="display:none;" value="0.90" min="0" max="1">
+
+      <label for="ngram_near_limit_boost" class="ngram_row" style="display:none;">Near-Limit Boost:</label>
+      <input type="number" step="0.1" id="ngram_near_limit_boost" class="ngram_row" style="display:none;" value="1.5" min="0">
+
+      <label for="ngram_eval_max_seq_length" class="ngram_row" style="display:none;">Eval Max Seq Length:</label>
+      <input type="number" id="ngram_eval_max_seq_length" class="ngram_row" style="display:none;" value="1024" min="1">
+
+      <label for="ngram_track_saved_samples" class="ngram_row" style="display:none;">Saved Samples tracken:</label>
+      <input type="checkbox" id="ngram_track_saved_samples" class="ngram_row" style="display:none;" checked>
+
+      <label for="ngram_saved_sample_boost" class="ngram_row" style="display:none;">Saved Sample Boost:</label>
+      <input type="number" step="0.1" id="ngram_saved_sample_boost" class="ngram_row" style="display:none;" value="8.0" min="0">
+
       <label for="precision_mode">Precision:</label>
       <select id="precision_mode" title="fp16/bf16 nur auf CUDA; MPS/CPU immer FP32">
         <option value="auto" selected>auto</option>
@@ -618,6 +665,53 @@ form label {
         LoRA Merge beim Speichern:
       </label>
       <input type="checkbox" id="merge_lora_on_save" class="lora_row" style="display:none;" checked>
+
+      <label for="train_from_scratch" title="Initialisiert das Modell neu aus der config.json statt Pretrained-Gewichte zu laden.">
+        Von Scratch trainieren:
+      </label>
+      <input type="checkbox" id="train_from_scratch">
+
+      <label class="scratch_cfg_row" for="scratch_hidden_size" style="display:none;" title="Leer lassen = Wert aus der Basis-config übernehmen.">
+        Scratch Hidden Size:
+      </label>
+      <input type="number" id="scratch_hidden_size" class="scratch_cfg_row" style="display:none;" placeholder="leer = Basis-Config" min="1">
+
+      <label class="scratch_cfg_row" for="scratch_num_hidden_layers" style="display:none;" title="Leer lassen = Wert aus der Basis-config übernehmen.">
+        Scratch Layer Count:
+      </label>
+      <input type="number" id="scratch_num_hidden_layers" class="scratch_cfg_row" style="display:none;" placeholder="leer = Basis-Config" min="1">
+
+      <label class="scratch_cfg_row" for="scratch_num_attention_heads" style="display:none;" title="Leer lassen = Wert aus der Basis-config übernehmen.">
+        Scratch Attention Heads:
+      </label>
+      <input type="number" id="scratch_num_attention_heads" class="scratch_cfg_row" style="display:none;" placeholder="leer = Basis-Config" min="1">
+
+      <label class="scratch_cfg_row" for="scratch_intermediate_size" style="display:none;" title="Leer lassen = Wert aus der Basis-config übernehmen.">
+        Scratch Intermediate Size:
+      </label>
+      <input type="number" id="scratch_intermediate_size" class="scratch_cfg_row" style="display:none;" placeholder="leer = Basis-Config" min="1">
+
+      <label class="scratch_cfg_row" for="scratch_num_key_value_heads" style="display:none;" title="Optional für GQA/MQA. Leer lassen = Basis-config.">
+        Scratch KV Heads:
+      </label>
+      <input type="number" id="scratch_num_key_value_heads" class="scratch_cfg_row" style="display:none;" placeholder="optional" min="1">
+
+      <label class="scratch_cfg_row" for="scratch_max_position_embeddings" style="display:none;" title="Leer lassen = Wert aus der Basis-config übernehmen.">
+        Scratch Max Positions:
+      </label>
+      <input type="number" id="scratch_max_position_embeddings" class="scratch_cfg_row" style="display:none;" placeholder="leer = Basis-Config" min="1">
+
+      <label class="scratch_cfg_row" for="include_prompt_loss" style="display:none;" title="Nimmt im Dialog-Modus auch Prompt/System/User-Tokens in die Loss-Berechnung auf.">
+        Prompt in Loss einbeziehen:
+      </label>
+      <input type="checkbox" id="include_prompt_loss" class="scratch_cfg_row" style="display:none;">
+
+      <label class="scratch_cfg_row" style="display:none; opacity:0.85; align-self:start;">
+        Hinweis:
+      </label>
+      <div class="scratch_cfg_row" style="display:none; justify-self:end; width:58%; color:#9cffc5; font-size:0.94em; line-height:1.35;">
+        Nur im Scratch-Modus aktiv. <code>vocab_size</code> und Tokenizer bleiben unverändert; leere Felder übernehmen die Werte aus der Basis-<code>config.json</code>.
+      </div>
 
       <div></div>
       <div style="display: flex; gap:1.1em; flex-wrap:wrap;">
@@ -1267,10 +1361,23 @@ window.addEventListener('DOMContentLoaded', async () => {
   sel.value = hw.cuda ? "cuda" : (hw.mps ? "mps" : "cpu");
 });
 
-document.getElementById("train_mode").addEventListener("change", function() {
-  const show = this.value === "lora";
-  document.querySelectorAll('.lora_row').forEach(e => e.style.display = show ? "" : "none");
-});
+function applyTrainModeUI() {
+  const trainMode = document.getElementById("train_mode");
+  const scratch = document.getElementById("train_from_scratch");
+  const scratchEnabled = !!scratch.checked;
+  if (scratchEnabled && trainMode.value === "lora") {
+    trainMode.value = "full";
+  }
+  const showLora = trainMode.value === "lora" && !scratchEnabled;
+  document.querySelectorAll('.lora_row').forEach(e => e.style.display = showLora ? "" : "none");
+  document.querySelectorAll('.scratch_cfg_row').forEach(e => e.style.display = scratchEnabled ? "" : "none");
+  const includePromptLoss = document.getElementById("include_prompt_loss");
+  if (includePromptLoss && !scratchEnabled) includePromptLoss.checked = false;
+}
+
+document.getElementById("train_mode").addEventListener("change", applyTrainModeUI);
+document.getElementById("train_from_scratch").addEventListener("change", applyTrainModeUI);
+window.addEventListener('DOMContentLoaded', applyTrainModeUI);
 
 document.getElementById("use_ngrams").addEventListener("change", function() {
   const show = this.checked;
@@ -1406,6 +1513,13 @@ modelDirSelect.addEventListener('change', function() {
 document.getElementById("settings").onsubmit = async e => {
   e.preventDefault();
 
+  const scratchEnabled = document.getElementById("train_from_scratch").checked;
+  const selectedTrainMode = document.getElementById("train_mode").value;
+  if (scratchEnabled && selectedTrainMode === "lora") {
+    alert("Von Scratch trainieren ist nicht mit LoRA kombinierbar. Bitte Trainingsmodus auf Vollständiges Training stellen oder Scratch deaktivieren.");
+    return;
+  }
+
   if (lossChart) {
     lossChart.data.labels = [];
     lossChart.data.datasets[0].data = [];
@@ -1464,6 +1578,14 @@ document.getElementById("settings").onsubmit = async e => {
     device: document.getElementById("device").value,
 
     train_mode: document.getElementById("train_mode").value,
+    train_from_scratch: document.getElementById("train_from_scratch").checked,
+    include_prompt_loss: document.getElementById("include_prompt_loss").checked,
+    scratch_hidden_size: integerOrNull(document.getElementById("scratch_hidden_size").value),
+    scratch_num_hidden_layers: integerOrNull(document.getElementById("scratch_num_hidden_layers").value),
+    scratch_num_attention_heads: integerOrNull(document.getElementById("scratch_num_attention_heads").value),
+    scratch_intermediate_size: integerOrNull(document.getElementById("scratch_intermediate_size").value),
+    scratch_num_key_value_heads: integerOrNull(document.getElementById("scratch_num_key_value_heads").value),
+    scratch_max_position_embeddings: integerOrNull(document.getElementById("scratch_max_position_embeddings").value),
     lora_r: parseInt(document.getElementById("lora_r").value || "8"),
     lora_alpha: parseInt(document.getElementById("lora_alpha").value || "16"),
 
@@ -1494,7 +1616,25 @@ document.getElementById("settings").onsubmit = async e => {
     ngram_add_batch: parseInt(document.getElementById("ngram_add_batch").value || "64"),
     ngram_min_count: 2,
     ngram_max_token_chars: 384,
-    ngram_max_tokens_per_text: 4096
+    ngram_max_tokens_per_text: 4096,
+
+    ngram_conflict_overlap_ratio: parseFloat(document.getElementById("ngram_conflict_overlap_ratio").value || "0.8"),
+    ngram_prefer_longest_match: document.getElementById("ngram_prefer_longest_match").checked,
+    ngram_use_code_lines: document.getElementById("ngram_use_code_lines").checked,
+    ngram_code_line_min_chars: parseInt(document.getElementById("ngram_code_line_min_chars").value || "12"),
+    ngram_code_line_min_count: parseInt(document.getElementById("ngram_code_line_min_count").value || "2"),
+    ngram_code_line_top_k: parseInt(document.getElementById("ngram_code_line_top_k").value || "400"),
+    ngram_code_line_score_boost: parseFloat(document.getElementById("ngram_code_line_score_boost").value || "1.35"),
+    ngram_code_pattern_boost: document.getElementById("ngram_code_pattern_boost").checked,
+    ngram_code_pattern_extra_boost: parseFloat(document.getElementById("ngram_code_pattern_extra_boost").value || "1.2"),
+
+    ngram_focus_oversize_samples: document.getElementById("ngram_focus_oversize_samples").checked,
+    ngram_oversize_sample_boost: parseFloat(document.getElementById("ngram_oversize_sample_boost").value || "4.0"),
+    ngram_near_limit_threshold: parseFloat(document.getElementById("ngram_near_limit_threshold").value || "0.90"),
+    ngram_near_limit_boost: parseFloat(document.getElementById("ngram_near_limit_boost").value || "1.5"),
+    ngram_eval_max_seq_length: parseInt(document.getElementById("ngram_eval_max_seq_length").value || document.getElementById("max_seq_length").value || "1024"),
+    ngram_track_saved_samples: document.getElementById("ngram_track_saved_samples").checked,
+    ngram_saved_sample_boost: parseFloat(document.getElementById("ngram_saved_sample_boost").value || "8.0")
   };
 
   const overlay = document.getElementById("matrix-spinner-overlay");
