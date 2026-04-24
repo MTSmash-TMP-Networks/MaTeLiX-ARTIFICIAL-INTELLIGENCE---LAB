@@ -49,7 +49,7 @@ from torch import nn
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.optim import AdamW
 from torch.utils.data import DataLoader, IterableDataset
-from transformers import AutoModelForCausalLM, AutoTokenizer
+from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
 
 from matelix_ngram_pipeline import (
     NgramConfig,
@@ -119,6 +119,14 @@ class TrainConfig:
     gradient_checkpointing: bool = False
 
     train_mode: str = "full"
+    train_from_scratch: bool = False
+    include_prompt_loss: bool = False
+    scratch_hidden_size: Optional[int] = None
+    scratch_num_hidden_layers: Optional[int] = None
+    scratch_num_attention_heads: Optional[int] = None
+    scratch_intermediate_size: Optional[int] = None
+    scratch_num_key_value_heads: Optional[int] = None
+    scratch_max_position_embeddings: Optional[int] = None
     lora_r: int = 8
     lora_alpha: int = 16
     merge_lora_on_save: bool = True
@@ -186,6 +194,20 @@ class TrainConfig:
         self.ddp_static_graph = bool(self.ddp_static_graph)
         self.ddp_broadcast_buffers = bool(self.ddp_broadcast_buffers)
         self.force_template = bool(self.force_template)
+        self.train_from_scratch = bool(self.train_from_scratch)
+        self.include_prompt_loss = bool(self.include_prompt_loss)
+        if self.scratch_hidden_size is not None:
+            self.scratch_hidden_size = max(1, int(self.scratch_hidden_size))
+        if self.scratch_num_hidden_layers is not None:
+            self.scratch_num_hidden_layers = max(1, int(self.scratch_num_hidden_layers))
+        if self.scratch_num_attention_heads is not None:
+            self.scratch_num_attention_heads = max(1, int(self.scratch_num_attention_heads))
+        if self.scratch_intermediate_size is not None:
+            self.scratch_intermediate_size = max(1, int(self.scratch_intermediate_size))
+        if self.scratch_num_key_value_heads is not None:
+            self.scratch_num_key_value_heads = max(1, int(self.scratch_num_key_value_heads))
+        if self.scratch_max_position_embeddings is not None:
+            self.scratch_max_position_embeddings = max(1, int(self.scratch_max_position_embeddings))
         self.deterministic = bool(self.deterministic)
         self.allow_tf32 = bool(self.allow_tf32)
         self.prefetch_factor = max(1, int(self.prefetch_factor))
@@ -659,6 +681,7 @@ def pack_dialog_from_blocks_strict(
     prompt_blocks: List[List[int]],
     answer_ids: List[int],
     max_seq_length: int,
+    include_prompt_loss: bool = False,
 ) -> Optional[Tuple[List[int], List[int]]]:
     if max_seq_length <= 0:
         raise ValueError("max_seq_length muss > 0 sein")
@@ -679,7 +702,10 @@ def pack_dialog_from_blocks_strict(
             break
 
     input_ids = [tok for part in kept_prompt_blocks for tok in part] + answer_ids
-    labels = ([-100] * (len(input_ids) - len(answer_ids))) + answer_ids.copy()
+    if include_prompt_loss:
+        labels = input_ids.copy()
+    else:
+        labels = ([-100] * (len(input_ids) - len(answer_ids))) + answer_ids.copy()
 
     if not input_ids or len(input_ids) != len(labels):
         return None
@@ -693,6 +719,7 @@ def tokenize_example(
     max_seq_length: int,
     template_mode: str,
     max_history_turns: Optional[int],
+    include_prompt_loss: bool = False,
 ) -> Optional[Dict[str, Any]]:
     if isinstance(item, str):
         ids = tokenizer(item, add_special_tokens=False)["input_ids"]
@@ -744,6 +771,7 @@ def tokenize_example(
         prompt_blocks=prompt_blocks,
         answer_ids=answer_ids,
         max_seq_length=max_seq_length,
+        include_prompt_loss=bool(include_prompt_loss),
     )
     if packed is None:
         return None
@@ -1008,6 +1036,7 @@ def shard_producer_process_main(cfg_dict: Dict[str, Any], cache_dir_str: str) ->
                 max_seq_length=int(cfg.max_seq_length),
                 template_mode=cfg.template_mode,
                 max_history_turns=cfg.max_history_turns,
+                include_prompt_loss=bool(cfg.include_prompt_loss),
             )
 
             if sample is None:
@@ -1431,13 +1460,71 @@ def build_model_and_tokenizer(cfg: TrainConfig, ctx: DistContext):
     load_dtype, fp16, bf16 = pick_precision(cfg, ctx.device)
     LOGGER.info("Precision: load_dtype=%s fp16=%s bf16=%s", load_dtype, fp16, bf16)
 
-    model = AutoModelForCausalLM.from_pretrained(
-        cfg.model_dir,
-        trust_remote_code=False,
-        torch_dtype=load_dtype,
-        low_cpu_mem_usage=True,
-        attn_implementation="sdpa",
-    )
+    train_from_scratch = bool(cfg.train_from_scratch)
+    mode = (cfg.train_mode or "full").lower().strip()
+    if train_from_scratch and mode == "lora":
+        raise ValueError("train_from_scratch ist nicht mit LoRA kompatibel. Bitte train_mode='full' verwenden.")
+
+    if train_from_scratch:
+        model_config = AutoConfig.from_pretrained(cfg.model_dir, trust_remote_code=False)
+
+        scratch_overrides = {
+            "hidden_size": cfg.scratch_hidden_size,
+            "num_hidden_layers": cfg.scratch_num_hidden_layers,
+            "num_attention_heads": cfg.scratch_num_attention_heads,
+            "intermediate_size": cfg.scratch_intermediate_size,
+            "num_key_value_heads": cfg.scratch_num_key_value_heads,
+            "max_position_embeddings": cfg.scratch_max_position_embeddings,
+        }
+        applied_overrides = {}
+        for key, value in scratch_overrides.items():
+            if value is None:
+                continue
+            if hasattr(model_config, key):
+                setattr(model_config, key, int(value))
+                applied_overrides[key] = int(value)
+            else:
+                LOGGER.warning("Scratch override ignoriert (Config kennt Feld nicht): %s", key)
+
+        hidden_size = int(getattr(model_config, "hidden_size", 0) or 0)
+        num_attention_heads = int(getattr(model_config, "num_attention_heads", 0) or 0)
+        if hidden_size > 0 and num_attention_heads > 0 and (hidden_size % num_attention_heads) != 0:
+            raise ValueError(
+                f"Ungültige Scratch-Config: hidden_size ({hidden_size}) muss durch "
+                f"num_attention_heads ({num_attention_heads}) teilbar sein."
+            )
+
+        num_key_value_heads = int(getattr(model_config, "num_key_value_heads", 0) or 0)
+        if num_key_value_heads > 0 and num_attention_heads > 0 and num_attention_heads % num_key_value_heads != 0:
+            raise ValueError(
+                f"Ungültige Scratch-Config: num_attention_heads ({num_attention_heads}) muss durch "
+                f"num_key_value_heads ({num_key_value_heads}) teilbar sein."
+            )
+
+        if load_dtype is not None:
+            try:
+                model_config.torch_dtype = load_dtype
+            except Exception:
+                pass
+        model = AutoModelForCausalLM.from_config(
+            model_config,
+            trust_remote_code=False,
+            attn_implementation="sdpa",
+        )
+        LOGGER.info(
+            "Model init: scratch from config | source=%s | overrides=%s",
+            cfg.model_dir,
+            json.dumps(applied_overrides, ensure_ascii=False, sort_keys=True),
+        )
+    else:
+        model = AutoModelForCausalLM.from_pretrained(
+            cfg.model_dir,
+            trust_remote_code=False,
+            torch_dtype=load_dtype,
+            low_cpu_mem_usage=True,
+            attn_implementation="sdpa",
+        )
+        LOGGER.info("Model init: pretrained weights | source=%s", cfg.model_dir)
 
     if need_resize or model.get_input_embeddings().weight.shape[0] != len(tokenizer):
         model.resize_token_embeddings(len(tokenizer))
@@ -1651,7 +1738,7 @@ def maybe_adjust_scheduler_from_progress(
     rel_change = abs(proposed_total_steps - current_total_steps) / float(max(1, current_total_steps))
 
     info = {
-        "source": source,
+        "source": ("static" if not cfg.adaptive_scheduler else source),
         "effective_total_samples": int(effective_total_samples),
         "proposed_total_steps": int(proposed_total_steps),
         "current_total_steps": int(current_total_steps),
@@ -1744,7 +1831,7 @@ def _build_live_runtime_fields(
         "adaptive_scheduler_frozen": bool(scheduler.frozen),
         "adaptive_scheduler_never_increase_lr": bool(cfg.adaptive_scheduler_never_increase_lr),
         "adaptive_scheduler_only_extend_steps": bool(cfg.adaptive_scheduler_only_extend_steps),
-        "scheduler_mode": f"{'adaptive_' if cfg.adaptive_scheduler else ''}{cfg.lr_schedule}",
+        "scheduler_mode": (f"adaptive_{cfg.lr_schedule}" if cfg.adaptive_scheduler else str(cfg.lr_schedule)),
     }
 
 
@@ -2149,7 +2236,7 @@ def main() -> int:
             "Worker gestartet | rank=%s local_rank=%s world_size=%s device=%s",
             ctx.rank, ctx.local_rank, ctx.world_size, ctx.device
         )
-        LOGGER.info("Train mode: %s", cfg.train_mode)
+        LOGGER.info("Train mode: %s | train_from_scratch=%s | include_prompt_loss=%s", cfg.train_mode, cfg.train_from_scratch, cfg.include_prompt_loss)
         LOGGER.info("Config: %s", json.dumps(cfg.__dict__, ensure_ascii=False))
 
         model, tokenizer, fp16, bf16, ngram_state = build_model_and_tokenizer(cfg, ctx)
@@ -2300,7 +2387,7 @@ def main() -> int:
                 "adaptive_scheduler_frozen": bool(scheduler.frozen),
                 "adaptive_scheduler_never_increase_lr": bool(cfg.adaptive_scheduler_never_increase_lr),
                 "adaptive_scheduler_only_extend_steps": bool(cfg.adaptive_scheduler_only_extend_steps),
-                "scheduler_mode": f"{'adaptive_' if cfg.adaptive_scheduler else ''}{cfg.lr_schedule}",
+                "scheduler_mode": (f"adaptive_{cfg.lr_schedule}" if cfg.adaptive_scheduler else str(cfg.lr_schedule)),
             }
             payload.update(
                 _build_live_runtime_fields(
@@ -2499,7 +2586,7 @@ def main() -> int:
                 "adaptive_scheduler_frozen": bool(scheduler.frozen),
                 "adaptive_scheduler_never_increase_lr": bool(cfg.adaptive_scheduler_never_increase_lr),
                 "adaptive_scheduler_only_extend_steps": bool(cfg.adaptive_scheduler_only_extend_steps),
-                "scheduler_mode": f"{'adaptive_' if cfg.adaptive_scheduler else ''}{cfg.lr_schedule}",
+                "scheduler_mode": (f"adaptive_{cfg.lr_schedule}" if cfg.adaptive_scheduler else str(cfg.lr_schedule)),
             }
             status_writer.write(final_payload)
             LOGGER.info("Training abgeschlossen. Modell gespeichert nach: %s", outdir)
