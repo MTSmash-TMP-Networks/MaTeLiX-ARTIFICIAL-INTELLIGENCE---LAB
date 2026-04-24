@@ -360,6 +360,14 @@ class WebTrainConfig(MatelixBaseModel):
 
     device: str = "auto"
     train_mode: str = "full"
+    train_from_scratch: bool = False
+    include_prompt_loss: bool = False
+    scratch_hidden_size: Optional[int] = None
+    scratch_num_hidden_layers: Optional[int] = None
+    scratch_num_attention_heads: Optional[int] = None
+    scratch_intermediate_size: Optional[int] = None
+    scratch_num_key_value_heads: Optional[int] = None
+    scratch_max_position_embeddings: Optional[int] = None
     lora_r: int = 8
     lora_alpha: int = 16
     precision_mode: str = "auto"
@@ -382,6 +390,26 @@ class WebTrainConfig(MatelixBaseModel):
     ngram_min_count: int = 2
     ngram_max_token_chars: int = 384
     ngram_max_tokens_per_text: int = 4096
+
+    # Neu: N-Gram Konsistenz / Code
+    ngram_conflict_overlap_ratio: float = 0.8
+    ngram_prefer_longest_match: bool = True
+    ngram_use_code_lines: bool = True
+    ngram_code_line_min_chars: int = 12
+    ngram_code_line_min_count: int = 2
+    ngram_code_line_top_k: int = 400
+    ngram_code_line_score_boost: float = 1.35
+    ngram_code_pattern_boost: bool = True
+    ngram_code_pattern_extra_boost: float = 1.2
+
+    # Neu: Skip-/Oversize-Fokus
+    ngram_focus_oversize_samples: bool = True
+    ngram_oversize_sample_boost: float = 4.0
+    ngram_near_limit_threshold: float = 0.90
+    ngram_near_limit_boost: float = 1.5
+    ngram_eval_max_seq_length: int = 1024
+    ngram_track_saved_samples: bool = True
+    ngram_saved_sample_boost: float = 8.0
 
     ddp_enabled: Optional[bool] = None
     nproc_per_node: Optional[int] = None
@@ -688,6 +716,9 @@ class DDPTrainingManager:
         )
 
         worker_cfg["device"] = device
+        if bool(worker_cfg.get("train_from_scratch", False)):
+            worker_cfg["train_mode"] = "full"
+            worker_cfg["merge_lora_on_save"] = False
         if (cfg.train_mode or "full").strip().lower() == "lora" and float(worker_cfg.get("learning_rate", 0.0)) <= 2e-5:
             worker_cfg["learning_rate"] = 2e-4
         worker_cfg["output_dir"] = str(run_dir)
