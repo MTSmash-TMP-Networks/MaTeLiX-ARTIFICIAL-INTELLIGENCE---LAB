@@ -1293,6 +1293,7 @@ class TokenizedShardIterableDataset(IterableDataset):
                 payload = pickle.load(f)
 
             samples = payload["samples"]
+            global_start = int(payload["global_start"])
 
             if self.shuffle:
                 rng = random.Random((self.epoch + 1) * 1000003 + shard_idx)
@@ -1304,17 +1305,10 @@ class TokenizedShardIterableDataset(IterableDataset):
             else:
                 order = list(range(len(samples)))
 
-            # DDP safety: every rank must execute the same number of forward/backward
-            # passes per epoch. The previous global_idx % world_size split could leave
-            # different ranks with different numbers of samples at shard/epoch boundaries.
-            # Padding duplicates a few samples when needed so len(order) is divisible by
-            # world_size, then each rank takes positions rank, rank+world_size, ... .
-            order = _pad_order_for_even_ddp(order, self.world_size)
-            rank = int(self.rank)
-            world_size = max(1, int(self.world_size))
-
-            for pos in range(rank, len(order), world_size):
-                local_idx = order[pos]
+            for local_idx in order:
+                global_idx = global_start + local_idx
+                if (global_idx % self.world_size) != self.rank:
+                    continue
                 item = samples[local_idx]
                 yield {
                     "input_ids": torch.tensor(item["input_ids"], dtype=torch.long),
@@ -1323,26 +1317,6 @@ class TokenizedShardIterableDataset(IterableDataset):
                 }
 
             shard_idx += 1
-
-
-def _pad_order_for_even_ddp(order: List[int], world_size: int) -> List[int]:
-    """Pad an index order so every DDP rank receives the same number of samples.
-
-    DDP requires all ranks to run the same sequence of collectives. If one rank
-    gets fewer batches, it can enter a scalar all_reduce while another rank is
-    still inside DDP's gradient all_reduce, causing an NCCL watchdog timeout.
-    """
-    world_size = max(1, int(world_size))
-    if world_size <= 1 or not order:
-        return order
-
-    remainder = len(order) % world_size
-    if remainder == 0:
-        return order
-
-    needed = world_size - remainder
-    repeats = int(math.ceil(needed / float(len(order))))
-    return order + ((order * repeats)[:needed])
 
 
 def _make_bucketed_shuffle_order(samples: List[Dict[str, Any]], rng: random.Random) -> List[int]:
@@ -1946,164 +1920,170 @@ def train_epoch(
     accum_counter = 0
     last_micro_loss_value: Optional[float] = None
 
-    for batch in loader:
-        # Avoid a per-microbatch scalar all_reduce in DDP. Calling sync_stop()
-        # here can race with DDP gradient all_reduces if ranks reach the top of
-        # the loop at different times, producing NumelIn=1 vs gradient-bucket
-        # collective mismatches. In distributed mode, shutdown is handled by the
-        # launcher/process signals and by sync points after full epochs/steps.
-        if not ctx.is_distributed and SHUTDOWN.stop:
-            break
+    join_ctx = model.join() if (ctx.is_distributed and isinstance(model, DDP)) else nullcontext()
 
-        batch = move_batch(batch, ctx.device)
+    with join_ctx:
+        for batch in loader:
+            # DDP-sicherer Stop:
+            # Kein sync_stop()/dist.all_reduce() im Microbatch-Loop verwenden,
+            # weil das mit DDP-Gradient-Allreduces kollidieren kann.
+            # Der Launcher sendet SIGTERM an alle Worker; lokales Flag reicht.
+            if SHUTDOWN.stop:
+                reached_max_steps = True
+                break
 
-        if ctx.is_main and preview_writer is not None:
+            batch = move_batch(batch, ctx.device)
+
+            if ctx.is_main and preview_writer is not None:
+                try:
+                    input_ids_cpu = batch["input_ids"].detach().to("cpu")
+                    attention_mask_cpu = batch["attention_mask"].detach().to("cpu")
+                    texts = []
+                    for ids, mask in zip(input_ids_cpu, attention_mask_cpu):
+                        valid_len = int(mask.sum().item())
+                        trimmed_ids = ids[:valid_len]
+                        txt = tokenizer.decode(trimmed_ids.tolist(), skip_special_tokens=False)
+                        texts.append(txt)
+                    preview_text = "\n\n---\n\n".join(texts)
+                    preview_writer.write(preview_text[:4000], preview_text[:20000])
+                except Exception:
+                    pass
+
             try:
-                input_ids_cpu = batch["input_ids"].detach().to("cpu")
-                attention_mask_cpu = batch["attention_mask"].detach().to("cpu")
-                texts = []
-                for ids, mask in zip(input_ids_cpu, attention_mask_cpu):
-                    valid_len = int(mask.sum().item())
-                    trimmed_ids = ids[:valid_len]
-                    txt = tokenizer.decode(trimmed_ids.tolist(), skip_special_tokens=False)
-                    texts.append(txt)
-                preview_text = "\n\n---\n\n".join(texts)
-                preview_writer.write(preview_text[:4000], preview_text[:20000])
-            except Exception:
-                pass
+                with autocast_ctx:
+                    outputs = model(**batch)
+                    loss = outputs.loss
 
-        try:
-            with autocast_ctx:
-                outputs = model(**batch)
-                loss = outputs.loss
+                if not torch.isfinite(loss):
+                    raise FloatingPointError(f"Nicht-finite Loss erkannt: {float(loss.detach().item())}")
 
-            if not torch.isfinite(loss):
-                raise FloatingPointError(f"Nicht-finite Loss erkannt: {float(loss.detach().item())}")
+                loss_value = float(loss.detach().item())
+                last_micro_loss_value = loss_value
+                loss_to_backprop = loss / cfg.gradient_accumulation_steps
 
-            loss_value = float(loss.detach().item())
-            last_micro_loss_value = loss_value
-            loss_to_backprop = loss / cfg.gradient_accumulation_steps
+                if scaler is not None and getattr(scaler, "is_enabled", lambda: False)():
+                    scaler.scale(loss_to_backprop).backward()
+                else:
+                    loss_to_backprop.backward()
+            except torch.OutOfMemoryError as oom:
+                try:
+                    if ctx.device.type == "cuda":
+                        torch.cuda.empty_cache()
+                except Exception:
+                    pass
+                raise RuntimeError(f"CUDA OOM im Trainingsschritt. Empfehlung: kleinere max_seq_length oder Batch. Original: {oom}")
 
-            if scaler is not None and getattr(scaler, "is_enabled", lambda: False)():
-                scaler.scale(loss_to_backprop).backward()
-            else:
-                loss_to_backprop.backward()
-        except torch.OutOfMemoryError as oom:
-            try:
-                if ctx.device.type == "cuda":
-                    torch.cuda.empty_cache()
-            except Exception:
-                pass
-            raise RuntimeError(f"CUDA OOM im Trainingsschritt. Empfehlung: kleinere max_seq_length oder Batch. Original: {oom}")
+            accum_counter += 1
+            should_step = accum_counter >= cfg.gradient_accumulation_steps
 
-        accum_counter += 1
-        should_step = accum_counter >= cfg.gradient_accumulation_steps
+            if should_step:
+                if scaler is not None and getattr(scaler, "is_enabled", lambda: False)():
+                    scaler.unscale_(optimizer)
 
-        if should_step:
-            if scaler is not None and getattr(scaler, "is_enabled", lambda: False)():
-                scaler.unscale_(optimizer)
+                torch.nn.utils.clip_grad_norm_(model.parameters(), cfg.max_grad_norm)
 
-            torch.nn.utils.clip_grad_norm_(model.parameters(), cfg.max_grad_norm)
+                if scaler is not None and getattr(scaler, "is_enabled", lambda: False)():
+                    scaler.step(optimizer)
+                    scaler.update()
+                else:
+                    optimizer.step()
 
-            if scaler is not None and getattr(scaler, "is_enabled", lambda: False)():
-                scaler.step(optimizer)
-                scaler.update()
-            else:
-                optimizer.step()
+                optimizer.zero_grad(set_to_none=True)
+                global_step += 1
+                accum_counter = 0
 
-            optimizer.zero_grad(set_to_none=True)
-            global_step += 1
-            accum_counter = 0
-
-            if (global_step % cfg.lr_adjust_interval_steps) == 0:
-                changed, proposed_total_steps, info = maybe_adjust_scheduler_from_progress(
-                    scheduler=scheduler,
-                    cfg=cfg,
-                    ctx=ctx,
-                    cache_dir=cache_dir,
-                    csv_total_samples_est=csv_total_samples_est,
-                    global_step=global_step,
-                    force=False,
-                )
-                total_steps_ref["value"] = scheduler.total_steps
-                if ctx.is_main and changed:
-                    LOGGER.info(
-                        "Scheduler angepasst | source=%s total_steps=%s -> %s rel_change=%.4f samples=%s frozen=%s",
-                        info["source"],
-                        info["current_total_steps"],
-                        proposed_total_steps,
-                        info["relative_change"],
-                        info["effective_total_samples"],
-                        scheduler.frozen,
-                    )
-
-            lr = scheduler.step(global_step)
-            total_steps_ref["value"] = scheduler.total_steps
-
-            maybe_empty_cuda_cache(cfg, ctx, global_step)
-            cuda_mem = maybe_log_cuda_memory(
-                cfg=cfg,
-                ctx=ctx,
-                global_step=global_step,
-                prefix=f"step={global_step}",
-            )
-
-            running_updates += 1
-            reduced_loss = all_reduce_mean(float(loss.detach().item()), ctx)
-            running_loss += reduced_loss
-
-            if ctx.is_main:
-                elapsed = max(1e-6, time.time() - train_start_time)
-                steps_done = max(1, global_step)
-                steps_left = max(0, int(total_steps_ref["value"]) - int(global_step))
-                sec_per_step = elapsed / steps_done
-                eta = format_eta(sec_per_step * steps_left)
-
-                LOGGER.info(
-                    "Step %d | Loss: %.6f | LR: %s | total_steps=%s",
-                    global_step, reduced_loss, lr, total_steps_ref["value"]
-                )
-
-                payload = {
-                    "running": True,
-                    "step": global_step,
-                    "loss": reduced_loss,
-                    "learning_rate": lr,
-                    "eta": eta,
-                    "tokens_per_step": int(
-                        cfg.max_seq_length
-                        * cfg.per_device_train_batch_size
-                        * cfg.gradient_accumulation_steps
-                        * max(1, ctx.world_size)
-                    ),
-                    "total_tokens": int(
-                        global_step
-                        * cfg.max_seq_length
-                        * cfg.per_device_train_batch_size
-                        * cfg.gradient_accumulation_steps
-                        * max(1, ctx.world_size)
-                    ),
-                    "epoch": epoch,
-                    "total_steps": int(total_steps_ref["value"]),
-                    "scheduler_total_steps": int(total_steps_ref["value"]),
-                    "cuda_memory": cuda_mem,
-                }
-                payload.update(
-                    _build_live_runtime_fields(
+                if (global_step % cfg.lr_adjust_interval_steps) == 0:
+                    changed, proposed_total_steps, info = maybe_adjust_scheduler_from_progress(
                         scheduler=scheduler,
+                        cfg=cfg,
+                        ctx=ctx,
                         cache_dir=cache_dir,
                         csv_total_samples_est=csv_total_samples_est,
-                        cfg=cfg,
+                        global_step=global_step,
+                        force=False,
                     )
-                )
-                status_writer.write(payload)
+                    total_steps_ref["value"] = scheduler.total_steps
+                    if ctx.is_main and changed:
+                        LOGGER.info(
+                            "Scheduler angepasst | source=%s total_steps=%s -> %s rel_change=%.4f samples=%s frozen=%s",
+                            info["source"],
+                            info["current_total_steps"],
+                            proposed_total_steps,
+                            info["relative_change"],
+                            info["effective_total_samples"],
+                            scheduler.frozen,
+                        )
 
-            if cfg.max_steps is not None and global_step >= int(cfg.max_steps):
-                reached_max_steps = True
-                break
-            if global_step >= int(total_steps_ref["value"]):
-                reached_max_steps = True
-                break
+                lr = scheduler.step(global_step)
+                total_steps_ref["value"] = scheduler.total_steps
+
+                maybe_empty_cuda_cache(cfg, ctx, global_step)
+                cuda_mem = maybe_log_cuda_memory(
+                    cfg=cfg,
+                    ctx=ctx,
+                    global_step=global_step,
+                    prefix=f"step={global_step}",
+                )
+
+                running_updates += 1
+                reduced_loss = float(loss.detach().item()) if ctx.is_distributed else all_reduce_mean(float(loss.detach().item()), ctx)
+                running_loss += reduced_loss
+
+                if ctx.is_main:
+                    elapsed = max(1e-6, time.time() - train_start_time)
+                    steps_done = max(1, global_step)
+                    steps_left = max(0, int(total_steps_ref["value"]) - int(global_step))
+                    sec_per_step = elapsed / steps_done
+                    eta = format_eta(sec_per_step * steps_left)
+
+                    LOGGER.info(
+                        "Step %d | Loss: %.6f | LR: %s | total_steps=%s",
+                        global_step, reduced_loss, lr, total_steps_ref["value"]
+                    )
+
+                    payload = {
+                        "running": True,
+                        "step": global_step,
+                        "loss": reduced_loss,
+                        "learning_rate": lr,
+                        "eta": eta,
+                        "tokens_per_step": int(
+                            cfg.max_seq_length
+                            * cfg.per_device_train_batch_size
+                            * cfg.gradient_accumulation_steps
+                            * max(1, ctx.world_size)
+                        ),
+                        "total_tokens": int(
+                            global_step
+                            * cfg.max_seq_length
+                            * cfg.per_device_train_batch_size
+                            * cfg.gradient_accumulation_steps
+                            * max(1, ctx.world_size)
+                        ),
+                        "epoch": epoch,
+                        "total_steps": int(total_steps_ref["value"]),
+                        "scheduler_total_steps": int(total_steps_ref["value"]),
+                        "cuda_memory": cuda_mem,
+                    }
+                    payload.update(
+                        _build_live_runtime_fields(
+                            scheduler=scheduler,
+                            cache_dir=cache_dir,
+                            csv_total_samples_est=csv_total_samples_est,
+                            cfg=cfg,
+                        )
+                    )
+                    status_writer.write(payload)
+
+                if SHUTDOWN.stop:
+                    reached_max_steps = True
+                    break
+                if cfg.max_steps is not None and global_step >= int(cfg.max_steps):
+                    reached_max_steps = True
+                    break
+                if global_step >= int(total_steps_ref["value"]):
+                    reached_max_steps = True
+                    break
 
     do_tail_step = (
         accum_counter > 0
@@ -2168,7 +2148,7 @@ def train_epoch(
         )
 
         running_updates += 1
-        reduced_loss = all_reduce_mean(float(last_micro_loss_value or 0.0), ctx)
+        reduced_loss = float(last_micro_loss_value or 0.0) if ctx.is_distributed else all_reduce_mean(float(last_micro_loss_value or 0.0), ctx)
         running_loss += reduced_loss
 
         if ctx.is_main:
@@ -2484,8 +2464,35 @@ def main() -> int:
             if ctx.is_main:
                 LOGGER.info("Epoche %d abgeschlossen | avg_loss=%.6f", epoch, avg_loss)
 
-            if reached_max_steps or sync_stop(SHUTDOWN.stop, ctx):
+            if reached_max_steps or SHUTDOWN.stop:
                 break
+
+        if SHUTDOWN.stop:
+            if producer_proc is not None and producer_proc.is_alive():
+                try:
+                    producer_proc.terminate()
+                    producer_proc.join(timeout=5)
+                except Exception:
+                    pass
+
+            if ctx.is_main:
+                try:
+                    status_writer.write(
+                        {
+                            "running": False,
+                            "step": global_step,
+                            "loss": last_loss,
+                            "eta": "stopped",
+                            "status": "stopped",
+                            "done": False,
+                            "stopped": True,
+                            "save_dir": str(outdir),
+                        }
+                    )
+                    LOGGER.info("Training sauber durch Stop-Signal beendet.")
+                except Exception:
+                    pass
+            return 0
 
         barrier(ctx)
 
