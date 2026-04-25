@@ -1293,7 +1293,6 @@ class TokenizedShardIterableDataset(IterableDataset):
                 payload = pickle.load(f)
 
             samples = payload["samples"]
-            global_start = int(payload["global_start"])
 
             if self.shuffle:
                 rng = random.Random((self.epoch + 1) * 1000003 + shard_idx)
@@ -1305,10 +1304,17 @@ class TokenizedShardIterableDataset(IterableDataset):
             else:
                 order = list(range(len(samples)))
 
-            for local_idx in order:
-                global_idx = global_start + local_idx
-                if (global_idx % self.world_size) != self.rank:
-                    continue
+            # DDP safety: every rank must execute the same number of forward/backward
+            # passes per epoch. The previous global_idx % world_size split could leave
+            # different ranks with different numbers of samples at shard/epoch boundaries.
+            # Padding duplicates a few samples when needed so len(order) is divisible by
+            # world_size, then each rank takes positions rank, rank+world_size, ... .
+            order = _pad_order_for_even_ddp(order, self.world_size)
+            rank = int(self.rank)
+            world_size = max(1, int(self.world_size))
+
+            for pos in range(rank, len(order), world_size):
+                local_idx = order[pos]
                 item = samples[local_idx]
                 yield {
                     "input_ids": torch.tensor(item["input_ids"], dtype=torch.long),
@@ -1317,6 +1323,26 @@ class TokenizedShardIterableDataset(IterableDataset):
                 }
 
             shard_idx += 1
+
+
+def _pad_order_for_even_ddp(order: List[int], world_size: int) -> List[int]:
+    """Pad an index order so every DDP rank receives the same number of samples.
+
+    DDP requires all ranks to run the same sequence of collectives. If one rank
+    gets fewer batches, it can enter a scalar all_reduce while another rank is
+    still inside DDP's gradient all_reduce, causing an NCCL watchdog timeout.
+    """
+    world_size = max(1, int(world_size))
+    if world_size <= 1 or not order:
+        return order
+
+    remainder = len(order) % world_size
+    if remainder == 0:
+        return order
+
+    needed = world_size - remainder
+    repeats = int(math.ceil(needed / float(len(order))))
+    return order + ((order * repeats)[:needed])
 
 
 def _make_bucketed_shuffle_order(samples: List[Dict[str, Any]], rng: random.Random) -> List[int]:
@@ -1921,7 +1947,12 @@ def train_epoch(
     last_micro_loss_value: Optional[float] = None
 
     for batch in loader:
-        if sync_stop(SHUTDOWN.stop, ctx):
+        # Avoid a per-microbatch scalar all_reduce in DDP. Calling sync_stop()
+        # here can race with DDP gradient all_reduces if ranks reach the top of
+        # the loop at different times, producing NumelIn=1 vs gradient-bucket
+        # collective mismatches. In distributed mode, shutdown is handled by the
+        # launcher/process signals and by sync points after full epochs/steps.
+        if not ctx.is_distributed and SHUTDOWN.stop:
             break
 
         batch = move_batch(batch, ctx.device)
@@ -2074,7 +2105,22 @@ def train_epoch(
                 reached_max_steps = True
                 break
 
-    if accum_counter > 0 and not reached_max_steps and not sync_stop(SHUTDOWN.stop, ctx):
+    do_tail_step = (
+        accum_counter > 0
+        and not reached_max_steps
+        and not SHUTDOWN.stop
+        and not ctx.is_distributed
+    )
+
+    if ctx.is_distributed and accum_counter > 0 and not reached_max_steps and ctx.is_main:
+        LOGGER.info(
+            "DDP: überspringe unvollständigen Gradient-Accumulation-Tail am Epoch-Ende "
+            "(accum_counter=%s, gradient_accumulation_steps=%s), um Collective-Mismatch zu vermeiden.",
+            accum_counter,
+            cfg.gradient_accumulation_steps,
+        )
+
+    if do_tail_step:
         if scaler is not None and getattr(scaler, "is_enabled", lambda: False)():
             scaler.unscale_(optimizer)
 
