@@ -930,18 +930,23 @@ class DDPTrainingManager:
         self.state.log.append("Stop-Signal gesetzt. Beende Trainingsprozess …")
 
         try:
-            if os.name != "nt":
-                os.killpg(proc.pid, signal.SIGTERM)
-            else:
-                proc.terminate()
+            # Graceful Stop:
+            # Nur den torchrun/Launcher-Prozess terminieren. torchrun leitet SIGTERM
+            # an die Worker weiter und kann die DDP-Prozessgruppe sauber abbauen.
+            # Ein sofortiges os.killpg(..., SIGTERM) trifft Launcher und Worker
+            # gleichzeitig und fuehrt haeufig zu TCPStore/Broken-Pipe-Noise und -9.
+            proc.terminate()
         except Exception as exc:
             self.state.log.append(f"[STOP WARN] {exc}")
 
         def _kill_later(p: subprocess.Popen):
             try:
-                p.wait(timeout=20)
+                # Lange Sequenzen/DDP koennen noch einen laufenden CUDA-Step beenden.
+                # Deshalb nicht nach 20s hart killen.
+                p.wait(timeout=120)
             except Exception:
                 try:
+                    self.state.log.append("[STOP WARN] Graceful Stop Timeout, sende SIGKILL an Prozessgruppe.")
                     if os.name != "nt":
                         os.killpg(p.pid, signal.SIGKILL)
                     else:
