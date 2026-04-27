@@ -49,7 +49,7 @@ import torch.distributed as dist
 from torch import nn
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.optim import AdamW
-from torch.utils.data import DataLoader, IterableDataset
+from torch.utils.data import DataLoader, IterableDataset, get_worker_info
 from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
 
 from matelix_ngram_pipeline import (
@@ -1277,6 +1277,12 @@ class TokenizedShardIterableDataset(IterableDataset):
         self.epoch = int(epoch)
 
     def __iter__(self):
+        worker_info = get_worker_info()
+        worker_id = int(worker_info.id) if worker_info is not None else 0
+        num_workers = int(worker_info.num_workers) if worker_info is not None else 1
+        combined_world_size = max(1, int(self.world_size) * max(1, num_workers))
+        combined_rank = int(self.rank) + worker_id * max(1, int(self.world_size))
+
         shard_idx = 0
         while True:
             path = shard_file_path(self.cache_dir, shard_idx)
@@ -1308,7 +1314,7 @@ class TokenizedShardIterableDataset(IterableDataset):
 
             for local_idx in order:
                 global_idx = global_start + local_idx
-                if (global_idx % self.world_size) != self.rank:
+                if (global_idx % combined_world_size) != combined_rank:
                     continue
                 item = samples[local_idx]
                 yield {
@@ -1951,21 +1957,30 @@ def train_epoch(
                     pass
 
             try:
-                with autocast_ctx:
-                    outputs = model(**batch)
-                    loss = outputs.loss
+                micro_step = accum_counter + 1
+                should_step = micro_step >= cfg.gradient_accumulation_steps
+                backward_sync_ctx = (
+                    model.no_sync()
+                    if (ctx.is_distributed and isinstance(model, DDP) and not should_step)
+                    else nullcontext()
+                )
 
-                if not torch.isfinite(loss):
-                    raise FloatingPointError(f"Nicht-finite Loss erkannt: {float(loss.detach().item())}")
+                with backward_sync_ctx:
+                    with autocast_ctx:
+                        outputs = model(**batch)
+                        loss = outputs.loss
 
-                loss_value = float(loss.detach().item())
-                last_micro_loss_value = loss_value
-                loss_to_backprop = loss / cfg.gradient_accumulation_steps
+                    if not torch.isfinite(loss):
+                        raise FloatingPointError(f"Nicht-finite Loss erkannt: {float(loss.detach().item())}")
 
-                if scaler is not None and getattr(scaler, "is_enabled", lambda: False)():
-                    scaler.scale(loss_to_backprop).backward()
-                else:
-                    loss_to_backprop.backward()
+                    loss_value = float(loss.detach().item())
+                    last_micro_loss_value = loss_value
+                    loss_to_backprop = loss / cfg.gradient_accumulation_steps
+
+                    if scaler is not None and getattr(scaler, "is_enabled", lambda: False)():
+                        scaler.scale(loss_to_backprop).backward()
+                    else:
+                        loss_to_backprop.backward()
             except torch.OutOfMemoryError as oom:
                 try:
                     if ctx.device.type == "cuda":
@@ -2492,13 +2507,19 @@ def main() -> int:
             effective_warmup_steps = int(math.ceil(initial_total_steps * cfg.warmup_ratio))
         effective_warmup_steps = max(0, min(effective_warmup_steps, max(0, initial_total_steps - 1)))
 
-        loader = DataLoader(
-            dataset,
-            batch_size=cfg.per_device_train_batch_size,
-            num_workers=0,
-            pin_memory=(ctx.device.type == "cuda"),
-            collate_fn=collator,
-        )
+        num_loader_workers = max(0, int(cfg.dataloader_num_workers))
+        loader_kwargs: Dict[str, Any] = {
+            "dataset": dataset,
+            "batch_size": cfg.per_device_train_batch_size,
+            "num_workers": num_loader_workers,
+            "pin_memory": (ctx.device.type == "cuda"),
+            "collate_fn": collator,
+        }
+        if num_loader_workers > 0:
+            loader_kwargs["prefetch_factor"] = max(1, int(cfg.prefetch_factor))
+            loader_kwargs["persistent_workers"] = bool(cfg.persistent_workers)
+
+        loader = DataLoader(**loader_kwargs)
 
         optimizer = build_optimizer(model, cfg)
         scheduler = AdaptiveLRScheduler(
