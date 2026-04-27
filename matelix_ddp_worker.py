@@ -2027,7 +2027,11 @@ def train_epoch(
                 )
 
                 running_updates += 1
-                reduced_loss = float(loss.detach().item()) if ctx.is_distributed else all_reduce_mean(float(loss.detach().item()), ctx)
+                reduced_loss = (
+                    all_reduce_mean(float(loss.detach().item()), ctx)
+                    if ctx.is_distributed
+                    else float(loss.detach().item())
+                )
                 running_loss += reduced_loss
 
                 if ctx.is_main:
