@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import gc
 import hashlib
 import json
 import logging
@@ -2201,6 +2202,188 @@ def train_epoch(
     return avg_loss, global_step, reached_max_steps
 
 
+
+def save_model_artifacts(
+    *,
+    model: nn.Module,
+    tokenizer,
+    outdir: Path,
+    cfg: TrainConfig,
+    ctx: DistContext,
+    ngram_state,
+    skipped_samples: Optional[int] = None,
+) -> None:
+    """Speichert Modell, Tokenizer, optional gemergtes LoRA-Modell und Template-Metadaten.
+
+    Wichtig: Diese Funktion wird nur auf rank 0 ausgefuehrt. Sie ist bewusst
+    sowohl fuer normalen Abschluss als auch fuer vorzeitigen Stop nutzbar.
+    """
+    if not ctx.is_main:
+        return
+
+    outdir.mkdir(parents=True, exist_ok=True)
+
+    save_target = unwrap_model(model)
+    mode = (cfg.train_mode or "full").lower().strip()
+
+    if mode == "lora" and _PEFT_AVAILABLE:
+        save_target.save_pretrained(outdir)
+        tokenizer.save_pretrained(outdir)
+
+        if cfg.merge_lora_on_save:
+            try:
+                merge_source = save_target
+
+                if hasattr(merge_source, "merge_and_unload"):
+                    merged_target = merge_source.merge_and_unload()
+                elif hasattr(unwrap_model(model), "merge_and_unload"):
+                    merged_target = unwrap_model(model).merge_and_unload()
+                else:
+                    raise AttributeError(
+                        f"{merge_source.__class__.__name__} unterstuetzt merge_and_unload() nicht"
+                    )
+
+                merged_dir = outdir / "merged"
+                merged_dir.mkdir(parents=True, exist_ok=True)
+                merged_target.save_pretrained(merged_dir)
+                tokenizer.save_pretrained(merged_dir)
+                LOGGER.info("Gemergtes LoRA-Modell gespeichert nach: %s", merged_dir)
+            except Exception as merge_exc:
+                LOGGER.warning("LoRA-Merge beim Speichern fehlgeschlagen: %s", merge_exc)
+                LOGGER.warning("Adapter wurde trotzdem normal gespeichert: %s", outdir)
+    else:
+        save_target.save_pretrained(outdir)
+        tokenizer.save_pretrained(outdir)
+
+    template_info = {
+        "template_mode": cfg.template_mode,
+        "force_template": cfg.force_template,
+        "chat_template": getattr(tokenizer, "chat_template", "") or "",
+        "special_tokens": {
+            "pad_token": tokenizer.pad_token,
+            "eos_token": tokenizer.eos_token,
+            "bos_token": tokenizer.bos_token,
+        },
+        "max_history_turns": cfg.max_history_turns,
+        "strict_whole_turns": True,
+        "sort_by_length": bool(cfg.sort_by_length),
+        "bucketed_shuffle": True,
+        "use_ngrams": bool(cfg.use_ngrams),
+        "ngram_summary": ngram_summary_text(ngram_state),
+    }
+    if skipped_samples is not None:
+        template_info["skipped_samples"] = int(skipped_samples)
+
+
+    (outdir / "template_info.json").write_text(
+        json.dumps(template_info, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+
+
+def release_training_memory(
+    *,
+    ctx: DistContext,
+    model: Optional[nn.Module] = None,
+    optimizer: Optional[torch.optim.Optimizer] = None,
+    scheduler: Optional[Any] = None,
+    scaler: Optional[Any] = None,
+    loader: Optional[Any] = None,
+    dataset: Optional[Any] = None,
+    tokenizer: Optional[Any] = None,
+    producer_proc: Optional[mp.Process] = None,
+) -> None:
+    """Versucht Trainings-RAM/VRAM vor Prozessende explizit freizugeben.
+
+    Hinweis: Die Funktion leert interne Strukturen und verschiebt das Modell auf CPU.
+    Die aufrufende Funktion setzt danach ihre lokalen Variablen auf None, damit die
+    letzten starken Referenzen verschwinden und gc/empty_cache wirklich greifen.
+    """
+    try:
+        if producer_proc is not None and producer_proc.is_alive():
+            producer_proc.terminate()
+            producer_proc.join(timeout=5)
+    except Exception:
+        pass
+
+    try:
+        if optimizer is not None:
+            optimizer.zero_grad(set_to_none=True)
+            for group in getattr(optimizer, "param_groups", []):
+                group["params"] = []
+            try:
+                optimizer.state.clear()
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+    try:
+        if model is not None:
+            try:
+                unwrapped = unwrap_model(model)
+                unwrapped.to(torch.device("cpu"))
+            except Exception:
+                pass
+            try:
+                model.to(torch.device("cpu"))
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+    try:
+        del scheduler
+    except Exception:
+        pass
+    try:
+        del scaler
+    except Exception:
+        pass
+    try:
+        del loader
+    except Exception:
+        pass
+    try:
+        del dataset
+    except Exception:
+        pass
+    try:
+        del tokenizer
+    except Exception:
+        pass
+    try:
+        del model
+    except Exception:
+        pass
+
+    gc.collect()
+
+    try:
+        if ctx.device.type == "cuda" and torch.cuda.is_available():
+            torch.cuda.synchronize(ctx.device)
+            torch.cuda.empty_cache()
+            try:
+                torch.cuda.ipc_collect()
+            except Exception:
+                pass
+            try:
+                torch.cuda.reset_peak_memory_stats(ctx.device)
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+    try:
+        if getattr(torch.backends, "mps", None) and torch.backends.mps.is_available():
+            torch.mps.empty_cache()
+    except Exception:
+        pass
+
+    if ctx.is_main:
+        LOGGER.info("Training-Speicherfreigabe ausgefuehrt.")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", required=True, type=str)
@@ -2475,23 +2658,119 @@ def main() -> int:
                 except Exception:
                     pass
 
+            # Bei Stop trotzdem einen nutzbaren Zwischenstand speichern.
+            # Wichtig: Nur rank 0 schreibt Dateien; danach warten alle Ranks am Barrier.
             if ctx.is_main:
                 try:
-                    status_writer.write(
-                        {
-                            "running": False,
-                            "step": global_step,
-                            "loss": last_loss,
-                            "eta": "stopped",
-                            "status": "stopped",
-                            "done": False,
-                            "stopped": True,
-                            "save_dir": str(outdir),
-                        }
+                    final_meta = read_json_if_exists(producer_meta_path(cache_dir)) or {}
+                    final_progress = read_json_if_exists(producer_progress_path(cache_dir)) or {}
+                    final_skipped_samples = int(
+                        final_meta.get("skipped_samples", final_progress.get("skipped_samples", 0))
                     )
-                    LOGGER.info("Training sauber durch Stop-Signal beendet.")
-                except Exception:
-                    pass
+                    final_cuda_mem = cuda_memory_snapshot(ctx.device)
+
+                    LOGGER.info("Stop-Signal erkannt. Speichere Zwischenstand nach: %s", outdir)
+                    save_model_artifacts(
+                        model=model,
+                        tokenizer=tokenizer,
+                        outdir=outdir,
+                        cfg=cfg,
+                        ctx=ctx,
+                        ngram_state=ngram_state,
+                        skipped_samples=final_skipped_samples,
+                    )
+
+                    status_payload = {
+                        "running": False,
+                        "step": global_step,
+                        "loss": last_loss,
+                        "learning_rate": optimizer.param_groups[0]["lr"],
+                        "eta": "stopped",
+                        "status": "stopped_saved",
+                        "done": False,
+                        "stopped": True,
+                        "saved": True,
+                        "save_dir": str(outdir),
+                        "cuda_memory": final_cuda_mem,
+                        "csv_total_samples_est": int(total_samples_est),
+                        "skipped_samples": int(final_skipped_samples),
+                        "producer_progress": final_progress,
+                        "producer_meta": final_meta,
+                        "scheduler_state": scheduler.state_dict(),
+                        "scheduler_total_steps": int(total_steps_ref["value"]),
+                        "total_steps": int(total_steps_ref["value"]),
+                        "warmup_steps": int(effective_warmup_steps),
+                        "train_mode": cfg.train_mode,
+                        "template_mode": cfg.template_mode,
+                        "force_template": cfg.force_template,
+                        "max_history_turns": cfg.max_history_turns,
+                        "strict_whole_turns": True,
+                        "sort_by_length": bool(cfg.sort_by_length),
+                        "bucketed_shuffle": True,
+                        "use_ngrams": bool(cfg.use_ngrams),
+                        "ngram_summary": ngram_summary_text(ngram_state),
+                        "adaptive_scheduler": bool(cfg.adaptive_scheduler),
+                        "adaptive_scheduler_frozen": bool(scheduler.frozen),
+                        "adaptive_scheduler_never_increase_lr": bool(cfg.adaptive_scheduler_never_increase_lr),
+                        "adaptive_scheduler_only_extend_steps": bool(cfg.adaptive_scheduler_only_extend_steps),
+                        "scheduler_mode": (
+                            f"adaptive_{cfg.lr_schedule}" if cfg.adaptive_scheduler else str(cfg.lr_schedule)
+                        ),
+                    }
+                    status_payload.update(
+                        _build_live_runtime_fields(
+                            scheduler=scheduler,
+                            cache_dir=cache_dir,
+                            csv_total_samples_est=total_samples_est,
+                            cfg=cfg,
+                        )
+                    )
+                    status_writer.write(status_payload)
+                    LOGGER.info("Training sauber durch Stop-Signal beendet. Modell gespeichert nach: %s", outdir)
+                except Exception as save_exc:
+                    LOGGER.error("Speichern beim Stop fehlgeschlagen: %s", save_exc)
+                    LOGGER.error(traceback.format_exc())
+                    try:
+                        status_writer.write(
+                            {
+                                "running": False,
+                                "step": global_step,
+                                "loss": last_loss,
+                                "eta": "stopped",
+                                "status": "stop_save_error",
+                                "done": False,
+                                "stopped": True,
+                                "saved": False,
+                                "error": f"{save_exc.__class__.__name__}: {save_exc}",
+                                "save_dir": str(outdir),
+                            }
+                        )
+                    except Exception:
+                        pass
+                    return 1
+
+            release_training_memory(
+                ctx=ctx,
+                model=model,
+                optimizer=optimizer,
+                scheduler=scheduler,
+                scaler=scaler,
+                loader=loader,
+                dataset=dataset,
+                tokenizer=tokenizer,
+                producer_proc=producer_proc,
+            )
+            model = None
+            tokenizer = None
+            optimizer = None
+            scheduler = None
+            scaler = None
+            loader = None
+            dataset = None
+            producer_proc = None
+            gc.collect()
+
+            barrier(ctx)
             return 0
 
         barrier(ctx)
@@ -2524,61 +2803,14 @@ def main() -> int:
         final_cuda_mem = cuda_memory_snapshot(ctx.device)
 
         if ctx.is_main:
-            save_target = unwrap_model(model)
-            mode = (cfg.train_mode or "full").lower().strip()
-
-            if mode == "lora" and _PEFT_AVAILABLE:
-                save_target.save_pretrained(outdir)
-                tokenizer.save_pretrained(outdir)
-
-                if cfg.merge_lora_on_save:
-                    try:
-                        merge_source = save_target
-
-                        if hasattr(merge_source, "merge_and_unload"):
-                            merged_target = merge_source.merge_and_unload()
-                        elif hasattr(unwrap_model(model), "merge_and_unload"):
-                            merged_target = unwrap_model(model).merge_and_unload()
-                        else:
-                            raise AttributeError(
-                                f"{merge_source.__class__.__name__} unterstützt merge_and_unload() nicht"
-                            )
-
-                        merged_dir = outdir / "merged"
-                        merged_dir.mkdir(parents=True, exist_ok=True)
-                        merged_target.save_pretrained(merged_dir)
-                        tokenizer.save_pretrained(merged_dir)
-                        LOGGER.info("Gemergtes LoRA-Modell gespeichert nach: %s", merged_dir)
-                    except Exception as merge_exc:
-                        LOGGER.warning("LoRA-Merge beim Speichern fehlgeschlagen: %s", merge_exc)
-                        LOGGER.warning("Adapter wurde trotzdem normal gespeichert: %s", outdir)
-            else:
-                save_target.save_pretrained(outdir)
-                tokenizer.save_pretrained(outdir)
-
-            (outdir / "template_info.json").write_text(
-                json.dumps(
-                    {
-                        "template_mode": cfg.template_mode,
-                        "force_template": cfg.force_template,
-                        "chat_template": getattr(tokenizer, "chat_template", "") or "",
-                        "special_tokens": {
-                            "pad_token": tokenizer.pad_token,
-                            "eos_token": tokenizer.eos_token,
-                            "bos_token": tokenizer.bos_token,
-                        },
-                        "max_history_turns": cfg.max_history_turns,
-                        "strict_whole_turns": True,
-                        "skipped_samples": final_skipped_samples,
-                        "sort_by_length": bool(cfg.sort_by_length),
-                        "bucketed_shuffle": True,
-                        "use_ngrams": bool(cfg.use_ngrams),
-                        "ngram_summary": ngram_summary_text(ngram_state),
-                    },
-                    ensure_ascii=False,
-                    indent=2,
-                ),
-                encoding="utf-8",
+            save_model_artifacts(
+                model=model,
+                tokenizer=tokenizer,
+                outdir=outdir,
+                cfg=cfg,
+                ctx=ctx,
+                ngram_state=ngram_state,
+                skipped_samples=final_skipped_samples,
             )
 
             final_payload = {
@@ -2643,6 +2875,27 @@ def main() -> int:
             }
             status_writer.write(final_payload)
             LOGGER.info("Training abgeschlossen. Modell gespeichert nach: %s", outdir)
+
+        release_training_memory(
+            ctx=ctx,
+            model=model,
+            optimizer=optimizer,
+            scheduler=scheduler,
+            scaler=scaler,
+            loader=loader,
+            dataset=dataset,
+            tokenizer=tokenizer,
+            producer_proc=producer_proc,
+        )
+        model = None
+        tokenizer = None
+        optimizer = None
+        scheduler = None
+        scaler = None
+        loader = None
+        dataset = None
+        producer_proc = None
+        gc.collect()
 
         barrier(ctx)
         return 0
