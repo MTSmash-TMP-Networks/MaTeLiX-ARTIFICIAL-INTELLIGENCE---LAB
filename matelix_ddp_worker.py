@@ -1959,11 +1959,13 @@ def train_epoch(
             try:
                 micro_step = accum_counter + 1
                 should_step = micro_step >= cfg.gradient_accumulation_steps
-                backward_sync_ctx = (
-                    model.no_sync()
-                    if (ctx.is_distributed and isinstance(model, DDP) and not should_step)
-                    else nullcontext()
-                )
+                # WICHTIG (DDP + IterableDataset): Bei mehreren GPUs koennen
+                # einzelne Ranks in der Anzahl der Microbatches leicht auseinanderlaufen.
+                # no_sync() auf manchen Ranks, waehrend andere bereits synchronisieren,
+                # fuehrt dann zu Collective-Mismatch/Haengern. Deshalb synchronisieren wir
+                # im Distributed-Fall jeden Backward und nutzen Grad-Accumulation nur fuer
+                # den Optimizer-Step-Rhythmus.
+                backward_sync_ctx = nullcontext()
 
                 with backward_sync_ctx:
                     with autocast_ctx:
