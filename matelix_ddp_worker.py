@@ -672,11 +672,25 @@ def _apply_history_limit(turns: List[StructuredTurn], max_history_turns: Optiona
     return turns[-max_history_turns:]
 
 
+def _csv_has_column(csv_path: str, column_name: str) -> bool:
+    try:
+        with open(csv_path, "r", encoding="utf-8") as f:
+            reader = csv.DictReader(f)
+            names = reader.fieldnames or []
+            return column_name in names
+    except Exception:
+        return False
+
+
 def build_examples_stream(cfg: TrainConfig) -> Iterator[Any]:
     if cfg.template_mode == "chat":
-        return chat_structured_iter(cfg.csv_path, shuffle_threads=bool(cfg.shuffle))
+        if _csv_has_column(cfg.csv_path, "id") and _csv_has_column(cfg.csv_path, "Assistentin"):
+            return chat_structured_iter(cfg.csv_path, shuffle_threads=bool(cfg.shuffle))
+        return column_iter(cfg.csv_path, cfg.column_name)
     if cfg.template_mode == "dialogplus":
-        return dialogplus_structured_iter(cfg.csv_path, shuffle_threads=bool(cfg.shuffle))
+        if _csv_has_column(cfg.csv_path, "id") and _csv_has_column(cfg.csv_path, "Assistentin"):
+            return dialogplus_structured_iter(cfg.csv_path, shuffle_threads=bool(cfg.shuffle))
+        return column_iter(cfg.csv_path, cfg.column_name)
     return column_iter(cfg.csv_path, cfg.column_name)
 
 
@@ -798,7 +812,8 @@ def count_examples_fast(cfg: TrainConfig) -> int:
     count = 0
     with open(cfg.csv_path, "r", encoding="utf-8") as f:
         reader = csv.DictReader(f)
-        if cfg.template_mode in {"chat", "dialogplus"}:
+        has_chat_columns = bool(reader.fieldnames) and ("id" in reader.fieldnames) and ("Assistentin" in reader.fieldnames)
+        if cfg.template_mode in {"chat", "dialogplus"} and has_chat_columns:
             for row in reader:
                 rid = normalize_id(row.get("id", ""))
                 asst = (row.get("Assistentin") or "").strip()
