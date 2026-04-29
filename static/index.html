@@ -481,7 +481,7 @@ form label {
       <label for="save_dir">Speicher-Ordner (Basis):</label>
       <input type="text" id="save_dir" value="./training_outputs">
 
-      <label for="template_mode">Vorlagen-Typ:</label>
+      <label for="template_mode" id="template_mode_label">Vorlagen-Typ:</label>
       <select id="template_mode">
         <option value="dialogplus" selected>Dialog (Chat-Template)</option>
         <option value="plain">Nur Textspalte</option>
@@ -1505,17 +1505,30 @@ document.getElementById('dataset_source').addEventListener('change', applyDatase
 window.addEventListener('DOMContentLoaded', () => { fillDatasetDropdown(); applyDatasetSourceUI(); });
 
 
+let lastLocalTemplateMode = document.getElementById('template_mode').value;
+
 function applyDatasetSourceUI() {
   const src = document.getElementById('dataset_source').value;
   const isHf = src === 'huggingface';
   const csvSelect = document.getElementById('csv_path_select');
   const csvInput = document.getElementById('csv_path');
+  const templateMode = document.getElementById('template_mode');
+  const templateModeLabel = document.getElementById('template_mode_label');
   document.getElementById('hf_dataset_id').style.display = isHf ? '' : 'none';
   document.getElementById('hf_dataset_id_label').style.display = isHf ? '' : 'none';
   document.getElementById('hf_dataset_split').style.display = isHf ? '' : 'none';
   document.getElementById('hf_dataset_split_label').style.display = isHf ? '' : 'none';
   csvSelect.disabled = isHf;
   csvInput.disabled = isHf;
+  if (isHf) {
+    lastLocalTemplateMode = templateMode.value;
+    templateMode.value = 'plain';
+  } else {
+    templateMode.value = lastLocalTemplateMode || 'dialogplus';
+  }
+  templateMode.style.display = isHf ? 'none' : '';
+  templateModeLabel.style.display = isHf ? 'none' : '';
+  applyTemplateModeUI();
 }
 
 const modelDirSelect = document.getElementById('model_dir_select');
