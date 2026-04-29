@@ -512,7 +512,9 @@ def _resolve_hf_dataset_to_csv(cfg: WebTrainConfig) -> str:
 
     if not out_path.exists():
         with open(out_path, "w", encoding="utf-8", newline="") as f:
-            writer = csv.writer(f)
+            # Explizit quoten, damit mehrzeilige/kommahaltige Texte aus HF-Datasets
+            # robust serialisiert werden und kein `_csv.Error: need to escape` auftritt.
+            writer = csv.writer(f, quoting=csv.QUOTE_ALL)
             writer.writerow([chosen_column])
             if conversion_mode == "input_output":
                 input_col = lowered_to_real["input"]
