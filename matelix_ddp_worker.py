@@ -1655,7 +1655,8 @@ class AdaptiveLRScheduler:
 
     def _apply_lr(self, lr: float, global_step: int) -> float:
         lr = float(max(0.0, lr))
-        if self.never_increase_lr and global_step > 0:
+        warmup_active = self.warmup_steps > 0 and global_step < self.warmup_steps
+        if self.never_increase_lr and global_step > 0 and not warmup_active:
             lr = min(lr, float(self.last_lr))
         for group in self.optimizer.param_groups:
             group["lr"] = lr
