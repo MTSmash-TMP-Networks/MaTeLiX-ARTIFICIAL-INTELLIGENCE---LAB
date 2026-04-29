@@ -19,6 +19,7 @@ from __future__ import annotations
 import asyncio
 import csv
 import gc
+import hashlib
 import json
 import os
 import platform
@@ -330,6 +331,9 @@ TRAIN_STATE = TrainingState()
 class WebTrainConfig(MatelixBaseModel):
     model_dir: str = Field(...)
     csv_path: str = Field(...)
+    dataset_source: str = "local_csv"
+    hf_dataset_id: Optional[str] = None
+    hf_dataset_split: str = "train"
 
     save_dir: Optional[str] = None
     template_mode: str = "chat"
@@ -447,6 +451,58 @@ class WebTrainConfig(MatelixBaseModel):
     log_cuda_memory: bool = True
     cuda_memory_log_interval_steps: int = 25
     cuda_empty_cache_interval_steps: int = 0
+
+
+def _resolve_hf_dataset_to_csv(cfg: WebTrainConfig) -> str:
+    if (cfg.dataset_source or "local_csv").strip().lower() != "huggingface":
+        return cfg.csv_path
+
+    dataset_id = (cfg.hf_dataset_id or "").strip()
+    if not dataset_id:
+        raise HTTPException(status_code=400, detail="hf_dataset_id fehlt für HuggingFace-Datasets.")
+
+    split_name = (cfg.hf_dataset_split or "train").strip() or "train"
+    config_name = None
+    requested_column = (cfg.column_name or "text").strip() or "text"
+
+    try:
+        from datasets import load_dataset  # type: ignore
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"datasets-Paket fehlt: {exc}")
+
+    try:
+        ds = load_dataset(dataset_id, name=config_name, split=split_name)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"HuggingFace Dataset konnte nicht geladen werden: {exc}")
+
+    column_name = requested_column
+    if column_name not in ds.column_names:
+        string_cols = [c for c in ds.column_names if getattr(ds.features.get(c), "dtype", None) == "string"]
+        if len(string_cols) == 1:
+            column_name = string_cols[0]
+        else:
+            cols = ", ".join(ds.column_names)
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Spalte '{requested_column}' nicht vorhanden. Verfügbar: {cols}. "
+                    "Bitte 'column_name' passend setzen (bei mehreren Textspalten keine automatische Auswahl möglich)."
+                ),
+            )
+
+    key = hashlib.sha256(f"{dataset_id}:{config_name or '-'}:{split_name}:{column_name}".encode("utf-8")).hexdigest()[:12]
+    safe_name = dataset_id.replace("/", "__").replace(":", "_")
+    cfg_part = (config_name or "default").replace("/", "__").replace(":", "_")
+    out_path = DATASETS_DIR / f"hf_{safe_name}_{cfg_part}_{split_name}_{column_name}_{key}.csv"
+
+    if not out_path.exists():
+        with open(out_path, "w", encoding="utf-8", newline="") as f:
+            writer = csv.writer(f)
+            writer.writerow([column_name])
+            for value in ds[column_name]:
+                writer.writerow(["" if value is None else str(value)])
+
+    return f"./datasets/{out_path.name}"
 
 
 def get_new_output_dir(model_name: str, base_dir: Optional[Path] = None) -> Path:
@@ -1384,6 +1440,7 @@ def api_trainings():
 
 @app.post("/start")
 def api_start_training(cfg: WebTrainConfig):
+    cfg.csv_path = _resolve_hf_dataset_to_csv(cfg)
     res = TRAIN_MANAGER.start(cfg)
     if not res.get("running"):
         return JSONResponse(res, status_code=400)

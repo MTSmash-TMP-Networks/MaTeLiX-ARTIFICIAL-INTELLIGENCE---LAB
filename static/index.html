@@ -466,6 +466,18 @@ form label {
       <select id="csv_path_select"></select>
       <input type="text" id="csv_path" style="display:none;" placeholder="Pfad zur CSV">
 
+      <label for="dataset_source">Dataset-Quelle:</label>
+      <select id="dataset_source">
+        <option value="local_csv" selected>Lokale CSV</option>
+        <option value="huggingface">HuggingFace Dataset</option>
+      </select>
+
+      <label for="hf_dataset_id" id="hf_dataset_id_label" style="display:none;">HF Dataset ID:</label>
+      <input type="text" id="hf_dataset_id" style="display:none;" placeholder="z. B. tatsu-lab/alpaca">
+
+      <label for="hf_dataset_split" id="hf_dataset_split_label" style="display:none;">HF Split:</label>
+      <input type="text" id="hf_dataset_split" style="display:none;" value="train" placeholder="train">
+
       <label for="save_dir">Speicher-Ordner (Basis):</label>
       <input type="text" id="save_dir" value="./training_outputs">
 
@@ -1489,7 +1501,22 @@ function updateCsvInput() {
   }
 }
 document.getElementById('csv_path_select').addEventListener('change', updateCsvInput);
-window.addEventListener('DOMContentLoaded', fillDatasetDropdown);
+document.getElementById('dataset_source').addEventListener('change', applyDatasetSourceUI);
+window.addEventListener('DOMContentLoaded', () => { fillDatasetDropdown(); applyDatasetSourceUI(); });
+
+
+function applyDatasetSourceUI() {
+  const src = document.getElementById('dataset_source').value;
+  const isHf = src === 'huggingface';
+  const csvSelect = document.getElementById('csv_path_select');
+  const csvInput = document.getElementById('csv_path');
+  document.getElementById('hf_dataset_id').style.display = isHf ? '' : 'none';
+  document.getElementById('hf_dataset_id_label').style.display = isHf ? '' : 'none';
+  document.getElementById('hf_dataset_split').style.display = isHf ? '' : 'none';
+  document.getElementById('hf_dataset_split_label').style.display = isHf ? '' : 'none';
+  csvSelect.disabled = isHf;
+  csvInput.disabled = isHf;
+}
 
 const modelDirSelect = document.getElementById('model_dir_select');
 const modelDirInput = document.getElementById('model_dir');
@@ -1538,11 +1565,18 @@ document.getElementById("settings").onsubmit = async e => {
     ? document.getElementById("csv_path").value.trim()
     : document.getElementById("csv_path_select").value;
 
-  if (!csvPath) { alert("Bitte csv_path angeben."); return; }
+  const datasetSource = document.getElementById("dataset_source").value;
+  const hfDatasetId = document.getElementById("hf_dataset_id").value.trim();
+  const hfDatasetSplit = document.getElementById("hf_dataset_split").value.trim() || "train";
+  if (datasetSource === "local_csv" && !csvPath) { alert("Bitte csv_path angeben."); return; }
+  if (datasetSource === "huggingface" && !hfDatasetId) { alert("Bitte HF Dataset ID angeben."); return; }
 
   const payload = {
     model_dir: modelDir,
-    csv_path: csvPath,
+    dataset_source: datasetSource,
+    hf_dataset_id: hfDatasetId || null,
+    hf_dataset_split: hfDatasetSplit,
+    csv_path: csvPath || "./datasets/placeholder.csv",
     save_dir: document.getElementById("save_dir").value.trim() || null,
 
     template_mode: document.getElementById("template_mode").value,
