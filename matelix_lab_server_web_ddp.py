@@ -453,6 +453,13 @@ class WebTrainConfig(MatelixBaseModel):
     cuda_empty_cache_interval_steps: int = 0
 
 
+def _wrap_with_start_stop_token(text: str) -> str:
+    payload = (text or "").strip()
+    if not payload:
+        return ""
+    return f"<s>{payload}</s>"
+
+
 def _resolve_hf_dataset_to_csv(cfg: WebTrainConfig) -> str:
     if (cfg.dataset_source or "local_csv").strip().lower() != "huggingface":
         return cfg.csv_path
@@ -523,10 +530,10 @@ def _resolve_hf_dataset_to_csv(cfg: WebTrainConfig) -> str:
                     in_val = "" if row.get(input_col) is None else str(row.get(input_col))
                     out_val = "" if row.get(output_col) is None else str(row.get(output_col))
                     merged = f"Input:\n{in_val.strip()}\n\nOutput:\n{out_val.strip()}".strip()
-                    writer.writerow([merged])
+                    writer.writerow([_wrap_with_start_stop_token(merged)])
             else:
                 for value in ds[chosen_column]:
-                    writer.writerow(["" if value is None else str(value)])
+                    writer.writerow([_wrap_with_start_stop_token("" if value is None else str(value))])
 
     cfg.column_name = chosen_column
 
