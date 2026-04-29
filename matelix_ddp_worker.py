@@ -112,6 +112,7 @@ class TrainConfig:
 
     shuffle: bool = False
     sort_by_length: bool = True
+    fixed_padding: bool = True
     dataloader_num_workers: int = 0
     max_grad_norm: float = 1.0
     weight_decay: float = 0.01
@@ -190,6 +191,7 @@ class TrainConfig:
         self.adaptive_scheduler_only_extend_steps = bool(self.adaptive_scheduler_only_extend_steps)
         self.seed = int(self.seed)
         self.dataloader_num_workers = int(self.dataloader_num_workers)
+        self.fixed_padding = bool(self.fixed_padding)
         self.ddp_timeout_minutes = int(self.ddp_timeout_minutes)
         self.ddp_find_unused_parameters = bool(self.ddp_find_unused_parameters)
         self.ddp_static_graph = bool(self.ddp_static_graph)
@@ -1347,12 +1349,18 @@ def _make_bucketed_shuffle_order(samples: List[Dict[str, Any]], rng: random.Rand
 
 
 class DataCollator:
-    def __init__(self, pad_token_id: int, pad_to_multiple_of: int = 8):
+    def __init__(
+        self,
+        pad_token_id: int,
+        pad_to_multiple_of: int = 8,
+        fixed_length: Optional[int] = None,
+    ):
         self.pad_token_id = int(pad_token_id)
         self.pad_to_multiple_of = int(pad_to_multiple_of)
+        self.fixed_length = int(fixed_length) if fixed_length and int(fixed_length) > 0 else None
 
     def __call__(self, features: Sequence[Dict[str, torch.Tensor]]) -> Dict[str, torch.Tensor]:
-        max_len = max(int(x["input_ids"].numel()) for x in features)
+        max_len = self.fixed_length or max(int(x["input_ids"].numel()) for x in features)
         if self.pad_to_multiple_of > 1:
             max_len = int(math.ceil(max_len / self.pad_to_multiple_of) * self.pad_to_multiple_of)
 
@@ -2500,7 +2508,11 @@ def main() -> int:
             sort_by_length=bool(cfg.sort_by_length),
             epoch=0,
         )
-        collator = DataCollator(tokenizer.pad_token_id or tokenizer.eos_token_id or 0, pad_to_multiple_of=8)
+        collator = DataCollator(
+            tokenizer.pad_token_id or tokenizer.eos_token_id or 0,
+            pad_to_multiple_of=8,
+            fixed_length=(cfg.max_seq_length if cfg.fixed_padding else None),
+        )
 
         initial_total_steps = estimate_total_steps_from_samples(total_samples_est, cfg, ctx)
 
