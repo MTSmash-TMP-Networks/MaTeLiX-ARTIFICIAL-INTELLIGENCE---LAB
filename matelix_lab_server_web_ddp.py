@@ -462,7 +462,7 @@ def _resolve_hf_dataset_to_csv(cfg: WebTrainConfig) -> str:
         raise HTTPException(status_code=400, detail="hf_dataset_id fehlt für HuggingFace-Datasets.")
 
     split_name = (cfg.hf_dataset_split or "train").strip() or "train"
-    column_name = (cfg.column_name or "text").strip() or "text"
+    requested_column = (cfg.column_name or "text").strip() or "text"
 
     try:
         from datasets import load_dataset  # type: ignore
@@ -474,20 +474,59 @@ def _resolve_hf_dataset_to_csv(cfg: WebTrainConfig) -> str:
     except Exception as exc:
         raise HTTPException(status_code=400, detail=f"HuggingFace Dataset konnte nicht geladen werden: {exc}")
 
-    if column_name not in ds.column_names:
-        cols = ", ".join(ds.column_names)
-        raise HTTPException(status_code=400, detail=f"Spalte '{column_name}' nicht vorhanden. Verfügbar: {cols}")
+    available_cols = {str(c).strip(): c for c in ds.column_names}
+    lowered_to_real = {str(c).strip().lower(): str(c).strip() for c in ds.column_names}
 
-    key = hashlib.sha256(f"{dataset_id}:{split_name}:{column_name}".encode("utf-8")).hexdigest()[:12]
+    chosen_column: Optional[str] = None
+    conversion_mode = "direct"
+
+    if requested_column in available_cols:
+        chosen_column = requested_column
+    else:
+        candidate_order = ["text", "output", "answer", "response", "completion", "prompt"]
+        for key_name in candidate_order:
+            real = lowered_to_real.get(key_name)
+            if real is not None:
+                chosen_column = real
+                break
+
+        has_input = lowered_to_real.get("input") is not None
+        has_output = lowered_to_real.get("output") is not None
+        if has_input and has_output:
+            conversion_mode = "input_output"
+            chosen_column = "text"
+
+    if chosen_column is None:
+        cols = ", ".join(ds.column_names)
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Spalte '{requested_column}' nicht vorhanden und keine Standard-Spalte erkannt. "
+                f"Verfügbar: {cols}"
+            ),
+        )
+
+    key = hashlib.sha256(f"{dataset_id}:{split_name}:{requested_column}:{conversion_mode}:{chosen_column}".encode("utf-8")).hexdigest()[:12]
     safe_name = dataset_id.replace("/", "__").replace(":", "_")
-    out_path = DATASETS_DIR / f"hf_{safe_name}_{split_name}_{column_name}_{key}.csv"
+    out_path = DATASETS_DIR / f"hf_{safe_name}_{split_name}_{chosen_column}_{key}.csv"
 
     if not out_path.exists():
         with open(out_path, "w", encoding="utf-8", newline="") as f:
             writer = csv.writer(f)
-            writer.writerow([column_name])
-            for value in ds[column_name]:
-                writer.writerow(["" if value is None else str(value)])
+            writer.writerow([chosen_column])
+            if conversion_mode == "input_output":
+                input_col = lowered_to_real["input"]
+                output_col = lowered_to_real["output"]
+                for row in ds:
+                    in_val = "" if row.get(input_col) is None else str(row.get(input_col))
+                    out_val = "" if row.get(output_col) is None else str(row.get(output_col))
+                    merged = f"Input:\n{in_val.strip()}\n\nOutput:\n{out_val.strip()}".strip()
+                    writer.writerow([merged])
+            else:
+                for value in ds[chosen_column]:
+                    writer.writerow(["" if value is None else str(value)])
+
+    cfg.column_name = chosen_column
 
     return f"./datasets/{out_path.name}"
 
