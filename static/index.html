@@ -957,6 +957,10 @@ Hier folgt eine weitere Trainingszeile.</pre>
                 <canvas id="lossChart"></canvas>
               </div>
 
+              <div class="chart-wrap" style="margin-top:12px;">
+                <canvas id="lrChart"></canvas>
+              </div>
+
               <div style="margin-top:12px;" class="preview">
                 <div style="display:flex; align-items:center; justify-content:space-between; gap:10px;">
                   <div style="font-family:var(--mono); font-weight:900; color:var(--brand2); text-transform:uppercase; font-size:13px;">
@@ -1195,21 +1199,23 @@ Hier folgt eine weitere Trainingszeile.</pre>
     };
     setInterval(pollLivePreview, 2000);
 
-    // ---------- Loss chart ----------
+    // ---------- Live charts ----------
     window.lossData=[]; window.lossSteps=[];
+    window.lrData=[]; window.lrSteps=[];
     let lossChart=null;
+    let lrChart=null;
 
-    function initLossChart(){
-      const canvas = document.getElementById('lossChart');
-      if (!canvas || typeof Chart === 'undefined') return;
+    function buildLineChart(canvasId, label, borderColor){
+      const canvas = document.getElementById(canvasId);
+      if (!canvas || typeof Chart === 'undefined') return null;
       const ctx = canvas.getContext('2d');
-      lossChart = new Chart(ctx,{
+      return new Chart(ctx,{
         type:'line',
         data:{ labels:[], datasets:[{
-          label:'Loss',
+          label,
           data:[],
           fill:false,
-          borderColor:'rgba(77,184,255,.95)',
+          borderColor,
           borderWidth: 2,
           tension:0.25,
           pointRadius: 0
@@ -1226,11 +1232,21 @@ Hier folgt eine weitere Trainingszeile.</pre>
         }
       });
     }
-    function updateChart(){
-      if (!lossChart) return;
-      lossChart.data.labels = window.lossSteps;
-      lossChart.data.datasets[0].data = window.lossData;
-      lossChart.update('none');
+    function initCharts(){
+      lossChart = buildLineChart('lossChart', 'Loss', 'rgba(77,184,255,.95)');
+      lrChart = buildLineChart('lrChart', 'Lernrate', 'rgba(67,240,181,.95)');
+    }
+    function updateCharts(){
+      if (lossChart){
+        lossChart.data.labels = window.lossSteps;
+        lossChart.data.datasets[0].data = window.lossData;
+        lossChart.update('none');
+      }
+      if (lrChart){
+        lrChart.data.labels = window.lrSteps;
+        lrChart.data.datasets[0].data = window.lrData;
+        lrChart.update('none');
+      }
     }
 
     // ---------- Logs WS ----------
@@ -1259,7 +1275,7 @@ Hier folgt eine weitere Trainingszeile.</pre>
             if(!window.lossSteps.length || step>window.lossSteps[window.lossSteps.length-1]){
               window.lossSteps.push(step);
               window.lossData.push(loss);
-              updateChart();
+              updateCharts();
             }
           }
         });
@@ -1270,7 +1286,7 @@ Hier folgt eine weitere Trainingszeile.</pre>
     }
 
     window.addEventListener('DOMContentLoaded', () => {
-      initLossChart();
+      initCharts();
       connectLogsWS();
     });
 
@@ -1836,6 +1852,18 @@ Hier folgt eine weitere Trainingszeile.
         document.getElementById("step").textContent = currentStep !== null ? currentStep : "-";
         document.getElementById("loss").textContent = (typeof s.loss==="number" && Number.isFinite(s.loss)) ? s.loss.toFixed(6) : "-";
         document.getElementById("learning_rate_display").textContent = (typeof s.learning_rate==="number") ? s.learning_rate : "-";
+
+        if (typeof currentStep === "number" && currentStep >= 0) {
+          const lrValue = (typeof s.learning_rate === "number" && Number.isFinite(s.learning_rate)) ? s.learning_rate : null;
+          const lastIdx = window.lrSteps.length - 1;
+          if (lastIdx >= 0 && window.lrSteps[lastIdx] === currentStep) {
+            if (lrValue !== null) window.lrData[lastIdx] = lrValue;
+          } else if (lrValue !== null && (lastIdx < 0 || currentStep > window.lrSteps[lastIdx])) {
+            window.lrSteps.push(currentStep);
+            window.lrData.push(lrValue);
+          }
+          updateCharts();
+        }
         document.getElementById("eta").textContent = s.eta || "-";
         document.getElementById("tokens_per_step").textContent = s.tokens_per_step || "-";
         document.getElementById("total_tokens").textContent = s.total_tokens || "-";
