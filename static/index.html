@@ -50,30 +50,45 @@ MaTeLiX AI is a trademark/brand of TMP-SYSTEM-SERVICE GmbH.
     }
 
     *{ box-sizing:border-box; }
-    html,body{ height:100%; }
+
+    /* FIX: Background always covers full page (no cut-offs) */
+    html{
+      min-height: 100%;
+      background: linear-gradient(180deg, var(--bg0), var(--bg1)); /* fallback */
+    }
     body{
+      min-height: 100vh;
       margin:0;
       color:var(--text);
       font-family:var(--sans);
+      overflow-x:hidden;
+
+      /* Use fixed layers so it never "ends" with content height */
       background:
         radial-gradient(1200px 700px at 15% 10%, rgba(77,184,255,.25), transparent 60%),
         radial-gradient(900px 600px at 85% 20%, rgba(67,240,181,.14), transparent 55%),
         radial-gradient(900px 700px at 65% 95%, rgba(122,211,255,.10), transparent 60%),
         linear-gradient(180deg, var(--bg0), var(--bg1));
-      overflow-x:hidden;
+      background-attachment: fixed, fixed, fixed, fixed;
+      background-repeat: no-repeat, no-repeat, no-repeat, no-repeat;
+      background-size: cover, cover, cover, cover;
     }
 
-    /* subtle grid */
+    /* subtle grid - fixed and oversized to avoid edge clipping */
     .bg-grid{
-      position:fixed; inset:0;
+      position:fixed;
+      left:-20vmax; top:-20vmax;
+      width:140vmax; height:140vmax;
       pointer-events:none;
       opacity:.16;
       background:
         linear-gradient(to right, rgba(255,255,255,.06) 1px, transparent 1px),
         linear-gradient(to bottom, rgba(255,255,255,.06) 1px, transparent 1px);
       background-size: 42px 42px;
-      mask-image: radial-gradient(700px 500px at 50% 30%, #000 40%, transparent 75%);
+      mask-image: radial-gradient(800px 600px at 50% 25%, #000 45%, transparent 78%);
       z-index:0;
+      transform: translateZ(0);
+      will-change: transform;
     }
 
     .app{
@@ -277,9 +292,7 @@ MaTeLiX AI is a trademark/brand of TMP-SYSTEM-SERVICE GmbH.
     }
 
     /* Tabs */
-    .tabs{
-      display:flex; gap:8px; flex-wrap:wrap;
-    }
+    .tabs{ display:flex; gap:8px; flex-wrap:wrap; }
     .tab{
       padding: 8px 10px;
       border-radius: 999px;
@@ -406,11 +419,6 @@ MaTeLiX AI is a trademark/brand of TMP-SYSTEM-SERVICE GmbH.
       word-break: break-word;
       min-height: 48px;
       margin:0;
-    }
-    .preview-actions{
-      display:flex;
-      justify-content:flex-end;
-      margin-top: 10px;
     }
 
     /* History */
@@ -1074,7 +1082,7 @@ Hier folgt eine weitere Trainingszeile.</pre>
       return String(s).replace(/[&<>"']/g, c=>({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
     }
     function escapeHtmlWithBreaks(s){
-      return escapeHtml(s).replace(/\\n/g, "<br>");
+      return escapeHtml(s).replace(/\n/g, "<br>");
     }
 
     // ---------- Tabs ----------
@@ -1083,11 +1091,9 @@ Hier folgt eine weitere Trainingszeile.</pre>
         t.addEventListener('click', ()=>{
           const target = t.getAttribute('data-tab');
           const container = t.parentElement; // tabs row
-          // deactivate siblings in same row
           container.querySelectorAll('.tab').forEach(x=>x.classList.remove('active'));
           t.classList.add('active');
 
-          // find card body and panes in same card
           const card = t.closest('.card');
           if (!card) return;
           card.querySelectorAll('.pane').forEach(p=>p.classList.remove('active'));
@@ -1205,10 +1211,7 @@ Hier folgt eine weitere Trainingszeile.</pre>
           responsive:true,
           maintainAspectRatio:false,
           animation:false,
-          plugins:{
-            legend:{ display:false },
-            tooltip:{ enabled:true }
-          },
+          plugins:{ legend:{ display:false }, tooltip:{ enabled:true } },
           scales:{
             x:{ ticks:{ color:'rgba(159,192,239,.9)' }, grid:{ color:'rgba(255,255,255,.06)' } },
             y:{ ticks:{ color:'rgba(159,192,239,.9)' }, grid:{ color:'rgba(255,255,255,.06)' } }
@@ -1237,12 +1240,12 @@ Hier folgt eine weitere Trainingszeile.</pre>
       }
 
       ws.onmessage = evt => {
-        logbox.textContent += evt.data + "\\n";
+        logbox.textContent += evt.data + "\n";
         if (logbox.textContent.length > 200000) logbox.textContent = logbox.textContent.slice(-200000);
         logbox.scrollTop = logbox.scrollHeight;
 
-        (evt.data || "").split('\\n').forEach(line=>{
-          const m = line.match(/Step (\\d+)\\s+\\|\\s+Loss:\\s+([0-9\\.eE\\-]+)/);
+        (evt.data || "").split('\n').forEach(line=>{
+          const m = line.match(/Step (\d+)\s+\|\s+Loss:\s+([0-9\.eE\-]+)/);
           if(m){
             const step = Number(m[1]);
             const loss = Number(m[2]);
@@ -1396,14 +1399,12 @@ Hier folgt eine weitere Trainingszeile.</pre>
         const running = !!s.running;
         document.getElementById("status").textContent = running ? "läuft" : "gestoppt";
 
-        // top pill
         const dot = document.getElementById('runDot');
         const lbl = document.getElementById('runLabel');
         dot.classList.remove('good','bad');
         if (running) { dot.classList.add('good'); lbl.textContent = "Status: läuft"; }
         else { dot.classList.add('bad'); lbl.textContent = "Status: gestoppt"; }
 
-        // KPI Training
         document.getElementById('trainKpi').textContent = running ? "RUN" : "IDLE";
         document.getElementById('lossKpi').textContent = (typeof s.loss==="number" && Number.isFinite(s.loss)) ? s.loss.toFixed(6) : "-";
         document.getElementById('lrKpi').textContent = (typeof s.learning_rate==="number") ? s.learning_rate : "-";
@@ -1878,7 +1879,7 @@ Hier folgt eine weitere Trainingszeile.
 
           try { j = JSON.parse(rawText); }
           catch {
-            assistantMsg.content = '(Fehler: Chat-Antwort war kein gültiges JSON:\\n' + rawText.slice(0, 400) + ')';
+            assistantMsg.content = '(Fehler: Chat-Antwort war kein gültiges JSON:\n' + rawText.slice(0, 400) + ')';
             renderChat();
             return;
           }
