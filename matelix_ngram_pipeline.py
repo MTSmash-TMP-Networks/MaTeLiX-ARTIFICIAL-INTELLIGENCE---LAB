@@ -23,7 +23,7 @@ import re
 from collections import Counter, defaultdict
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tuple
 
 csv.field_size_limit(1024 * 1024 * 128)
 
@@ -372,6 +372,7 @@ def _phrases_conflict(a: str, b: str, overlap_ratio: float = 0.8) -> bool:
 def collect_ngram_candidates(
     tokenizer,
     cfg: NgramConfig,
+    progress_cb: Optional[Callable[[str, int, int], None]] = None,
 ) -> Tuple[Counter, Counter, int, Dict[str, Dict[str, int]]]:
     phrase_counter: Counter = Counter()
     code_line_counter: Counter = Counter()
@@ -387,10 +388,18 @@ def collect_ngram_candidates(
     max_seq_length = max(1, int(cfg.ngram_eval_max_seq_length))
     near_limit_threshold = min(1.0, max(0.0, float(cfg.ngram_near_limit_threshold)))
 
+    max_samples = int(cfg.ngram_max_samples)
+    last_progress_reported = -1
+
     for text in iter_training_texts(cfg.csv_path, cfg.template_mode, cfg.column_name):
         scanned_samples += 1
-        if scanned_samples > int(cfg.ngram_max_samples):
+        if scanned_samples > max_samples:
             break
+        if progress_cb is not None:
+            if scanned_samples == 1 or scanned_samples == max_samples or (scanned_samples % 250 == 0):
+                if scanned_samples != last_progress_reported:
+                    progress_cb("scan", scanned_samples, max_samples)
+                    last_progress_reported = scanned_samples
 
         seq_len = _sample_length(tokenizer, text)
         is_oversize = seq_len > max_seq_length
@@ -437,8 +446,12 @@ def collect_ngram_candidates(
                     seen_in_sample.add(line)
 
         if bool(cfg.ngram_track_saved_samples) and seq_len > 0:
+            gain_cache: Dict[str, int] = {}
             for phrase in seen_in_sample:
-                gain = _estimate_phrase_token_gain(tokenizer, phrase)
+                gain = gain_cache.get(phrase)
+                if gain is None:
+                    gain = _estimate_phrase_token_gain(tokenizer, phrase)
+                    gain_cache[phrase] = gain
                 if gain <= 0:
                     continue
                 occurrences = _occurrence_count_in_text(text, phrase)
@@ -605,9 +618,13 @@ def extend_tokenizer_with_ngrams(
 
 
 def build_ngram_state(tokenizer, cfg: NgramConfig) -> NgramState:
+    def _noop_progress(_stage: str, _current: int, _total: int) -> None:
+        return
+
     phrase_counter, code_line_counter, scanned_samples, phrase_stats = collect_ngram_candidates(
         tokenizer=tokenizer,
         cfg=cfg,
+        progress_cb=_noop_progress,
     )
 
     selected_phrases, score_map, selected_code_line_count, estimated_saved_samples = select_best_ngrams(
@@ -686,6 +703,7 @@ def build_or_load_ngram_state(
     cfg: NgramConfig,
     outdir: Path,
     rebuild: bool = False,
+    progress_cb: Optional[Callable[[str, int, int], None]] = None,
 ) -> Optional[NgramState]:
     if not bool(cfg.use_ngrams):
         return None
@@ -699,7 +717,45 @@ def build_or_load_ngram_state(
             apply_ngram_tokens_to_tokenizer(tokenizer, state)
             return state
 
-    state = build_ngram_state(tokenizer, cfg)
+    if progress_cb is None:
+        def progress_cb(_stage: str, _current: int, _total: int) -> None:
+            return
+
+    phrase_counter, code_line_counter, scanned_samples, phrase_stats = collect_ngram_candidates(
+        tokenizer=tokenizer,
+        cfg=cfg,
+        progress_cb=progress_cb,
+    )
+    selected_phrases, score_map, selected_code_line_count, estimated_saved_samples = select_best_ngrams(
+        tokenizer=tokenizer,
+        cfg=cfg,
+        phrase_counter=phrase_counter,
+        code_line_counter=code_line_counter,
+        phrase_stats=phrase_stats,
+    )
+    tokens, phrase_to_token, _ = extend_tokenizer_with_ngrams(tokenizer, selected_phrases)
+    estimated_total_savings = float(sum(score_map.get(p, 0.0) for p in selected_phrases))
+    oversize_candidates = sum(1 for k, v in phrase_stats.items() if int(v.get("oversize_hits", 0)) > 0)
+    near_limit_candidates = sum(1 for k, v in phrase_stats.items() if int(v.get("near_limit_hits", 0)) > 0)
+
+    state = NgramState(
+        version=4,
+        config=asdict(cfg),
+        tokens=tokens,
+        phrases=selected_phrases,
+        phrase_to_token=phrase_to_token,
+        stats=asdict(NgramStats(
+            scanned_samples=scanned_samples,
+            selected_count=len(selected_phrases),
+            candidate_count=len(phrase_counter) + len(code_line_counter),
+            estimated_total_savings=estimated_total_savings,
+            code_line_candidate_count=len(code_line_counter),
+            selected_code_line_count=selected_code_line_count,
+            oversize_candidates=oversize_candidates,
+            near_limit_candidates=near_limit_candidates,
+            estimated_saved_samples=estimated_saved_samples,
+        )),
+    )
     save_ngram_state(state, outdir)
     return state
 
