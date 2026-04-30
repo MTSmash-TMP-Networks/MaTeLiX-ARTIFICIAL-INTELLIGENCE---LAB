@@ -24,19 +24,19 @@ MaTeLiX AI is a trademark/brand of TMP-SYSTEM-SERVICE GmbH.
 
   <style>
 :root {
-  --matrix-bg: #101816;
-  --card-bg: #16221c;
-  --green: #32ff78;
-  --green-soft: #1aff5b;
-  --input-bg: #15291c;
-  --text: #d0ffd8;
-  --border: #276b3a;
-  --shadow: 0 2px 18px 0 #14ff77aa;
-  --shadow-soft: 0 1px 8px 0 #14ff7760;
+  --matrix-bg: #0c1320;
+  --card-bg: #121d2e;
+  --green: #33b8ff;
+  --green-soft: #1aa3ff;
+  --input-bg: #13253b;
+  --text: #d7eeff;
+  --border: #2b5f96;
+  --shadow: 0 2px 18px 0 #2ba7ffaa;
+  --shadow-soft: 0 1px 8px 0 #2ba7ff60;
 }
 html, body {
   margin:0; padding:0;
-  background: radial-gradient(ellipse at 60% 0%, #13231e 0%, #101816 70%);
+  background: radial-gradient(ellipse at 60% 0%, #12233a 0%, #0c1320 70%);
   color: var(--text);
   font-family: 'Segoe UI', 'Fira Sans', 'Roboto', Arial, sans-serif;
   min-height: 100vh;
@@ -45,7 +45,7 @@ html, body {
 
 input, select, textarea {
   background: var(--input-bg);
-  border: 1.5px solid #22ffb1;
+  border: 1.5px solid #3db6ff;
   border-radius: 7px;
   color: var(--text);
   padding: 5px 10px;
@@ -64,7 +64,7 @@ input[type="checkbox"] {
   width: 20px;
   height: 20px;
   justify-self: end;
-  accent-color: #26ff88;
+  accent-color: #3aaeff;
   box-shadow: none;
   padding: 0;
 }
@@ -99,7 +99,7 @@ button.danger:hover, button.danger:focus {
   letter-spacing: 0.03em;
   font-weight: 900;
   text-transform: uppercase;
-  filter: brightness(1.4) drop-shadow(0 0 6px #18ff7d);
+  filter: brightness(1.4) drop-shadow(0 0 6px #4db8ff);
 }
 #dashboard-header span {
   font-size:1.15em;
@@ -144,7 +144,7 @@ button.danger:hover, button.danger:focus {
   background:rgba(40,255,80,0.06);
   border-radius:7px;
   padding:0.8em 1.1em;
-  box-shadow:0 0 6px #1aff5b13;
+  box-shadow:0 0 6px #2f9fff1a;
   display:grid;
   grid-template-columns: auto 1fr;
   gap: 0.35em 0.8em;
@@ -164,7 +164,7 @@ button.danger:hover, button.danger:focus {
 }
 .settings-grid label {
   justify-self: start;
-  color: #8fffbc;
+  color: #9dcbff;
   font-weight: 500;
   font-size: 1.01em;
   margin-bottom: 0;
@@ -199,38 +199,38 @@ button.danger:hover, button.danger:focus {
 
 button {
   background: linear-gradient(90deg,#1ed976 10%,#064c25 90%);
-  color: #0fffa8;
+  color: #64c7ff;
   border: 1.5px solid var(--green);
   border-radius: 8px;
   padding: 0.4em 1.3em;
   font-size: 1em;
   font-weight: bold;
   cursor: pointer;
-  box-shadow: 0 0 14px #22ffb922;
+  box-shadow: 0 0 14px #3db6ff22;
   transition: background .14s, color .14s;
-  text-shadow:0 0 4px #15ffb1;
+  text-shadow:0 0 4px #3aafff;
   font-family: 'Fira Mono', 'Consolas', monospace;
   margin-top: .3em;
 }
 button:hover, button:focus {
-  background: linear-gradient(90deg,#19ff8a,#094a2f 80%);
+  background: linear-gradient(90deg,#3aaeff,#094a2f 80%);
   color: #000;
-  border-color: #47ffa0;
+  border-color: #6dcfff;
 }
 
 button.download-btn {
   font-size: 0.93em;
   padding: 0.25em 0.9em;
-  background: #07271a;
-  color: #19ff90;
-  border: 1.3px solid #13ff7e;
-  box-shadow: 0 0 8px #13ff7e44;
+  background: #0d1f33;
+  color: #56c1ff;
+  border: 1.3px solid #2fa0ff;
+  box-shadow: 0 0 8px #2fa0ff44;
   margin-left: 1em;
   margin-top: 0.1em;
 }
 button.download-btn:hover, button.download-btn:focus {
   background: #09361f;
-  color: #aaffcb;
+  color: #b4ddff;
 }
 
 form label { font-family: 'Fira Mono', 'Consolas', monospace; }
@@ -246,34 +246,34 @@ form label {
   box-sizing: border-box;
 }
 #logbox {
-  background: #07271a;
-  color: #87ffa7;
+  background: #0d1f33;
+  color: #9cd0ff;
   width: 99%;
   height: 31vh;
   border-radius: 13px;
-  border:1px solid #27ff7d55;
+  border:1px solid #379fff55;
   padding: 1em;
   font-family: 'Fira Mono', 'Consolas', monospace;
   font-size: 1.03em;
   overflow-y: scroll;
   margin-bottom: 0.6em;
-  box-shadow:0 0 12px #18ff4c18;
+  box-shadow:0 0 12px #2d95ff18;
 }
 #lossChart {
   width: 100% !important;
   background: #091f12;
   border-radius: 10px;
   margin-bottom:1.3em;
-  border:1.3px solid #20ff70a8;
-  box-shadow:0 0 9px #00ffb310;
+  border:1.3px solid #3ca7ffa8;
+  box-shadow:0 0 9px #3ca7ff10;
 }
 #livepreviewBox {
   background:#001e0d;
   border-radius:10px;
   padding:1.2em;
   min-height:95px;
-  border:1.2px solid #22ff7faa;
-  box-shadow:0 0 12px #15ff7c22;
+  border:1.2px solid #3ca8ffaa;
+  box-shadow:0 0 12px #2f9fff22;
   margin-top:1.2em;
   max-width:100%;
   overflow-x:auto;
@@ -288,25 +288,25 @@ form label {
   box-sizing:border-box;
   font-family:'Fira Mono','Consolas',monospace;
   font-size:1.07em;
-  color:#19ff67;
+  color:#4db8ff;
   min-height:36px;
 }
 #togglePreviewBtn {
   margin-top:0.5em;
   float:right;
   background:#011e11;
-  border:1px solid #27ffae;
-  color:#1aff83;
+  border:1px solid #3db8ff;
+  color:#58c0ff;
   font-size:1em;
   padding:0.1em 1.2em;
   border-radius:8px;
-  box-shadow:0 0 8px #1aff7c33;
+  box-shadow:0 0 8px #2fa0ff33;
   cursor:pointer;
   transition:.13s;
 }
 #togglePreviewBtn:hover {
   background: #083c22;
-  color: #2fffa0;
+  color: #69caff;
 }
 
 #matrix-spinner-overlay {
@@ -323,8 +323,8 @@ form label {
   padding:2.2em 2.7em 2.2em 2.7em;
   background: #0a1d16cc;
   border-radius: 25px;
-  box-shadow: 0 0 80px #1cff99aa, 0 0 16px #000;
-  border: 2.5px solid #2fffaa;
+  box-shadow: 0 0 80px #3aa8ffaa, 0 0 16px #000;
+  border: 2.5px solid #5cc7ff;
 }
 #model_dir_select { width: 60%; min-width: 0; box-sizing: border-box; }
 .matrix-loader {
@@ -339,26 +339,26 @@ form label {
   position:absolute;
   top:0; left:0; width:100%; height:100%;
   border-radius:50%;
-  border:4px solid #25ff95;
+  border:4px solid #4ab8ff;
   opacity:0.7;
   animation: matrix-spin 1.1s linear infinite;
-  box-shadow:0 0 18px #1cff97, 0 0 36px #0aff6e40;
+  box-shadow:0 0 18px #3faeff, 0 0 36px #2f9dff40;
 }
 .matrix-loader::after {
-  border-color: #11ff55 transparent #11ff55 transparent;
+  border-color: #4ab8ff transparent #4ab8ff transparent;
   opacity:1;
   animation: matrix-spin 0.7s linear infinite reverse;
-  box-shadow: 0 0 22px #1cff99;
+  box-shadow: 0 0 22px #48b7ff;
 }
 @keyframes matrix-spin {
   0% { transform: rotate(0deg);}
   100% { transform: rotate(360deg);}
 }
 #matrix-spinner-label {
-  color: #2fff9b;
+  color: #64c7ff;
   font-family:'Fira Mono','Consolas',monospace;
   font-size:1.34em;
-  text-shadow:0 0 16px #12ff79;
+  text-shadow:0 0 16px #43abff;
   margin-bottom:0;
   margin-top:0.5em;
   letter-spacing:0.04em;
@@ -403,14 +403,14 @@ form label {
   margin-top: 3em;
   color: var(--text);
   font-size: 0.95em;
-  box-shadow: 0 -2px 14px #14ff7740;
+  box-shadow: 0 -2px 14px #2f9dff40;
   position: relative;
   z-index: 3;
 }
 #site-footer p {
   margin: 0;
-  color: #18ff7d;
-  text-shadow: 0 0 4px #14ff7760;
+  color: #4db8ff;
+  text-shadow: 0 0 4px #2f9dff60;
   font-family: 'Fira Mono', 'Consolas', monospace;
   letter-spacing: 0.03em;
 }
@@ -430,23 +430,23 @@ form label {
   <div style="display:flex; justify-content:center; gap:40px; align-items: flex-end;">
     <div>
       <canvas id="cpuGauge" width="100" height="50"></canvas>
-      <div style="text-align:center; color:#32ff78; font-size:0.96em;">CPU</div>
+      <div style="text-align:center; color:#33b8ff; font-size:0.96em;">CPU</div>
     </div>
     <div>
       <canvas id="ramGauge" width="100" height="50"></canvas>
-      <div style="text-align:center; color:#32ff78; font-size:0.96em;">RAM</div>
+      <div style="text-align:center; color:#33b8ff; font-size:0.96em;">RAM</div>
     </div>
     <div>
       <canvas id="gpuGauge" width="100" height="50"></canvas>
-      <div style="text-align:center; color:#32ff78; font-size:0.96em;">GPU</div>
+      <div style="text-align:center; color:#33b8ff; font-size:0.96em;">GPU</div>
     </div>
   </div>
 </div>
 
-<div id="gauge-stats" style="text-align:center; margin-top:-12px; color:#44ffbe; font-size:1.08em;">
+<div id="gauge-stats" style="text-align:center; margin-top:-12px; color:#59c7ff; font-size:1.08em;">
   RAM: <span id="ramStat">--</span> &nbsp;|&nbsp; GPU: <span id="gpuName">--</span> &nbsp;|&nbsp; GPU RAM: <span id="gpuRam">--</span> &nbsp;|&nbsp; #GPUs: <span id="numGpus">--</span>
 </div>
-<div id="all-gpus-list" style="text-align:center; margin:0.5em 0 1em 0; color:#00ffd7;"></div>
+<div id="all-gpus-list" style="text-align:center; margin:0.5em 0 1em 0; color:#4fd2ff;"></div>
 
 <div id="dashboard-main">
   <div class="card" style="max-width:580px;">
@@ -721,7 +721,7 @@ form label {
       <label class="scratch_cfg_row" style="display:none; opacity:0.85; align-self:start;">
         Hinweis:
       </label>
-      <div class="scratch_cfg_row" style="display:none; justify-self:end; width:58%; color:#9cffc5; font-size:0.94em; line-height:1.35;">
+      <div class="scratch_cfg_row" style="display:none; justify-self:end; width:58%; color:#9ec9ff; font-size:0.94em; line-height:1.35;">
         Nur im Scratch-Modus aktiv. <code>vocab_size</code> und Tokenizer bleiben unverändert; leere Felder übernehmen die Werte aus der Basis-<code>config.json</code>.
       </div>
 
@@ -757,8 +757,8 @@ form label {
     </div>
 
     <div style="margin:-0.7em 0 1.3em 0;">
-      <div style="height:12px; background:#0b1f15; border:1px solid #1fff7a66; border-radius:999px; overflow:hidden; box-shadow:inset 0 0 8px #19ff7a22;">
-        <div id="step_progress_bar" style="height:100%; width:0%; background:linear-gradient(90deg,#13ff72,#39ffb0); box-shadow:0 0 12px #18ff7a88;"></div>
+      <div style="height:12px; background:#0e1d31; border:1px solid #2f9dff66; border-radius:999px; overflow:hidden; box-shadow:inset 0 0 8px #2a9cff22;">
+        <div id="step_progress_bar" style="height:100%; width:0%; background:linear-gradient(90deg,#2f9dff,#71c8ff); box-shadow:0 0 12px #46b0ff88;"></div>
       </div>
     </div>
 
@@ -811,10 +811,10 @@ form label {
     </div>
 
     <textarea id="chat_system" placeholder="(optional) Systemprompt…" rows="2" style="width:95%;"></textarea>
-    <div id="chat_history" style="height:260px; overflow:auto; background:#07271a; border:1px solid #27ff7d55; border-radius:10px; padding:0.8em; margin:0.8em 0;"></div>
+    <div id="chat_history" style="height:260px; overflow:auto; background:#0d1f33; border:1px solid #379fff55; border-radius:10px; padding:0.8em; margin:0.8em 0;"></div>
 
     <div style="display:flex; gap:0.6em;">
-      <input id="chat_input" type="text" placeholder="Nachricht eingeben…" style="flex:1; background:#15291c; border:1.5px solid #22ffb1; border-radius:7px; padding:8px;">
+      <input id="chat_input" type="text" placeholder="Nachricht eingeben…" style="flex:1; background:#13253b; border:1.5px solid #3db6ff; border-radius:7px; padding:8px;">
       <button id="chat_send_btn" type="button">Senden</button>
     </div>
 
@@ -825,9 +825,9 @@ form label {
     </div>
   </div>
 
-  <div class="card" style="max-width:650px; background:#0a1712; border:2px solid #13ff72; margin-bottom:2.5em;">
+  <div class="card" style="max-width:650px; background:#0d1a2b; border:2px solid #2f9dff; margin-bottom:2.5em;">
     <h3 style="margin-bottom:0.6em;">CSV-Dateiformate</h3>
-    <div style="font-size:1.09em; color:#90ffc7;">
+    <div style="font-size:1.09em; color:#98cbff;">
       <b>Dialog (chat / dialogplus):</b>
       <button type="button" onclick="downloadExample('chat')" class="download-btn">Beispiel-CSV herunterladen</button>
       <ul style="margin-top:0.3em; margin-bottom:0.8em;">
@@ -838,7 +838,7 @@ form label {
         <li><code>Kontext</code> — optional</li>
         <li><code>Assistentin</code> — target (Pflicht)</li>
       </ul>
-      <pre style="background:#13231e; color:#14ff70; border-radius:6px; padding:0.7em;">
+      <pre style="background:#11243b; color:#58bfff; border-radius:6px; padding:0.7em;">
 id,parent_id,system,Benutzer,Kontext,Assistentin
 1,,Du bist ein freundlicher Chatbot.,Hallo!,,"Hallo! Wie kann ich dir helfen?"
 2,1,,Wie spät ist es?,,"Ich habe keinen Zugriff auf deine Uhr, aber du kannst oben rechts schauen."
@@ -847,7 +847,7 @@ id,parent_id,system,Benutzer,Kontext,Assistentin
 
       <b>Nur-Text-Modus (template_mode=plain):</b>
       <button type="button" onclick="downloadExample('plain')" class="download-btn">Beispiel-CSV herunterladen</button>
-      <pre style="background:#13231e; color:#17ff96; border-radius:6px; padding:0.7em;">
+      <pre style="background:#11243b; color:#6bc8ff; border-radius:6px; padding:0.7em;">
 text
 Das ist ein Beispielsatz für Pretraining.
 Hier folgt eine weitere Trainingszeile.
@@ -896,7 +896,7 @@ function animateMatrixRain() {
     ctx.fillStyle = "rgba(5,24,17,0.19)";
     ctx.fillRect(0, 0, w, h);
     ctx.font = fontSize + "px 'Fira Mono', Consolas, monospace";
-    ctx.fillStyle = "#24ff82";
+    ctx.fillStyle = '#2ea6ff';
     for (let i = 0; i < drops.length; i++) {
       const text = String.fromCharCode(0x30A0 + Math.random() * 96);
       ctx.fillText(text, i * fontSize, drops[i] * fontSize);
@@ -926,10 +926,10 @@ function drawEKGLine(ctx, w, h, t) {
 
   ctx.clearRect(0, 0, w, h);
   ctx.save();
-  ctx.shadowColor = '#30ffab';
+  ctx.shadowColor = '#2aa8ff';
   ctx.shadowBlur = 14;
   ctx.lineWidth = 1.0;
-  ctx.strokeStyle = "#39ff7d";
+  ctx.strokeStyle = '#3db6ff';
   ctx.beginPath();
 
   function randomSeed(n) {
@@ -1086,7 +1086,7 @@ function setGaugeLabel(chart, label) {
   ctx.font = "bold 1.13em 'Fira Mono',monospace";
   ctx.textAlign = "center";
   ctx.textBaseline = "middle";
-  ctx.fillStyle = "#32ff78";
+  ctx.fillStyle = '#33b8ff';
   ctx.clearRect(0, 0, chart.width, chart.height);
   chart.draw();
   ctx.fillText(label, chart.width/2, chart.height/1.36);
@@ -1128,7 +1128,7 @@ async function pollSysStatus(){
     const allGpus = d.gpus || [];
     const gpusDiv = document.getElementById('all-gpus-list');
     if (allGpus.length > 1) {
-      let html = "<b>Alle GPUs:</b><br><table style='margin:0 auto; color:#18ffb0; background:#13231e; border-radius:7px;'><tr><th style='padding:0 1em;'>#</th><th>Name</th><th>Mem</th><th>Util</th></tr>";
+      let html = "<b>Alle GPUs:</b><br><table style='margin:0 auto; color:#63c8ff; background:#11243b; border-radius:7px;'><tr><th style='padding:0 1em;'>#</th><th>Name</th><th>Mem</th><th>Util</th></tr>";
       allGpus.forEach((g,i) => {
         html += `<tr>
           <td style='text-align:right;'>GPU ${i}</td>
@@ -1152,9 +1152,9 @@ async function pollSysStatus(){
 }
 
 window.addEventListener('DOMContentLoaded', () => {
-  cpuGauge = makeGauge(document.getElementById('cpuGauge'), '#32ff78');
-  ramGauge = makeGauge(document.getElementById('ramGauge'), '#19f7ef');
-  gpuGauge = makeGauge(document.getElementById('gpuGauge'), '#ffc800');
+  cpuGauge = makeGauge(document.getElementById('cpuGauge'), '#33b8ff');
+  ramGauge = makeGauge(document.getElementById('ramGauge'), '#49c8ff');
+  gpuGauge = makeGauge(document.getElementById('gpuGauge'), '#8ad1ff');
 
   if (!cpuGauge || !ramGauge || !gpuGauge) return;
 
@@ -1301,8 +1301,8 @@ function initLossChart(){
   const ctx = canvas.getContext('2d');
   lossChart = new Chart(ctx,{
     type:'line',
-    data:{ labels:[], datasets:[{ label:'Loss', data:[], fill:false, borderColor:'#32ff78', tension:0.2, pointRadius:1.5 }] },
-    options:{ responsive:false, animation:false, scales:{ x:{title:{display:true,text:'Step'},ticks:{color:'#1aff63'}}, y:{title:{display:true,text:'Loss'},ticks:{color:'#1aff63'}} } }
+    data:{ labels:[], datasets:[{ label:'Loss', data:[], fill:false, borderColor:'#33b8ff', tension:0.2, pointRadius:1.5 }] },
+    options:{ responsive:false, animation:false, scales:{ x:{title:{display:true,text:'Step'},ticks:{color:'#49b9ff'}}, y:{title:{display:true,text:'Loss'},ticks:{color:'#49b9ff'}} } }
   });
 }
 function updateChart(){
@@ -1418,7 +1418,7 @@ async function loadTrainings() {
       html += `
         <details style="margin-bottom:1.1em;">
           <summary><b>${escapeHtml(run.folder)}</b></summary>
-          <pre style="max-height:220px; overflow:auto; background:#1a3525; border-radius:6px; padding:0.6em 0.9em;">${escapeHtml(JSON.stringify(run.config, null, 2))}</pre>
+          <pre style="max-height:220px; overflow:auto; background:#1a2e49; border-radius:6px; padding:0.6em 0.9em;">${escapeHtml(JSON.stringify(run.config, null, 2))}</pre>
           <a href="/training_outputs/${encodeURIComponent(run.folder)}/train_config.json" download>Trainings-Config herunterladen</a>
         </details>
       `;
@@ -1743,7 +1743,7 @@ function renderChat() {
   const box = document.getElementById('chat_history');
   box.innerHTML = chatMessages.map(m => {
     const who = m.role === 'user' ? '<b>Du</b>' : '<b>Assistentin</b>';
-    return `<div style="margin:0.3em 0;"><span style="color:#20ffa0;">${who}:</span> ${escapeHtmlWithBreaks(m.content)}</div>`;
+    return `<div style="margin:0.3em 0;"><span style="color:#5ec6ff;">${who}:</span> ${escapeHtmlWithBreaks(m.content)}</div>`;
   }).join('');
   box.scrollTop = box.scrollHeight;
 }
