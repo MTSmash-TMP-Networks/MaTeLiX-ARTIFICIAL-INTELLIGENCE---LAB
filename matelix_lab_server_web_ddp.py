@@ -523,7 +523,8 @@ def _resolve_hf_dataset_to_csv(cfg: WebTrainConfig) -> str:
                 for row in ds:
                     in_val = "" if row.get(input_col) is None else str(row.get(input_col))
                     out_val = "" if row.get(output_col) is None else str(row.get(output_col))
-                    merged = f"Input:\n{in_val.strip()}\n\nOutput:\n{out_val.strip()}".strip()
+                    merged_parts = [part for part in (in_val.strip(), out_val.strip()) if part]
+                    merged = "\n\n".join(merged_parts).strip()
                     writer.writerow([_wrap_with_start_stop_token(merged)])
             elif conversion_mode == "row_with_headers":
                 for row in ds:
