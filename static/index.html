@@ -95,8 +95,11 @@ MaTeLiX AI is a trademark/brand of TMP-SYSTEM-SERVICE GmbH.
       position:relative;
       z-index:1;
       max-width: 1400px;
+      min-height: 100vh;
       margin: 0 auto;
-      padding: 18px 16px 40px;
+      padding: 18px 16px 20px;
+      display:flex;
+      flex-direction:column;
     }
 
     /* Topbar */
@@ -118,11 +121,11 @@ MaTeLiX AI is a trademark/brand of TMP-SYSTEM-SERVICE GmbH.
     }
     .logo{
       width:42px; height:42px; border-radius: 14px;
-      background:
-        radial-gradient(circle at 30% 30%, rgba(255,255,255,.25), transparent 60%),
-        linear-gradient(135deg, rgba(77,184,255,.95), rgba(67,240,181,.85));
+      object-fit: cover;
       box-shadow: 0 10px 26px rgba(77,184,255,.18);
       border:1px solid rgba(255,255,255,.18);
+      background: rgba(15,26,49,.55);
+      padding: 3px;
     }
     .brand h1{
       margin:0;
@@ -475,7 +478,7 @@ MaTeLiX AI is a trademark/brand of TMP-SYSTEM-SERVICE GmbH.
 
     /* Footer */
     footer{
-      margin-top: 16px;
+      margin-top: auto;
       padding: 14px 4px 0;
       color: var(--muted);
       font-family: var(--mono);
@@ -537,7 +540,7 @@ MaTeLiX AI is a trademark/brand of TMP-SYSTEM-SERVICE GmbH.
   <div class="app">
     <div class="topbar">
       <div class="brand">
-        <div class="logo" aria-hidden="true"></div>
+        <img class="logo" src="https://matelix.ai/pic/SVG.png" alt="MaTeLiX Logo">
         <div>
           <h1>MaTeLiX Artificial Intelligence – Lab</h1>
           <div class="sub">LLM Trainer (Row-SFT, Chat + Text) · TMP-SYSTEM-SERVICE GmbH</div>
