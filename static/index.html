@@ -453,7 +453,7 @@ form label {
     <h2>Training Setup</h2>
 
     <form id="settings" autocomplete="off" class="settings-grid">
-      <label for="model_dir_select">Modell wählen:</label>
+      <label for="model_dir_select">Base Modell wählen:</label>
       <select id="model_dir_select">
         <option value="MTSmash/EvaGPT-German-1B-10-4-2026-7">EvaGPT-German-1B</option>
         <option value="custom">Anderes Modell (Pfad angeben)</option>
@@ -553,7 +553,7 @@ form label {
       <input type="checkbox" id="shuffle">
 
       <label for="sort_by_length" title="Schneller: weniger Padding">Sort by Length:</label>
-      <input type="checkbox" id="sort_by_length" checked>
+      <input type="checkbox" id="sort_by_length">
 
       <label for="rebuild_dataset_cache" title="Alten tokenisierten Cache verwerfen und neu erzeugen.">
         Cache neu aufbauen:
@@ -647,7 +647,7 @@ form label {
       </select>
 
       <label for="gradient_checkpointing" title="Spart VRAM, kostet Laufzeit (nur sinnvoll CUDA).">Grad Checkpointing:</label>
-      <input type="checkbox" id="gradient_checkpointing">
+      <input type="checkbox" id="gradient_checkpointing" checked>
 
       <label for="log_cuda_memory">CUDA Memory Logging:</label>
       <input type="checkbox" id="log_cuda_memory" checked>
@@ -656,7 +656,7 @@ form label {
       <input type="number" id="cuda_memory_log_interval_steps" value="25" min="1">
 
       <label for="cuda_empty_cache_interval_steps">CUDA Empty Cache Interval:</label>
-      <input type="number" id="cuda_empty_cache_interval_steps" value="15" min="0">
+      <input type="number" id="cuda_empty_cache_interval_steps" value="25" min="0">
 
       <label for="device">Device:</label>
       <select id="device"></select>
