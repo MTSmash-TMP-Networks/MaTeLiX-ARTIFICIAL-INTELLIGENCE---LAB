@@ -457,6 +457,12 @@ MaTeLiX AI is a trademark/brand of TMP-SYSTEM-SERVICE GmbH.
       word-break: break-word;
       min-height: 48px;
       margin:0;
+      max-height: 120px;
+      overflow: hidden;
+    }
+    #livepreview.expanded{
+      max-height: none;
+      overflow: visible;
     }
 
     /* History */
@@ -1172,9 +1178,11 @@ Hier folgt eine weitere Trainingszeile.</pre>
       if (!box || !btn) return;
 
       if (previewExpanded) {
+        box.classList.add("expanded");
         box.textContent = previewFull;
         btn.textContent = "Weniger anzeigen";
       } else {
+        box.classList.remove("expanded");
         const base = previewShort || previewFull || "";
         const s = base.length > 240 ? base.slice(0, 240) + " ..." : base;
         box.textContent = s;
