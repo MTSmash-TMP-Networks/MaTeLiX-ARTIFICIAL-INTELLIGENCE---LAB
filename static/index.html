@@ -506,7 +506,7 @@ form label {
       <input type="number" id="warmup_steps" value="0" min="0">
 
       <label for="warmup_ratio">Warmup Ratio:</label>
-      <input type="number" step="0.01" id="warmup_ratio" value="0.03" min="0" max="1">
+      <input type="number" step="0.01" id="warmup_ratio" value="0" min="0" max="1">
 
       <label for="min_lr_ratio">Min LR Ratio:</label>
       <input type="number" step="0.01" id="min_lr_ratio" value="0.05" min="0" max="1">
@@ -518,16 +518,16 @@ form label {
       <input type="number" step="0.01" id="lr_adjust_min_change" value="0.05" min="0" max="1">
 
       <label for="adaptive_scheduler">Adaptive Scheduler:</label>
-      <input type="checkbox" id="adaptive_scheduler">
+      <input type="checkbox" id="adaptive_scheduler" checked>
 
       <label for="adaptive_scheduler_freeze_on_producer_done">Freeze wenn Producer fertig:</label>
-      <input type="checkbox" id="adaptive_scheduler_freeze_on_producer_done">
+      <input type="checkbox" id="adaptive_scheduler_freeze_on_producer_done" checked>
 
       <label for="adaptive_scheduler_never_increase_lr">LR nie erhöhen:</label>
-      <input type="checkbox" id="adaptive_scheduler_never_increase_lr">
+      <input type="checkbox" id="adaptive_scheduler_never_increase_lr" checked>
 
       <label for="adaptive_scheduler_only_extend_steps">Nur Steps verlängern:</label>
-      <input type="checkbox" id="adaptive_scheduler_only_extend_steps">
+      <input type="checkbox" id="adaptive_scheduler_only_extend_steps" checked>
 
       <label for="per_device_train_batch_size">Batchgröße:</label>
       <input type="number" id="per_device_train_batch_size" value="1" min="1">
@@ -656,7 +656,7 @@ form label {
       <input type="number" id="cuda_memory_log_interval_steps" value="25" min="1">
 
       <label for="cuda_empty_cache_interval_steps">CUDA Empty Cache Interval:</label>
-      <input type="number" id="cuda_empty_cache_interval_steps" value="25" min="0">
+      <input type="number" id="cuda_empty_cache_interval_steps" value="50" min="0">
 
       <label for="device">Device:</label>
       <select id="device"></select>
