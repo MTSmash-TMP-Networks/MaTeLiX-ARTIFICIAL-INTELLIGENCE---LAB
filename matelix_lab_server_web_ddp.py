@@ -469,7 +469,6 @@ def _resolve_hf_dataset_to_csv(cfg: WebTrainConfig) -> str:
         raise HTTPException(status_code=400, detail="hf_dataset_id fehlt für HuggingFace-Datasets.")
 
     split_name = (cfg.hf_dataset_split or "train").strip() or "train"
-    requested_column = (cfg.column_name or "text").strip() or "text"
 
     try:
         from datasets import load_dataset  # type: ignore
@@ -481,33 +480,9 @@ def _resolve_hf_dataset_to_csv(cfg: WebTrainConfig) -> str:
     except Exception as exc:
         raise HTTPException(status_code=400, detail=f"HuggingFace Dataset konnte nicht geladen werden: {exc}")
 
-    available_cols = {str(c).strip(): c for c in ds.column_names}
-    lowered_to_real = {str(c).strip().lower(): str(c).strip() for c in ds.column_names}
-
-    chosen_column: Optional[str] = None
-    conversion_mode = "direct"
-
-    if requested_column in available_cols:
-        chosen_column = requested_column
-    else:
-        candidate_order = ["text", "output", "answer", "response", "completion", "prompt"]
-        for key_name in candidate_order:
-            real = lowered_to_real.get(key_name)
-            if real is not None:
-                chosen_column = real
-                break
-
-        has_input = lowered_to_real.get("input") is not None
-        has_output = lowered_to_real.get("output") is not None
-        if has_input and has_output:
-            conversion_mode = "input_output"
-            chosen_column = "text"
-
-    if chosen_column is None:
-        conversion_mode = "row_with_headers"
-        chosen_column = "text"
-
-    key = hashlib.sha256(f"{dataset_id}:{split_name}:{requested_column}:{conversion_mode}:{chosen_column}".encode("utf-8")).hexdigest()[:12]
+    chosen_column = "text"
+    conversion_mode = "row_with_headers"
+    key = hashlib.sha256(f"{dataset_id}:{split_name}:{conversion_mode}:{','.join(ds.column_names)}".encode("utf-8")).hexdigest()[:12]
     safe_name = dataset_id.replace("/", "__").replace(":", "_")
     out_path = DATASETS_DIR / f"hf_{safe_name}_{split_name}_{chosen_column}_{key}.csv"
 
@@ -517,16 +492,7 @@ def _resolve_hf_dataset_to_csv(cfg: WebTrainConfig) -> str:
             # robust serialisiert werden und kein `_csv.Error: need to escape` auftritt.
             writer = csv.writer(f, quoting=csv.QUOTE_ALL)
             writer.writerow([chosen_column])
-            if conversion_mode == "input_output":
-                input_col = lowered_to_real["input"]
-                output_col = lowered_to_real["output"]
-                for row in ds:
-                    in_val = "" if row.get(input_col) is None else str(row.get(input_col))
-                    out_val = "" if row.get(output_col) is None else str(row.get(output_col))
-                    merged_parts = [part for part in (in_val.strip(), out_val.strip()) if part]
-                    merged = "\n\n".join(merged_parts).strip()
-                    writer.writerow([_wrap_with_start_stop_token(merged)])
-            elif conversion_mode == "row_with_headers":
+            if conversion_mode == "row_with_headers":
                 for row in ds:
                     parts: List[str] = []
                     for col in ds.column_names:
@@ -540,9 +506,6 @@ def _resolve_hf_dataset_to_csv(cfg: WebTrainConfig) -> str:
                         parts.append(f"{col}: {value_text}")
                     merged = "\n".join(parts).strip()
                     writer.writerow([_wrap_with_start_stop_token(merged)])
-            else:
-                for value in ds[chosen_column]:
-                    writer.writerow([_wrap_with_start_stop_token("" if value is None else str(value))])
 
     cfg.column_name = chosen_column
 

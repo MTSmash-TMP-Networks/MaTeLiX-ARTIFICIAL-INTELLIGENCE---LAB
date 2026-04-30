@@ -1401,7 +1401,8 @@ window.addEventListener('DOMContentLoaded', function() {
 
 function applyTemplateModeUI() {
   const mode = document.getElementById("template_mode").value;
-  const isText = mode === "plain";
+  const isHf = document.getElementById("dataset_source").value === "huggingface";
+  const isText = mode === "plain" && !isHf;
   document.querySelectorAll('.column_row').forEach(e => e.style.display = isText ? "" : "none");
 }
 document.getElementById("template_mode").addEventListener("change", applyTemplateModeUI);
