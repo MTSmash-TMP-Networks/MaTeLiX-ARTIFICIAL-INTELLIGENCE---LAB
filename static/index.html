@@ -555,6 +555,9 @@ form label {
       <label for="sort_by_length" title="Schneller: weniger Padding">Sort by Length:</label>
       <input type="checkbox" id="sort_by_length">
 
+      <label for="sort_by_similarity" title="Ähnliche Prompts zusammen gruppieren">Sort by Similarity:</label>
+      <input type="checkbox" id="sort_by_similarity">
+
       <label for="rebuild_dataset_cache" title="Alten tokenisierten Cache verwerfen und neu erzeugen.">
         Cache neu aufbauen:
       </label>
@@ -1621,6 +1624,7 @@ document.getElementById("settings").onsubmit = async e => {
 
     shuffle: document.getElementById("shuffle").checked,
     sort_by_length: document.getElementById("sort_by_length").checked,
+    sort_by_similarity: document.getElementById("sort_by_similarity").checked,
     rebuild_dataset_cache: document.getElementById("rebuild_dataset_cache").checked,
 
     device: document.getElementById("device").value,

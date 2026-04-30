@@ -360,6 +360,7 @@ class WebTrainConfig(MatelixBaseModel):
     max_seq_length: int = 1024
     shuffle: bool = False
     sort_by_length: bool = True
+    sort_by_similarity: bool = False
     max_history_turns: Optional[int] = None
 
     device: str = "auto"

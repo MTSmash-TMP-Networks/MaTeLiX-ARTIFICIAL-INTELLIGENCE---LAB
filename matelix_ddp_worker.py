@@ -112,6 +112,7 @@ class TrainConfig:
 
     shuffle: bool = False
     sort_by_length: bool = True
+    sort_by_similarity: bool = False
     fixed_padding: bool = True
     dataloader_num_workers: int = 0
     max_grad_norm: float = 1.0
@@ -937,9 +938,28 @@ def _flush_pending_samples(
     global_start: int,
     shard_size: int,
     sort_by_length: bool,
+    sort_by_similarity: bool,
 ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], int, int]:
-    if sort_by_length and pending_samples:
-        pending_samples.sort(key=lambda s: int(s.get("seq_len") or len(s["input_ids"])))
+    if (sort_by_length or sort_by_similarity) and pending_samples:
+        def sample_sort_key(sample: Dict[str, Any]) -> Tuple[int, int]:
+            seq_len = int(sample.get("seq_len") or len(sample["input_ids"]))
+            if not sort_by_similarity:
+                return (seq_len, 0)
+            labels = sample.get("labels")
+            input_ids = sample.get("input_ids") or []
+            if labels and len(labels) == len(input_ids):
+                prompt_ids = [int(tid) for tid, lab in zip(input_ids, labels) if int(lab) == -100]
+            else:
+                prompt_ids = [int(tid) for tid in input_ids[: min(128, len(input_ids))]]
+            if not prompt_ids:
+                return (seq_len, 0)
+            signature = 0
+            for tid in prompt_ids[:128]:
+                signature ^= ((tid * 2654435761) & 0xFFFFFFFF)
+            signature ^= (len(prompt_ids) & 0xFFFFFFFF)
+            return (seq_len, signature)
+
+        pending_samples.sort(key=sample_sort_key)
 
     while pending_samples:
         free_slots = shard_size - len(current_samples)
@@ -1089,6 +1109,7 @@ def shard_producer_process_main(cfg_dict: Dict[str, Any], cache_dir_str: str) ->
                     global_start=global_start,
                     shard_size=shard_size,
                     sort_by_length=bool(cfg.sort_by_length),
+                    sort_by_similarity=bool(cfg.sort_by_similarity),
                 )
                 _write_producer_progress(
                     cache_dir,
@@ -1108,6 +1129,7 @@ def shard_producer_process_main(cfg_dict: Dict[str, Any], cache_dir_str: str) ->
                 global_start=global_start,
                 shard_size=shard_size,
                 sort_by_length=bool(cfg.sort_by_length),
+                sort_by_similarity=bool(cfg.sort_by_similarity),
             )
 
         if current_samples:
@@ -1134,6 +1156,7 @@ def shard_producer_process_main(cfg_dict: Dict[str, Any], cache_dir_str: str) ->
             "max_history_turns": cfg.max_history_turns,
             "strict_whole_turns": True,
             "sort_by_length": bool(cfg.sort_by_length),
+            "sort_by_similarity": bool(cfg.sort_by_similarity),
             "sort_buffer_size": sort_buffer_size,
             "bucketed_shuffle": True,
             "use_ngrams": bool(cfg.use_ngrams),
