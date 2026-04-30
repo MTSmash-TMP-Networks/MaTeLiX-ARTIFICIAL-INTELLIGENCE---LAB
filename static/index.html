@@ -18,1394 +18,1920 @@ MaTeLiX AI is a trademark/brand of TMP-SYSTEM-SERVICE GmbH.
 <!DOCTYPE html>
 <html lang="de">
 <head>
-  <title>MaTeLiX ARTIFICIAL INTELLIGENCE - LAB</title>
+  <title>MaTeLiX AI – Training Dashboard</title>
   <meta charset="utf-8"/>
   <meta name="viewport" content="width=device-width, initial-scale=1"/>
-  <link rel="preconnect" href="https://fonts.googleapis.com">
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=Lato:wght@400;600;700&family=Open+Sans:wght@400;600;700&family=Roboto:wght@400;500;700&display=swap" rel="stylesheet">
 
   <style>
-:root {
-  --bg: #f4f7fb;
-  --surface: #ffffff;
-  --surface-alt: #eef3fb;
-  --primary: #2563eb;
-  --primary-soft: #dbe8ff;
-  --accent: #06b6d4;
-  --text: #111827;
-  --muted: #5b6473;
-  --border: #d7dfed;
-  --shadow: 0 12px 30px rgba(15, 23, 42, 0.08);
-  --radius: 16px;
-}
-*{box-sizing:border-box}
-html,body{margin:0;min-height:100%}
-body{font-family:'Roboto','Open Sans','Lato','Segoe UI',sans-serif;color:var(--text);background:linear-gradient(180deg,#f8fbff 0%,#eef4ff 100%);line-height:1.45}
-input, select, textarea, button{font:inherit}
-input, select, textarea{width:100%;background:#fff;border:1px solid var(--border);color:var(--text);border-radius:10px;padding:.62rem .72rem}
-input:focus, select:focus, textarea:focus, button:focus-visible{outline:2px solid rgba(37,99,235,.4);outline-offset:2px}
-#dashboard-header,#systemstatus,#gauge-stats,#all-gpus-list,#dashboard-main,.card,#site-footer,#matrix-spinner-overlay{position:relative}
-#dashboard-header{margin:1rem auto .8rem;width:min(1440px, calc(100% - 2rem));padding:1.4rem 1.6rem;border:1px solid var(--border);border-radius:20px;background:linear-gradient(120deg,#1e3a8a,#0f172a);color:#f8fbff;box-shadow:var(--shadow)}
-#dashboard-header h1{margin:0;font-size:clamp(1.35rem,3.5vw,2.2rem)}
-#dashboard-header span{display:block;margin-top:.35rem;color:#c6dcff}
-#systemstatus, #gauge-stats, #all-gpus-list, #dashboard-main, #site-footer{width:min(1440px, calc(100% - 2rem));margin-inline:auto}
-#systemstatus{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);box-shadow:var(--shadow);padding:1rem}
-.gauges{display:grid;grid-template-columns:repeat(3,minmax(120px,1fr));gap:1rem;align-items:end;text-align:center}
-.gauge-label{color:#1d4ed8;font-size:.95rem;margin-top:.35rem;font-weight:600}
-#gauge-stats{margin-top:.65rem;color:#334155;font-size:1rem;text-align:center;background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:.6rem}
-#all-gpus-list{margin-top:.45rem;margin-bottom:1.1rem;text-align:center;color:#334155}
-#dashboard-main{display:grid;grid-template-columns:repeat(12,minmax(0,1fr));gap:1rem;align-items:start;margin-bottom:1rem}
-.card{grid-column:span 6;background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);box-shadow:var(--shadow);padding:1.1rem}
-.card h2,.card h3{margin:.1rem 0 .95rem;color:#0f172a}
-.settings-grid{display:grid;grid-template-columns:minmax(190px,1.1fr) 2fr;gap:.72rem .95rem;align-items:center}
-.settings-grid label{color:#334155;font-size:.94rem;font-weight:500}
-button{background:linear-gradient(135deg,var(--primary),#1d4ed8);border:0;color:#fff;border-radius:10px;padding:.58rem .95rem;font-weight:700;cursor:pointer}
-button:hover{filter:brightness(1.05)}
-button.danger{background:linear-gradient(135deg,#ef4444,#b91c1c);color:#fff}
-#site-footer{margin-top:1rem;margin-bottom:1rem;padding:1rem;border-radius:14px;border:1px solid var(--border);background:var(--surface);text-align:center;color:var(--muted)}
-#matrix-spinner-overlay{display:none;position:fixed;inset:0;z-index:1000;background:rgba(15,23,42,.35);backdrop-filter:blur(2px);justify-content:center;align-items:center}
-#matrix-spinner-content{background:#fff;border:1px solid var(--border);border-radius:16px;padding:1.4rem 1.7rem;text-align:center;color:#0f172a}
-.matrix-loader{width:58px;height:58px;border-radius:999px;border:4px solid rgba(37,99,235,.2);border-top-color:var(--primary);margin:0 auto .8rem;animation:spin 1s linear infinite}
-@keyframes spin{to{transform:rotate(360deg)}}
-@media (max-width:1200px){.card{grid-column:span 12}.settings-grid{grid-template-columns:1fr}}
-@media (max-width:720px){#dashboard-header,#systemstatus,#gauge-stats,#all-gpus-list,#dashboard-main,#site-footer{width:calc(100% - 1rem)}#dashboard-header{margin-top:.5rem}.gauges{grid-template-columns:1fr;gap:.65rem}}
-</style>
+    :root{
+      --bg0:#070b14;
+      --bg1:#0b1222;
+      --card:#0f1a31cc;
+      --card2:#0f1a31;
+      --stroke:#1d3a66;
+      --stroke2:#2b5aa0;
+
+      --text:#dbeaff;
+      --muted:#9fc0ef;
+      --muted2:#7fa3d8;
+
+      --brand:#4db8ff;
+      --brand2:#7ad3ff;
+      --good:#43f0b5;
+      --warn:#ffcc66;
+      --bad:#ff6b7a;
+
+      --shadow: 0 18px 50px rgba(0,0,0,.45);
+      --shadow2: 0 10px 26px rgba(0,0,0,.35);
+      --radius: 18px;
+
+      --mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+      --sans: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif;
+    }
+
+    *{ box-sizing:border-box; }
+    html,body{ height:100%; }
+    body{
+      margin:0;
+      color:var(--text);
+      font-family:var(--sans);
+      background:
+        radial-gradient(1200px 700px at 15% 10%, rgba(77,184,255,.25), transparent 60%),
+        radial-gradient(900px 600px at 85% 20%, rgba(67,240,181,.14), transparent 55%),
+        radial-gradient(900px 700px at 65% 95%, rgba(122,211,255,.10), transparent 60%),
+        linear-gradient(180deg, var(--bg0), var(--bg1));
+      overflow-x:hidden;
+    }
+
+    /* subtle grid */
+    .bg-grid{
+      position:fixed; inset:0;
+      pointer-events:none;
+      opacity:.16;
+      background:
+        linear-gradient(to right, rgba(255,255,255,.06) 1px, transparent 1px),
+        linear-gradient(to bottom, rgba(255,255,255,.06) 1px, transparent 1px);
+      background-size: 42px 42px;
+      mask-image: radial-gradient(700px 500px at 50% 30%, #000 40%, transparent 75%);
+      z-index:0;
+    }
+
+    .app{
+      position:relative;
+      z-index:1;
+      max-width: 1400px;
+      margin: 0 auto;
+      padding: 18px 16px 40px;
+    }
+
+    /* Topbar */
+    .topbar{
+      display:flex;
+      align-items:center;
+      justify-content:space-between;
+      gap:14px;
+      padding: 14px 14px;
+      border:1px solid rgba(77,184,255,.22);
+      background: linear-gradient(180deg, rgba(15,26,49,.78), rgba(15,26,49,.55));
+      border-radius: 22px;
+      box-shadow: var(--shadow2);
+      backdrop-filter: blur(10px);
+    }
+    .brand{
+      display:flex; gap:12px; align-items:center;
+      min-width: 280px;
+    }
+    .logo{
+      width:42px; height:42px; border-radius: 14px;
+      background:
+        radial-gradient(circle at 30% 30%, rgba(255,255,255,.25), transparent 60%),
+        linear-gradient(135deg, rgba(77,184,255,.95), rgba(67,240,181,.85));
+      box-shadow: 0 10px 26px rgba(77,184,255,.18);
+      border:1px solid rgba(255,255,255,.18);
+    }
+    .brand h1{
+      margin:0;
+      font-size: 16px;
+      letter-spacing:.02em;
+      font-weight: 800;
+      text-transform: uppercase;
+    }
+    .brand .sub{
+      margin-top:2px;
+      font-size: 12.5px;
+      color: var(--muted);
+      font-family: var(--mono);
+      opacity:.95;
+    }
+
+    .top-actions{
+      display:flex; gap:10px; align-items:center; flex-wrap:wrap;
+      justify-content:flex-end;
+    }
+
+    .pill{
+      display:flex; align-items:center; gap:10px;
+      padding:10px 12px;
+      border-radius: 999px;
+      border:1px solid rgba(255,255,255,.10);
+      background: rgba(10,16,30,.55);
+      backdrop-filter: blur(8px);
+      box-shadow: 0 10px 22px rgba(0,0,0,.25);
+      color: var(--muted);
+      font-size: 12.8px;
+      font-family: var(--mono);
+    }
+    .dot{ width:8px; height:8px; border-radius:999px; background: var(--warn); box-shadow: 0 0 0 4px rgba(255,204,102,.12); }
+    .dot.good{ background: var(--good); box-shadow: 0 0 0 4px rgba(67,240,181,.12); }
+    .dot.bad{ background: var(--bad); box-shadow: 0 0 0 4px rgba(255,107,122,.12); }
+
+    /* Buttons / inputs */
+    button, input, select, textarea{ font: inherit; }
+    input, select, textarea{
+      width:100%;
+      padding: 10px 12px;
+      background: rgba(6,10,20,.55);
+      border:1px solid rgba(77,184,255,.25);
+      border-radius: 12px;
+      color: var(--text);
+      outline:none;
+      box-shadow: inset 0 0 0 1px rgba(255,255,255,.04);
+    }
+    input:focus, select:focus, textarea:focus{
+      border-color: rgba(122,211,255,.70);
+      box-shadow: 0 0 0 4px rgba(77,184,255,.14);
+    }
+    textarea{ resize: vertical; }
+
+    .btn{
+      border:1px solid rgba(77,184,255,.45);
+      background: linear-gradient(135deg, rgba(77,184,255,.95), rgba(34,128,255,.55));
+      color:#07101f;
+      font-weight: 800;
+      padding: 10px 12px;
+      border-radius: 14px;
+      cursor:pointer;
+      box-shadow: 0 14px 26px rgba(77,184,255,.14);
+      transition: transform .12s ease, filter .12s ease, box-shadow .12s ease;
+      font-family: var(--mono);
+      letter-spacing:.01em;
+      white-space:nowrap;
+    }
+    .btn:hover{ transform: translateY(-1px); filter:brightness(1.03); }
+    .btn:active{ transform: translateY(0px); filter:brightness(.98); }
+    .btn.secondary{
+      background: rgba(15,26,49,.55);
+      color: var(--text);
+      border:1px solid rgba(255,255,255,.12);
+      box-shadow: 0 14px 26px rgba(0,0,0,.18);
+      font-weight: 700;
+    }
+    .btn.danger{
+      background: linear-gradient(135deg, rgba(255,107,122,.95), rgba(160,20,60,.60));
+      border-color: rgba(255,107,122,.55);
+      color:#16060a;
+      box-shadow: 0 14px 26px rgba(255,107,122,.12);
+    }
+    .btn.small{
+      padding: 7px 10px;
+      border-radius: 12px;
+      font-size: 12.5px;
+      font-weight: 800;
+    }
+
+    /* Layout */
+    .grid{
+      display:grid;
+      grid-template-columns: 1.25fr .95fr;
+      gap: 16px;
+      margin-top: 16px;
+      align-items: start;
+    }
+    @media (max-width: 1100px){
+      .grid{ grid-template-columns: 1fr; }
+      .brand{ min-width: 0; }
+    }
+
+    .card{
+      border-radius: var(--radius);
+      border:1px solid rgba(77,184,255,.18);
+      background: linear-gradient(180deg, rgba(15,26,49,.72), rgba(15,26,49,.52));
+      box-shadow: var(--shadow2);
+      backdrop-filter: blur(10px);
+      overflow:hidden;
+    }
+    .card .hd{
+      padding: 14px 14px 12px;
+      display:flex; align-items:center; justify-content:space-between; gap:10px;
+      border-bottom:1px solid rgba(255,255,255,.08);
+      background: linear-gradient(180deg, rgba(255,255,255,.05), transparent);
+    }
+    .card .hd h2{
+      margin:0;
+      font-size: 14px;
+      letter-spacing:.03em;
+      text-transform: uppercase;
+      font-family: var(--mono);
+      color: var(--brand2);
+    }
+    .card .bd{ padding: 14px; }
+
+    /* KPI row */
+    .kpis{
+      display:grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 12px;
+      margin-top: 14px;
+    }
+    @media (max-width: 1100px){
+      .kpis{ grid-template-columns: repeat(2, 1fr); }
+    }
+    @media (max-width: 560px){
+      .kpis{ grid-template-columns: 1fr; }
+    }
+    .kpi{
+      padding: 12px 12px;
+      border-radius: 16px;
+      border:1px solid rgba(255,255,255,.10);
+      background: rgba(6,10,20,.35);
+      box-shadow: inset 0 0 0 1px rgba(255,255,255,.04);
+    }
+    .kpi .label{
+      font-size: 12px;
+      color: var(--muted2);
+      font-family: var(--mono);
+      letter-spacing:.02em;
+    }
+    .kpi .value{
+      margin-top: 6px;
+      font-size: 18px;
+      font-weight: 900;
+      font-family: var(--mono);
+      color: var(--text);
+    }
+    .kpi .hint{
+      margin-top: 6px;
+      font-size: 12px;
+      color: var(--muted);
+      opacity:.9;
+    }
+
+    /* Tabs */
+    .tabs{
+      display:flex; gap:8px; flex-wrap:wrap;
+    }
+    .tab{
+      padding: 8px 10px;
+      border-radius: 999px;
+      border:1px solid rgba(255,255,255,.10);
+      background: rgba(6,10,20,.35);
+      color: var(--muted);
+      font-family: var(--mono);
+      cursor:pointer;
+      user-select:none;
+      transition: .12s ease;
+      font-size: 12.5px;
+    }
+    .tab.active{
+      background: rgba(77,184,255,.16);
+      border-color: rgba(77,184,255,.40);
+      color: var(--text);
+      box-shadow: 0 10px 20px rgba(77,184,255,.10);
+    }
+    .pane{ display:none; }
+    .pane.active{ display:block; }
+
+    /* Forms */
+    .form-grid{
+      display:grid;
+      grid-template-columns: 220px 1fr;
+      gap: 10px 12px;
+      align-items:center;
+    }
+    .form-grid label{
+      color: var(--muted);
+      font-size: 13px;
+      font-family: var(--mono);
+    }
+    .form-grid input[type="checkbox"]{
+      width: 20px; height: 20px;
+      accent-color: var(--brand);
+      justify-self: start;
+    }
+    .form-grid .row-actions{
+      grid-column: 1 / -1;
+      display:flex; gap:10px; flex-wrap:wrap;
+      padding-top: 6px;
+    }
+    @media (max-width: 720px){
+      .form-grid{ grid-template-columns: 1fr; }
+    }
+
+    /* Status list */
+    .stat-grid{
+      display:grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 10px 12px;
+    }
+    @media (max-width: 720px){
+      .stat-grid{ grid-template-columns: 1fr; }
+    }
+    .stat{
+      padding: 12px;
+      border-radius: 16px;
+      border:1px solid rgba(255,255,255,.10);
+      background: rgba(6,10,20,.35);
+    }
+    .stat .k{ color: var(--muted2); font-size: 12px; font-family: var(--mono); }
+    .stat .v{ margin-top: 6px; font-family: var(--mono); font-weight: 900; font-size: 14px; color: var(--text); }
+
+    .progress{
+      height: 12px;
+      background: rgba(6,10,20,.55);
+      border:1px solid rgba(255,255,255,.10);
+      border-radius: 999px;
+      overflow:hidden;
+      box-shadow: inset 0 0 12px rgba(0,0,0,.35);
+    }
+    .bar{
+      height:100%;
+      width:0%;
+      background: linear-gradient(90deg, rgba(77,184,255,.95), rgba(67,240,181,.80));
+      box-shadow: 0 0 16px rgba(77,184,255,.28);
+      transition: width .2s ease;
+    }
+
+    /* Logs */
+    pre.logbox{
+      margin:0;
+      padding: 12px;
+      height: 340px;
+      overflow:auto;
+      border-radius: 16px;
+      border:1px solid rgba(255,255,255,.10);
+      background: rgba(6,10,20,.40);
+      font-family: var(--mono);
+      font-size: 12.5px;
+      color: #bfe2ff;
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+
+    /* Chart canvas wrapper */
+    .chart-wrap{
+      border-radius: 16px;
+      border:1px solid rgba(255,255,255,.10);
+      background: rgba(6,10,20,.35);
+      padding: 10px;
+      overflow:hidden;
+    }
+    #lossChart{
+      width:100% !important;
+      height: 240px !important;
+      display:block;
+    }
+
+    /* Live preview */
+    .preview{
+      border-radius: 16px;
+      border:1px solid rgba(255,255,255,.10);
+      background: rgba(6,10,20,.35);
+      padding: 12px;
+    }
+    #livepreview{
+      font-family: var(--mono);
+      color: #bfe2ff;
+      white-space: pre-wrap;
+      overflow-wrap:anywhere;
+      word-break: break-word;
+      min-height: 48px;
+      margin:0;
+    }
+    .preview-actions{
+      display:flex;
+      justify-content:flex-end;
+      margin-top: 10px;
+    }
+
+    /* History */
+    details{
+      border:1px solid rgba(255,255,255,.10);
+      background: rgba(6,10,20,.30);
+      border-radius: 16px;
+      padding: 10px 12px;
+      margin-bottom: 10px;
+    }
+    summary{
+      cursor:pointer;
+      font-family: var(--mono);
+      color: var(--brand2);
+      font-weight: 900;
+    }
+    details pre{
+      border-radius: 14px;
+      border:1px solid rgba(255,255,255,.10);
+      background: rgba(6,10,20,.35);
+      padding: 10px;
+      overflow:auto;
+      max-height: 260px;
+      color:#bfe2ff;
+    }
+    a{ color: var(--brand2); }
+
+    /* Chat */
+    .chat-history{
+      height: 280px;
+      overflow:auto;
+      border-radius: 16px;
+      border:1px solid rgba(255,255,255,.10);
+      background: rgba(6,10,20,.35);
+      padding: 10px;
+    }
+    .chat-row{
+      display:flex;
+      gap:10px;
+      margin-top: 10px;
+    }
+    .chat-row input{ flex:1; }
+    .chat-msg{
+      margin: 8px 0;
+      line-height: 1.35;
+      font-size: 13px;
+      color: #cfe8ff;
+    }
+    .chat-msg .who{
+      color: var(--brand2);
+      font-family: var(--mono);
+      font-weight: 900;
+    }
+
+    /* Footer */
+    footer{
+      margin-top: 16px;
+      padding: 14px 4px 0;
+      color: var(--muted);
+      font-family: var(--mono);
+      font-size: 12px;
+      opacity:.9;
+      text-align:center;
+    }
+
+    /* Loader overlay */
+    .overlay{
+      display:none;
+      position:fixed; inset:0;
+      background: rgba(5,8,16,.72);
+      backdrop-filter: blur(8px);
+      z-index: 9999;
+      align-items:center;
+      justify-content:center;
+      padding: 16px;
+    }
+    .overlay .box{
+      width:min(520px, 96vw);
+      border-radius: 22px;
+      border:1px solid rgba(77,184,255,.25);
+      background: linear-gradient(180deg, rgba(15,26,49,.85), rgba(15,26,49,.65));
+      box-shadow: var(--shadow);
+      padding: 18px;
+    }
+    .overlay .title{
+      font-family: var(--mono);
+      font-weight: 900;
+      color: var(--brand2);
+      letter-spacing:.02em;
+      text-transform: uppercase;
+      margin:0 0 6px 0;
+      font-size: 14px;
+    }
+    .overlay .subtitle{
+      margin:0 0 14px 0;
+      color: var(--muted);
+      font-size: 13px;
+      line-height: 1.4;
+    }
+    .spinner{
+      width: 44px; height: 44px;
+      border-radius: 999px;
+      border: 3px solid rgba(255,255,255,.10);
+      border-top-color: rgba(77,184,255,.95);
+      border-right-color: rgba(67,240,181,.75);
+      animation: spin 0.9s linear infinite;
+      margin-bottom: 12px;
+    }
+    @keyframes spin{ to{ transform: rotate(360deg); } }
+  </style>
 </head>
 
 <body>
-<header id="dashboard-header" role="banner">
-  <h1>MaTeLiX ARTIFICIAL INTELLIGENCE - LAB</h1>
-  <span>LLM Trainer (Row-SFT, Chat + Text) – powered by TMP-SYSTEM-SERVICE GmbH</span>
-</header>
-
-<section id="systemstatus" role="region" aria-label="Systemauslastung">
-  <div class="gauges">
-    <div>
-      <canvas id="cpuGauge" width="100" height="50"></canvas>
-      <div class="gauge-label">CPU</div>
-    </div>
-    <div>
-      <canvas id="ramGauge" width="100" height="50"></canvas>
-      <div class="gauge-label">RAM</div>
-    </div>
-    <div>
-      <canvas id="gpuGauge" width="100" height="50"></canvas>
-      <div class="gauge-label">GPU</div>
-    </div>
-  </div>
-</section>
-
-<div id="gauge-stats">
-  RAM: <span id="ramStat">--</span> &nbsp;|&nbsp; GPU: <span id="gpuName">--</span> &nbsp;|&nbsp; GPU RAM: <span id="gpuRam">--</span> &nbsp;|&nbsp; #GPUs: <span id="numGpus">--</span>
-</div>
-<div id="all-gpus-list"></div>
-
-<main id="dashboard-main" role="main" aria-label="Dashboard Inhalte">
-  <div class="card">
-    <h2>Training Setup</h2>
-
-    <form id="settings" autocomplete="off" class="settings-grid">
-      <label for="model_dir_select">Base Modell wählen:</label>
-      <select id="model_dir_select">
-        <option value="MTSmash/EvaGPT-German-1B-10-4-2026-7">EvaGPT-German-1B</option>
-        <option value="custom">Anderes Modell (Pfad angeben)</option>
-      </select>
-
-      <label for="model_dir" id="model_dir_label" style="display:none;">Eigenes Modellverzeichnis:</label>
-      <input type="text" id="model_dir" style="display:none;" placeholder="z.B. ./EvaGPT-500m/">
-
-      <label for="csv_path_select">Trainingsdatei (CSV):</label>
-      <select id="csv_path_select"></select>
-      <input type="text" id="csv_path" style="display:none;" placeholder="Pfad zur CSV">
-
-      <label for="dataset_source">Dataset-Quelle:</label>
-      <select id="dataset_source">
-        <option value="local_csv" selected>Lokale CSV</option>
-        <option value="huggingface">HuggingFace Dataset</option>
-      </select>
-
-      <label for="hf_dataset_id" id="hf_dataset_id_label" style="display:none;">HF Dataset ID:</label>
-      <input type="text" id="hf_dataset_id" style="display:none;" placeholder="z. B. tatsu-lab/alpaca">
-
-      <label for="hf_dataset_split" id="hf_dataset_split_label" style="display:none;">HF Split:</label>
-      <input type="text" id="hf_dataset_split" style="display:none;" value="train" placeholder="train">
-
-      <label for="save_dir">Speicher-Ordner (Basis):</label>
-      <input type="text" id="save_dir" value="./training_outputs">
-
-      <label for="template_mode" id="template_mode_label">Vorlagen-Typ:</label>
-      <select id="template_mode">
-        <option value="dialogplus" selected>Dialog (Chat-Template)</option>
-        <option value="plain">Nur Textspalte</option>
-      </select>
-
-      <label for="column_name" id="column_field" class="column_row" style="display:none;">Spaltenname:</label>
-      <input type="text" id="column_name" value="text" class="column_row" style="display:none; width:10em;">
-
-      <label for="learning_rate">Lernrate:</label>
-      <input type="number" step="0.000001" id="learning_rate" value="0.0002">
-
-      <label for="lr_schedule">Schedule:</label>
-      <select id="lr_schedule">
-        <option value="cosine" selected>Cosine</option>
-        <option value="linear">Linear</option>
-      </select>
-
-      <label for="lr_decay_factor">LR Decay Factor:</label>
-      <input type="number" step="0.01" id="lr_decay_factor" value="1.0" min="0.01">
-
-      <label for="warmup_steps">Warmup Steps:</label>
-      <input type="number" id="warmup_steps" value="0" min="0">
-
-      <label for="warmup_ratio">Warmup Ratio:</label>
-      <input type="number" step="0.01" id="warmup_ratio" value="0" min="0" max="1">
-
-      <label for="min_lr_ratio">Min LR Ratio:</label>
-      <input type="number" step="0.01" id="min_lr_ratio" value="0.05" min="0" max="1">
-
-      <label for="lr_adjust_interval_steps">LR Adjust Interval:</label>
-      <input type="number" id="lr_adjust_interval_steps" value="25" min="1">
-
-      <label for="lr_adjust_min_change">LR Adjust Min Change:</label>
-      <input type="number" step="0.01" id="lr_adjust_min_change" value="0.05" min="0" max="1">
-
-      <label for="adaptive_scheduler">Adaptive Scheduler:</label>
-      <input type="checkbox" id="adaptive_scheduler" checked>
-
-      <label for="adaptive_scheduler_freeze_on_producer_done">Freeze wenn Producer fertig:</label>
-      <input type="checkbox" id="adaptive_scheduler_freeze_on_producer_done" checked>
-
-      <label for="adaptive_scheduler_never_increase_lr">LR nie erhöhen:</label>
-      <input type="checkbox" id="adaptive_scheduler_never_increase_lr" checked>
-
-      <label for="adaptive_scheduler_only_extend_steps">Nur Steps verlängern:</label>
-      <input type="checkbox" id="adaptive_scheduler_only_extend_steps" checked>
-
-      <label for="per_device_train_batch_size">Batchgröße:</label>
-      <input type="number" id="per_device_train_batch_size" value="1" min="1">
-
-      <label for="gradient_accumulation_steps">Gradient Acc. Steps:</label>
-      <input type="number" id="gradient_accumulation_steps" value="8" min="1">
-
-      <label for="num_train_epochs" title="Wie oft soll das gesamte Dataset durchlaufen werden?">Epochen:</label>
-      <input type="number" id="num_train_epochs" value="3" step="0.5" min="0.5">
-
-      <label for="max_steps" title="Optionales Hard-Limit (leer lassen = aus)">Max Steps:</label>
-      <input type="number" id="max_steps" placeholder="(optional)" min="1">
-
-      <label for="max_seq_length" title="Tokenfenster fürs Training">Max Seq Length:</label>
-      <input type="number" id="max_seq_length" value="4096" min="64">
-
-      <label for="max_history_turns" title="Optionaler zusätzlicher Deckel. Leer = automatisch nur nach Tokenfenster entscheiden.">
-        Max History Turns:
-      </label>
-      <input type="number" id="max_history_turns" placeholder="leer = auto" min="1">
-
-      <label for="shuffle">Shuffle:</label>
-      <input type="checkbox" id="shuffle">
-
-      <label for="sort_by_length" title="Schneller: weniger Padding">Sort by Length:</label>
-      <input type="checkbox" id="sort_by_length">
-
-      <label for="sort_by_similarity" title="Ähnliche Prompts zusammen gruppieren">Sort by Similarity:</label>
-      <input type="checkbox" id="sort_by_similarity">
-
-      <label for="rebuild_dataset_cache" title="Alten tokenisierten Cache verwerfen und neu erzeugen.">
-        Cache neu aufbauen:
-      </label>
-      <input type="checkbox" id="rebuild_dataset_cache" checked>
-
-      <label for="use_ngrams">N-Gramm-Optimierung (Beta):</label>
-      <input type="checkbox" id="use_ngrams" title="Aktiviert N-Gramm-Tokenisierung für bessere Kompression">
-
-      <label for="ngram_max" class="ngram_row" style="display:none;">Max N-Gramm-Länge:</label>
-      <input type="number" id="ngram_max" class="ngram_row" style="display:none;" value="12" min="2" max="64">
-
-      <label for="ngram_top_k" class="ngram_row" style="display:none;">Top-K N-Grams:</label>
-      <input type="number" id="ngram_top_k" class="ngram_row" style="display:none;" value="1500" min="10">
-
-      <label for="ngram_min_chars" class="ngram_row" style="display:none;">Min. Zeichen:</label>
-      <input type="number" id="ngram_min_chars" class="ngram_row" style="display:none;" value="16" min="1">
-
-      <label for="ngram_min_words" class="ngram_row" style="display:none;">Min. Wörter:</label>
-      <input type="number" id="ngram_min_words" class="ngram_row" style="display:none;" value="2" min="0">
-
-      <label for="ngram_max_samples" class="ngram_row" style="display:none;">Max Samples:</label>
-      <input type="number" id="ngram_max_samples" class="ngram_row" style="display:none;" value="4000" min="100">
-
-      <label for="ngram_budgeted" class="ngram_row" style="display:none;">Budget-gesteuert:</label>
-      <input type="checkbox" id="ngram_budgeted" class="ngram_row" style="display:none;" checked title="Optimiert N-Grams für das Token-Budget">
-
-      <label for="ngram_target_fit" class="ngram_row" style="display:none;">Ziel-Fit:</label>
-      <input type="number" step="0.01" id="ngram_target_fit" class="ngram_row" style="display:none;" value="0.98" min="0.8" max="1.0">
-
-      <label for="ngram_eval_samples" class="ngram_row" style="display:none;">Eval Samples:</label>
-      <input type="number" id="ngram_eval_samples" class="ngram_row" style="display:none;" value="512" min="32">
-
-      <label for="ngram_add_batch" class="ngram_row" style="display:none;">Add Batch:</label>
-      <input type="number" id="ngram_add_batch" class="ngram_row" style="display:none;" value="64" min="1">
-
-      <label for="ngram_conflict_overlap_ratio" class="ngram_row" style="display:none;">Conflict Overlap Ratio:</label>
-      <input type="number" step="0.01" id="ngram_conflict_overlap_ratio" class="ngram_row" style="display:none;" value="0.8" min="0" max="1">
-
-      <label for="ngram_prefer_longest_match" class="ngram_row" style="display:none;">Prefer Longest Match:</label>
-      <input type="checkbox" id="ngram_prefer_longest_match" class="ngram_row" style="display:none;" checked>
-
-      <label for="ngram_use_code_lines" class="ngram_row" style="display:none;">Code-Zeilen nutzen:</label>
-      <input type="checkbox" id="ngram_use_code_lines" class="ngram_row" style="display:none;" checked>
-
-      <label for="ngram_code_line_min_chars" class="ngram_row" style="display:none;">Code-Zeile Min. Zeichen:</label>
-      <input type="number" id="ngram_code_line_min_chars" class="ngram_row" style="display:none;" value="12" min="1">
-
-      <label for="ngram_code_line_min_count" class="ngram_row" style="display:none;">Code-Zeile Min. Count:</label>
-      <input type="number" id="ngram_code_line_min_count" class="ngram_row" style="display:none;" value="2" min="1">
-
-      <label for="ngram_code_line_top_k" class="ngram_row" style="display:none;">Code-Zeile Top-K:</label>
-      <input type="number" id="ngram_code_line_top_k" class="ngram_row" style="display:none;" value="400" min="1">
-
-      <label for="ngram_code_line_score_boost" class="ngram_row" style="display:none;">Code-Zeile Score Boost:</label>
-      <input type="number" step="0.01" id="ngram_code_line_score_boost" class="ngram_row" style="display:none;" value="1.35" min="0">
-
-      <label for="ngram_code_pattern_boost" class="ngram_row" style="display:none;">Code-Pattern Boost:</label>
-      <input type="checkbox" id="ngram_code_pattern_boost" class="ngram_row" style="display:none;" checked>
-
-      <label for="ngram_code_pattern_extra_boost" class="ngram_row" style="display:none;">Code-Pattern Extra Boost:</label>
-      <input type="number" step="0.01" id="ngram_code_pattern_extra_boost" class="ngram_row" style="display:none;" value="1.2" min="0">
-
-      <label for="ngram_focus_oversize_samples" class="ngram_row" style="display:none;">Oversize-Samples priorisieren:</label>
-      <input type="checkbox" id="ngram_focus_oversize_samples" class="ngram_row" style="display:none;" checked>
-
-      <label for="ngram_oversize_sample_boost" class="ngram_row" style="display:none;">Oversize Sample Boost:</label>
-      <input type="number" step="0.1" id="ngram_oversize_sample_boost" class="ngram_row" style="display:none;" value="4.0" min="0">
-
-      <label for="ngram_near_limit_threshold" class="ngram_row" style="display:none;">Near-Limit Threshold:</label>
-      <input type="number" step="0.01" id="ngram_near_limit_threshold" class="ngram_row" style="display:none;" value="0.90" min="0" max="1">
-
-      <label for="ngram_near_limit_boost" class="ngram_row" style="display:none;">Near-Limit Boost:</label>
-      <input type="number" step="0.1" id="ngram_near_limit_boost" class="ngram_row" style="display:none;" value="1.5" min="0">
-
-      <label for="ngram_eval_max_seq_length" class="ngram_row" style="display:none;">Eval Max Seq Length:</label>
-      <input type="number" id="ngram_eval_max_seq_length" class="ngram_row" style="display:none;" value="1024" min="1">
-
-      <label for="ngram_track_saved_samples" class="ngram_row" style="display:none;">Saved Samples tracken:</label>
-      <input type="checkbox" id="ngram_track_saved_samples" class="ngram_row" style="display:none;" checked>
-
-      <label for="ngram_saved_sample_boost" class="ngram_row" style="display:none;">Saved Sample Boost:</label>
-      <input type="number" step="0.1" id="ngram_saved_sample_boost" class="ngram_row" style="display:none;" value="8.0" min="0">
-
-      <label for="precision_mode">Precision:</label>
-      <select id="precision_mode" title="fp16/bf16 nur auf CUDA; MPS/CPU immer FP32">
-        <option value="auto" selected>auto</option>
-        <option value="fp32">FP32</option>
-        <option value="fp16">FP16 (nur CUDA)</option>
-        <option value="bf16">BF16 (nur CUDA, falls unterstützt)</option>
-      </select>
-
-      <label for="gradient_checkpointing" title="Spart VRAM, kostet Laufzeit (nur sinnvoll CUDA).">Grad Checkpointing:</label>
-      <input type="checkbox" id="gradient_checkpointing" checked>
-
-      <label for="log_cuda_memory">CUDA Memory Logging:</label>
-      <input type="checkbox" id="log_cuda_memory" checked>
-
-      <label for="cuda_memory_log_interval_steps">CUDA Memory Log Interval:</label>
-      <input type="number" id="cuda_memory_log_interval_steps" value="25" min="1">
-
-      <label for="cuda_empty_cache_interval_steps">CUDA Empty Cache Interval:</label>
-      <input type="number" id="cuda_empty_cache_interval_steps" value="50" min="0">
-
-      <label for="device">Device:</label>
-      <select id="device"></select>
-
-      <label for="train_mode">Trainingsmodus:</label>
-      <select id="train_mode">
-        <option value="full">Vollständiges Training (alle Gewichte)</option>
-        <option value="lora">Finetuning mit LoRA</option>
-      </select>
-
-      <label for="lora_r" class="lora_row" style="display:none;">LoRA r:</label>
-      <input type="number" id="lora_r" value="8" class="lora_row" style="display:none; width:7em;" min="1">
-
-      <label for="lora_alpha" class="lora_row" style="display:none;">LoRA Alpha:</label>
-      <input type="number" id="lora_alpha" value="16" class="lora_row" style="display:none; width:7em;" min="1">
-
-      <label for="merge_lora_on_save" class="lora_row" style="display:none;" title="Versucht LoRA beim Speichern in ein merged Modell zu überführen.">
-        LoRA Merge beim Speichern:
-      </label>
-      <input type="checkbox" id="merge_lora_on_save" class="lora_row" style="display:none;" checked>
-
-      <label for="train_from_scratch" title="Initialisiert das Modell neu aus der config.json statt Pretrained-Gewichte zu laden.">
-        Von Scratch trainieren:
-      </label>
-      <input type="checkbox" id="train_from_scratch">
-
-      <label class="scratch_cfg_row" for="scratch_hidden_size" style="display:none;" title="Leer lassen = Wert aus der Basis-config übernehmen.">
-        Scratch Hidden Size:
-      </label>
-      <input type="number" id="scratch_hidden_size" class="scratch_cfg_row" style="display:none;" placeholder="leer = Basis-Config" min="1">
-
-      <label class="scratch_cfg_row" for="scratch_num_hidden_layers" style="display:none;" title="Leer lassen = Wert aus der Basis-config übernehmen.">
-        Scratch Layer Count:
-      </label>
-      <input type="number" id="scratch_num_hidden_layers" class="scratch_cfg_row" style="display:none;" placeholder="leer = Basis-Config" min="1">
-
-      <label class="scratch_cfg_row" for="scratch_num_attention_heads" style="display:none;" title="Leer lassen = Wert aus der Basis-config übernehmen.">
-        Scratch Attention Heads:
-      </label>
-      <input type="number" id="scratch_num_attention_heads" class="scratch_cfg_row" style="display:none;" placeholder="leer = Basis-Config" min="1">
-
-      <label class="scratch_cfg_row" for="scratch_intermediate_size" style="display:none;" title="Leer lassen = Wert aus der Basis-config übernehmen.">
-        Scratch Intermediate Size:
-      </label>
-      <input type="number" id="scratch_intermediate_size" class="scratch_cfg_row" style="display:none;" placeholder="leer = Basis-Config" min="1">
-
-      <label class="scratch_cfg_row" for="scratch_num_key_value_heads" style="display:none;" title="Optional für GQA/MQA. Leer lassen = Basis-config.">
-        Scratch KV Heads:
-      </label>
-      <input type="number" id="scratch_num_key_value_heads" class="scratch_cfg_row" style="display:none;" placeholder="optional" min="1">
-
-      <label class="scratch_cfg_row" for="scratch_max_position_embeddings" style="display:none;" title="Leer lassen = Wert aus der Basis-config übernehmen.">
-        Scratch Max Positions:
-      </label>
-      <input type="number" id="scratch_max_position_embeddings" class="scratch_cfg_row" style="display:none;" placeholder="leer = Basis-Config" min="1">
-
-      <label class="scratch_cfg_row" for="include_prompt_loss" style="display:none;" title="Nimmt im Dialog-Modus auch Prompt/System/User-Tokens in die Loss-Berechnung auf.">
-        Prompt in Loss einbeziehen:
-      </label>
-      <input type="checkbox" id="include_prompt_loss" class="scratch_cfg_row" style="display:none;">
-
-      <label class="scratch_cfg_row" style="display:none; opacity:0.85; align-self:start;">
-        Hinweis:
-      </label>
-      <div class="scratch_cfg_row" style="display:none; justify-self:end; width:58%; color:#9ec9ff; font-size:0.94em; line-height:1.35;">
-        Nur im Scratch-Modus aktiv. <code>vocab_size</code> und Tokenizer bleiben unverändert; leere Felder übernehmen die Werte aus der Basis-<code>config.json</code>.
+  <div class="bg-grid"></div>
+
+  <div class="app">
+    <div class="topbar">
+      <div class="brand">
+        <div class="logo" aria-hidden="true"></div>
+        <div>
+          <h1>MaTeLiX Artificial Intelligence – Lab</h1>
+          <div class="sub">LLM Trainer (Row-SFT, Chat + Text) · TMP-SYSTEM-SERVICE GmbH</div>
+        </div>
       </div>
 
-      <div></div>
-      <div style="display: flex; gap:1.1em; flex-wrap:wrap;">
-        <button type="submit">Training starten</button>
-        <button type="button" id="stopBtn">Training stoppen</button>
-      </div>
-    </form>
-  </div>
-
-  <div class="card" style="max-width:520px;">
-    <h3>Status</h3>
-    <div class="status">
-      <b>Status:</b> <span id="status">-</span>
-      <b>Step:</b> <span id="step">-</span>
-      <b>Step Fortschritt:</b> <span id="step_progress">-</span>
-      <b>Epoche:</b> <span id="epoch_progress">-</span>
-      <b>Updates / Epoche:</b> <span id="updates_per_epoch">-</span>
-      <b>Loss:</b> <span id="loss">-</span>
-      <b>Lernrate:</b> <span id="learning_rate_display">-</span>
-      <b>Restzeit:</b> <span id="eta">-</span>
-      <b>Tokens/Step:</b> <span id="tokens_per_step">-</span>
-      <b>Total Tokens:</b> <span id="total_tokens">-</span>
-      <b>Scheduler Steps:</b> <span id="scheduler_total_steps">-</span>
-      <b>CSV Sample Estimate:</b> <span id="csv_total_samples_est">-</span>
-      <b>Real Samples:</b> <span id="total_samples_real">-</span>
-      <b>Skipped Samples:</b> <span id="skipped_samples">-</span>
-      <b>CUDA Allocated:</b> <span id="cuda_allocated_mb">-</span>
-      <b>CUDA Reserved:</b> <span id="cuda_reserved_mb">-</span>
-      <b>CUDA Max Allocated:</b> <span id="cuda_max_allocated_mb">-</span>
-      <b>CUDA Max Reserved:</b> <span id="cuda_max_reserved_mb">-</span>
-    </div>
-
-    <div style="margin:-0.7em 0 1.3em 0;">
-      <div style="height:12px; background:#0e1d31; border:1px solid #2f9dff66; border-radius:999px; overflow:hidden; box-shadow:inset 0 0 8px #2a9cff22;">
-        <div id="step_progress_bar" style="height:100%; width:0%; background:linear-gradient(90deg,#2f9dff,#71c8ff); box-shadow:0 0 12px #46b0ff88;"></div>
+      <div class="top-actions">
+        <div class="pill" title="Training-Status">
+          <span id="runDot" class="dot"></span>
+          <span id="runLabel">Status: -</span>
+        </div>
+        <div class="pill" title="Device / GPU Info">
+          <span style="color:var(--brand2); font-weight:900;">GPU</span>
+          <span id="gpuName">-</span>
+          <span style="opacity:.35;">|</span>
+          <span id="gpuRam">-</span>
+        </div>
+        <button class="btn secondary small" type="button" id="refreshBtn">Refresh</button>
       </div>
     </div>
 
-    <h3>Adaptive Scheduler / Producer</h3>
-    <div class="status compact">
-      <b>Scheduler Mode:</b> <span id="scheduler_mode">-</span>
-      <b>Scheduler Source:</b> <span id="scheduler_source">-</span>
-      <b>Adaptive Scheduler:</b> <span id="adaptive_scheduler_status">-</span>
-      <b>Freeze aktiv:</b> <span id="adaptive_scheduler_frozen">-</span>
-      <b>LR nie erhöhen:</b> <span id="adaptive_scheduler_never_increase_lr">-</span>
-      <b>Nur Steps verlängern:</b> <span id="adaptive_scheduler_only_extend_steps">-</span>
-      <b>Projected Samples:</b> <span id="projected_samples">-</span>
-      <b>Seen Samples:</b> <span id="producer_seen_samples">-</span>
-      <b>Tokenized Samples:</b> <span id="producer_tokenized_samples">-</span>
-      <b>Shards Written:</b> <span id="producer_num_shards">-</span>
-      <b>Producer Done:</b> <span id="producer_done">-</span>
-      <b>Rel. Change:</b> <span id="scheduler_rel_change">-</span>
+    <div class="kpis">
+      <div class="kpi">
+        <div class="label">CPU</div>
+        <div class="value" id="cpuKpi">--%</div>
+        <div class="hint" id="cpuHint">live</div>
+      </div>
+      <div class="kpi">
+        <div class="label">RAM</div>
+        <div class="value" id="ramKpi">--%</div>
+        <div class="hint" id="ramHint">-- / -- MB</div>
+      </div>
+      <div class="kpi">
+        <div class="label">GPU Util</div>
+        <div class="value" id="gpuKpi">--%</div>
+        <div class="hint" id="gpuHint">#GPUs: <span id="numGpus">--</span></div>
+      </div>
+      <div class="kpi">
+        <div class="label">Training</div>
+        <div class="value" id="trainKpi">-</div>
+        <div class="hint">Loss: <span id="lossKpi">-</span> · LR: <span id="lrKpi">-</span></div>
+      </div>
     </div>
 
-    <h3>Loss-Kurve</h3>
-    <canvas id="lossChart" height="250"></canvas>
-    <h3>Aktuelles Trainings-Sample</h3>
-    <div id="livepreviewBox">
-      <div id="livepreview"></div>
-      <button id="togglePreviewBtn" type="button">Mehr anzeigen</button>
-    </div>
-  </div>
+    <div class="grid">
+      <!-- LEFT: Setup -->
+      <div class="card">
+        <div class="hd">
+          <h2>Konsole</h2>
+          <div class="tabs" role="tablist" aria-label="Dashboard Tabs">
+            <div class="tab active" data-tab="pane-setup">Training</div>
+            <div class="tab" data-tab="pane-monitor">Monitoring</div>
+            <div class="tab" data-tab="pane-formats">CSV-Formate</div>
+          </div>
+        </div>
+        <div class="bd">
+          <!-- Setup Pane -->
+          <div id="pane-setup" class="pane active">
+            <form id="settings" autocomplete="off" class="form-grid">
+              <label for="model_dir_select">Base Modell</label>
+              <select id="model_dir_select">
+                <option value="MTSmash/EvaGPT-German-1B-10-4-2026-7">EvaGPT-German-1B</option>
+                <option value="custom">Anderes Modell (Pfad angeben)</option>
+              </select>
 
-  <div class="card" style="max-width:530px;">
-    <h3>Logs</h3>
-    <pre id="logbox"></pre>
-  </div>
+              <label for="model_dir" id="model_dir_label" style="display:none;">Eigenes Modellverzeichnis</label>
+              <input type="text" id="model_dir" style="display:none;" placeholder="z.B. ./EvaGPT-500m/">
 
-  <div class="card" style="max-width:650px;">
-    <h3>Bisherige Trainingsläufe</h3>
-    <div id="trainingsHistory"><i>Lade Trainingshistorie…</i></div>
-  </div>
+              <label for="dataset_source">Dataset-Quelle</label>
+              <select id="dataset_source">
+                <option value="local_csv" selected>Lokale CSV</option>
+                <option value="huggingface">HuggingFace Dataset</option>
+              </select>
 
-  <div class="card" style="max-width:650px;">
-    <h3>Live-Chat mit geladenem Modell</h3>
-    <div style="margin-bottom:0.8em;">
-      <label for="chat_model_select" style="margin-right:0.6em;">Modell:</label>
-      <select id="chat_model_select" style="max-width:320px;">
-        <option value="">(letztes Training / aktuelles Inference-Modell)</option>
-      </select>
-      <label for="chat_device" style="margin-left:1em; margin-right:0.5em;">Device:</label>
-      <select id="chat_device"></select>
-      <button id="chat_load_btn" type="button" style="margin-left:0.8em;">Laden</button>
-      <button id="chat_unload_btn" type="button" class="danger" style="margin-left:0.5em;">Entladen</button>
-    </div>
+              <label for="csv_path_select">Trainingsdatei (CSV)</label>
+              <select id="csv_path_select"></select>
 
-    <textarea id="chat_system" placeholder="(optional) Systemprompt…" rows="2" style="width:95%;"></textarea>
-    <div id="chat_history" style="height:260px; overflow:auto; background:#0d1f33; border:1px solid #379fff55; border-radius:10px; padding:0.8em; margin:0.8em 0;"></div>
+              <label for="csv_path" style="display:none;">CSV Pfad</label>
+              <input type="text" id="csv_path" style="display:none;" placeholder="Pfad zur CSV">
 
-    <div style="display:flex; gap:0.6em;">
-      <input id="chat_input" type="text" placeholder="Nachricht eingeben…" style="flex:1; background:#13253b; border:1.5px solid #3db6ff; border-radius:7px; padding:8px;">
-      <button id="chat_send_btn" type="button">Senden</button>
-    </div>
+              <label for="hf_dataset_id" id="hf_dataset_id_label" style="display:none;">HF Dataset ID</label>
+              <input type="text" id="hf_dataset_id" style="display:none;" placeholder="z. B. tatsu-lab/alpaca">
 
-    <div style="margin-top:0.8em; font-size:0.92em;">
-      <label>max_new_tokens <input id="chat_max_new" type="number" value="256" style="width:70px;"></label>
-      <label style="margin-left:1em;">temperature <input id="chat_temp" type="number" step="0.05" value="0.7" style="width:70px;"></label>
-      <label style="margin-left:1em;">top_p <input id="chat_topp" type="number" step="0.05" value="0.9" style="width:70px;"></label>
-    </div>
-  </div>
+              <label for="hf_dataset_split" id="hf_dataset_split_label" style="display:none;">HF Split</label>
+              <input type="text" id="hf_dataset_split" style="display:none;" value="train" placeholder="train">
 
-  <div class="card" style="max-width:700px; background:var(--surface-alt); border:1px solid var(--border); margin-bottom:2.5em;">
-    <h3 style="margin-bottom:0.6em;">CSV-Dateiformate</h3>
-    <div style="font-size:1.09em; color:#334155;">
-      <b>Dialog (chat / dialogplus):</b>
-      <button type="button" onclick="downloadExample('chat')" class="download-btn">Beispiel-CSV herunterladen</button>
-      <ul style="margin-top:0.3em; margin-bottom:0.8em;">
-        <li><code>id</code> — eindeutige ID</li>
-        <li><code>parent_id</code> — leer wenn kein Parent</li>
-        <li><code>system</code> — optional</li>
-        <li><code>Benutzer</code> — user message</li>
-        <li><code>Kontext</code> — optional</li>
-        <li><code>Assistentin</code> — target (Pflicht)</li>
-      </ul>
-      <pre style="background:#f8fbff; color:#1e3a8a; border:1px solid var(--border); border-radius:6px; padding:0.7em;">
-id,parent_id,system,Benutzer,Kontext,Assistentin
+              <label for="save_dir">Speicher-Ordner (Basis)</label>
+              <input type="text" id="save_dir" value="./training_outputs">
+
+              <label for="template_mode" id="template_mode_label">Vorlagen-Typ</label>
+              <select id="template_mode">
+                <option value="dialogplus" selected>Dialog (Chat-Template)</option>
+                <option value="plain">Nur Textspalte</option>
+              </select>
+
+              <label for="column_name" class="column_row" style="display:none;">Spaltenname</label>
+              <input type="text" id="column_name" value="text" class="column_row" style="display:none;">
+
+              <label for="device">Device</label>
+              <select id="device"></select>
+
+              <label for="train_mode">Trainingsmodus</label>
+              <select id="train_mode">
+                <option value="full">Vollständiges Training</option>
+                <option value="lora">Finetuning mit LoRA</option>
+              </select>
+
+              <label for="lora_r" class="lora_row" style="display:none;">LoRA r</label>
+              <input type="number" id="lora_r" value="8" class="lora_row" style="display:none;" min="1">
+
+              <label for="lora_alpha" class="lora_row" style="display:none;">LoRA Alpha</label>
+              <input type="number" id="lora_alpha" value="16" class="lora_row" style="display:none;" min="1">
+
+              <label for="merge_lora_on_save" class="lora_row" style="display:none;">LoRA Merge beim Speichern</label>
+              <input type="checkbox" id="merge_lora_on_save" class="lora_row" style="display:none;" checked>
+
+              <label for="train_from_scratch">Von Scratch trainieren</label>
+              <input type="checkbox" id="train_from_scratch">
+
+              <label class="scratch_cfg_row" for="scratch_hidden_size" style="display:none;">Scratch Hidden Size</label>
+              <input type="number" id="scratch_hidden_size" class="scratch_cfg_row" style="display:none;" placeholder="leer = Basis-Config" min="1">
+
+              <label class="scratch_cfg_row" for="scratch_num_hidden_layers" style="display:none;">Scratch Layer Count</label>
+              <input type="number" id="scratch_num_hidden_layers" class="scratch_cfg_row" style="display:none;" placeholder="leer = Basis-Config" min="1">
+
+              <label class="scratch_cfg_row" for="scratch_num_attention_heads" style="display:none;">Scratch Attention Heads</label>
+              <input type="number" id="scratch_num_attention_heads" class="scratch_cfg_row" style="display:none;" placeholder="leer = Basis-Config" min="1">
+
+              <label class="scratch_cfg_row" for="scratch_intermediate_size" style="display:none;">Scratch Intermediate Size</label>
+              <input type="number" id="scratch_intermediate_size" class="scratch_cfg_row" style="display:none;" placeholder="leer = Basis-Config" min="1">
+
+              <label class="scratch_cfg_row" for="scratch_num_key_value_heads" style="display:none;">Scratch KV Heads</label>
+              <input type="number" id="scratch_num_key_value_heads" class="scratch_cfg_row" style="display:none;" placeholder="optional" min="1">
+
+              <label class="scratch_cfg_row" for="scratch_max_position_embeddings" style="display:none;">Scratch Max Positions</label>
+              <input type="number" id="scratch_max_position_embeddings" class="scratch_cfg_row" style="display:none;" placeholder="leer = Basis-Config" min="1">
+
+              <label class="scratch_cfg_row" for="include_prompt_loss" style="display:none;">Prompt in Loss einbeziehen</label>
+              <input type="checkbox" id="include_prompt_loss" class="scratch_cfg_row" style="display:none;">
+
+              <label for="precision_mode">Precision</label>
+              <select id="precision_mode" title="fp16/bf16 nur auf CUDA; MPS/CPU immer FP32">
+                <option value="auto" selected>auto</option>
+                <option value="fp32">FP32</option>
+                <option value="fp16">FP16 (nur CUDA)</option>
+                <option value="bf16">BF16 (nur CUDA, falls unterstützt)</option>
+              </select>
+
+              <label for="learning_rate">Lernrate</label>
+              <input type="number" step="0.000001" id="learning_rate" value="0.0002">
+
+              <label for="lr_schedule">Schedule</label>
+              <select id="lr_schedule">
+                <option value="cosine" selected>Cosine</option>
+                <option value="linear">Linear</option>
+              </select>
+
+              <label for="lr_decay_factor">LR Decay Factor</label>
+              <input type="number" step="0.01" id="lr_decay_factor" value="1.0" min="0.01">
+
+              <label for="warmup_steps">Warmup Steps</label>
+              <input type="number" id="warmup_steps" value="0" min="0">
+
+              <label for="warmup_ratio">Warmup Ratio</label>
+              <input type="number" step="0.01" id="warmup_ratio" value="0" min="0" max="1">
+
+              <label for="min_lr_ratio">Min LR Ratio</label>
+              <input type="number" step="0.01" id="min_lr_ratio" value="0.05" min="0" max="1">
+
+              <label for="lr_adjust_interval_steps">LR Adjust Interval</label>
+              <input type="number" id="lr_adjust_interval_steps" value="25" min="1">
+
+              <label for="lr_adjust_min_change">LR Adjust Min Change</label>
+              <input type="number" step="0.01" id="lr_adjust_min_change" value="0.05" min="0" max="1">
+
+              <label for="adaptive_scheduler">Adaptive Scheduler</label>
+              <input type="checkbox" id="adaptive_scheduler" checked>
+
+              <label for="adaptive_scheduler_freeze_on_producer_done">Freeze wenn Producer fertig</label>
+              <input type="checkbox" id="adaptive_scheduler_freeze_on_producer_done" checked>
+
+              <label for="adaptive_scheduler_never_increase_lr">LR nie erhöhen</label>
+              <input type="checkbox" id="adaptive_scheduler_never_increase_lr" checked>
+
+              <label for="adaptive_scheduler_only_extend_steps">Nur Steps verlängern</label>
+              <input type="checkbox" id="adaptive_scheduler_only_extend_steps" checked>
+
+              <label for="per_device_train_batch_size">Batchgröße</label>
+              <input type="number" id="per_device_train_batch_size" value="1" min="1">
+
+              <label for="gradient_accumulation_steps">Gradient Acc. Steps</label>
+              <input type="number" id="gradient_accumulation_steps" value="8" min="1">
+
+              <label for="num_train_epochs">Epochen</label>
+              <input type="number" id="num_train_epochs" value="3" step="0.5" min="0.5">
+
+              <label for="max_steps">Max Steps (optional)</label>
+              <input type="number" id="max_steps" placeholder="(optional)" min="1">
+
+              <label for="max_seq_length">Max Seq Length</label>
+              <input type="number" id="max_seq_length" value="4096" min="64">
+
+              <label for="max_history_turns">Max History Turns (optional)</label>
+              <input type="number" id="max_history_turns" placeholder="leer = auto" min="1">
+
+              <label for="shuffle">Shuffle</label>
+              <input type="checkbox" id="shuffle">
+
+              <label for="sort_by_length">Sort by Length</label>
+              <input type="checkbox" id="sort_by_length">
+
+              <label for="sort_by_similarity">Sort by Similarity</label>
+              <input type="checkbox" id="sort_by_similarity">
+
+              <label for="rebuild_dataset_cache">Cache neu aufbauen</label>
+              <input type="checkbox" id="rebuild_dataset_cache" checked>
+
+              <label for="use_ngrams">N-Gramm-Optimierung (Beta)</label>
+              <input type="checkbox" id="use_ngrams" title="Aktiviert N-Gramm-Tokenisierung für bessere Kompression">
+
+              <label for="ngram_max" class="ngram_row" style="display:none;">Max N-Gramm-Länge</label>
+              <input type="number" id="ngram_max" class="ngram_row" style="display:none;" value="12" min="2" max="64">
+
+              <label for="ngram_top_k" class="ngram_row" style="display:none;">Top-K N-Grams</label>
+              <input type="number" id="ngram_top_k" class="ngram_row" style="display:none;" value="1500" min="10">
+
+              <label for="ngram_min_chars" class="ngram_row" style="display:none;">Min. Zeichen</label>
+              <input type="number" id="ngram_min_chars" class="ngram_row" style="display:none;" value="16" min="1">
+
+              <label for="ngram_min_words" class="ngram_row" style="display:none;">Min. Wörter</label>
+              <input type="number" id="ngram_min_words" class="ngram_row" style="display:none;" value="2" min="0">
+
+              <label for="ngram_max_samples" class="ngram_row" style="display:none;">Max Samples</label>
+              <input type="number" id="ngram_max_samples" class="ngram_row" style="display:none;" value="4000" min="100">
+
+              <label for="ngram_budgeted" class="ngram_row" style="display:none;">Budget-gesteuert</label>
+              <input type="checkbox" id="ngram_budgeted" class="ngram_row" style="display:none;" checked>
+
+              <label for="ngram_target_fit" class="ngram_row" style="display:none;">Ziel-Fit</label>
+              <input type="number" step="0.01" id="ngram_target_fit" class="ngram_row" style="display:none;" value="0.98" min="0.8" max="1.0">
+
+              <label for="ngram_eval_samples" class="ngram_row" style="display:none;">Eval Samples</label>
+              <input type="number" id="ngram_eval_samples" class="ngram_row" style="display:none;" value="512" min="32">
+
+              <label for="ngram_add_batch" class="ngram_row" style="display:none;">Add Batch</label>
+              <input type="number" id="ngram_add_batch" class="ngram_row" style="display:none;" value="64" min="1">
+
+              <label for="ngram_conflict_overlap_ratio" class="ngram_row" style="display:none;">Conflict Overlap Ratio</label>
+              <input type="number" step="0.01" id="ngram_conflict_overlap_ratio" class="ngram_row" style="display:none;" value="0.8" min="0" max="1">
+
+              <label for="ngram_prefer_longest_match" class="ngram_row" style="display:none;">Prefer Longest Match</label>
+              <input type="checkbox" id="ngram_prefer_longest_match" class="ngram_row" style="display:none;" checked>
+
+              <label for="ngram_use_code_lines" class="ngram_row" style="display:none;">Code-Zeilen nutzen</label>
+              <input type="checkbox" id="ngram_use_code_lines" class="ngram_row" style="display:none;" checked>
+
+              <label for="ngram_code_line_min_chars" class="ngram_row" style="display:none;">Code-Zeile Min. Zeichen</label>
+              <input type="number" id="ngram_code_line_min_chars" class="ngram_row" style="display:none;" value="12" min="1">
+
+              <label for="ngram_code_line_min_count" class="ngram_row" style="display:none;">Code-Zeile Min. Count</label>
+              <input type="number" id="ngram_code_line_min_count" class="ngram_row" style="display:none;" value="2" min="1">
+
+              <label for="ngram_code_line_top_k" class="ngram_row" style="display:none;">Code-Zeile Top-K</label>
+              <input type="number" id="ngram_code_line_top_k" class="ngram_row" style="display:none;" value="400" min="1">
+
+              <label for="ngram_code_line_score_boost" class="ngram_row" style="display:none;">Code-Zeile Score Boost</label>
+              <input type="number" step="0.01" id="ngram_code_line_score_boost" class="ngram_row" style="display:none;" value="1.35" min="0">
+
+              <label for="ngram_code_pattern_boost" class="ngram_row" style="display:none;">Code-Pattern Boost</label>
+              <input type="checkbox" id="ngram_code_pattern_boost" class="ngram_row" style="display:none;" checked>
+
+              <label for="ngram_code_pattern_extra_boost" class="ngram_row" style="display:none;">Code-Pattern Extra Boost</label>
+              <input type="number" step="0.01" id="ngram_code_pattern_extra_boost" class="ngram_row" style="display:none;" value="1.2" min="0">
+
+              <label for="ngram_focus_oversize_samples" class="ngram_row" style="display:none;">Oversize-Samples priorisieren</label>
+              <input type="checkbox" id="ngram_focus_oversize_samples" class="ngram_row" style="display:none;" checked>
+
+              <label for="ngram_oversize_sample_boost" class="ngram_row" style="display:none;">Oversize Sample Boost</label>
+              <input type="number" step="0.1" id="ngram_oversize_sample_boost" class="ngram_row" style="display:none;" value="4.0" min="0">
+
+              <label for="ngram_near_limit_threshold" class="ngram_row" style="display:none;">Near-Limit Threshold</label>
+              <input type="number" step="0.01" id="ngram_near_limit_threshold" class="ngram_row" style="display:none;" value="0.90" min="0" max="1">
+
+              <label for="ngram_near_limit_boost" class="ngram_row" style="display:none;">Near-Limit Boost</label>
+              <input type="number" step="0.1" id="ngram_near_limit_boost" class="ngram_row" style="display:none;" value="1.5" min="0">
+
+              <label for="ngram_eval_max_seq_length" class="ngram_row" style="display:none;">Eval Max Seq Length</label>
+              <input type="number" id="ngram_eval_max_seq_length" class="ngram_row" style="display:none;" value="1024" min="1">
+
+              <label for="ngram_track_saved_samples" class="ngram_row" style="display:none;">Saved Samples tracken</label>
+              <input type="checkbox" id="ngram_track_saved_samples" class="ngram_row" style="display:none;" checked>
+
+              <label for="ngram_saved_sample_boost" class="ngram_row" style="display:none;">Saved Sample Boost</label>
+              <input type="number" step="0.1" id="ngram_saved_sample_boost" class="ngram_row" style="display:none;" value="8.0" min="0">
+
+              <label for="gradient_checkpointing">Grad Checkpointing</label>
+              <input type="checkbox" id="gradient_checkpointing" checked>
+
+              <label for="log_cuda_memory">CUDA Memory Logging</label>
+              <input type="checkbox" id="log_cuda_memory" checked>
+
+              <label for="cuda_memory_log_interval_steps">CUDA Memory Log Interval</label>
+              <input type="number" id="cuda_memory_log_interval_steps" value="25" min="1">
+
+              <label for="cuda_empty_cache_interval_steps">CUDA Empty Cache Interval</label>
+              <input type="number" id="cuda_empty_cache_interval_steps" value="50" min="0">
+
+              <div class="row-actions">
+                <button class="btn" type="submit">Training starten</button>
+                <button class="btn danger" type="button" id="stopBtn">Training stoppen</button>
+              </div>
+            </form>
+          </div>
+
+          <!-- Monitor Pane -->
+          <div id="pane-monitor" class="pane">
+            <div class="stat-grid">
+              <div class="stat"><div class="k">Status</div><div class="v" id="status">-</div></div>
+              <div class="stat"><div class="k">Step</div><div class="v" id="step">-</div></div>
+              <div class="stat"><div class="k">Step Fortschritt</div><div class="v" id="step_progress">-</div></div>
+              <div class="stat"><div class="k">Epoche</div><div class="v" id="epoch_progress">-</div></div>
+              <div class="stat"><div class="k">Updates / Epoche</div><div class="v" id="updates_per_epoch">-</div></div>
+              <div class="stat"><div class="k">Restzeit</div><div class="v" id="eta">-</div></div>
+
+              <div class="stat"><div class="k">Loss</div><div class="v" id="loss">-</div></div>
+              <div class="stat"><div class="k">Lernrate</div><div class="v" id="learning_rate_display">-</div></div>
+
+              <div class="stat"><div class="k">Tokens/Step</div><div class="v" id="tokens_per_step">-</div></div>
+              <div class="stat"><div class="k">Total Tokens</div><div class="v" id="total_tokens">-</div></div>
+
+              <div class="stat"><div class="k">Scheduler Steps</div><div class="v" id="scheduler_total_steps">-</div></div>
+              <div class="stat"><div class="k">CSV Sample Estimate</div><div class="v" id="csv_total_samples_est">-</div></div>
+
+              <div class="stat"><div class="k">Real Samples</div><div class="v" id="total_samples_real">-</div></div>
+              <div class="stat"><div class="k">Skipped Samples</div><div class="v" id="skipped_samples">-</div></div>
+
+              <div class="stat"><div class="k">CUDA Allocated</div><div class="v" id="cuda_allocated_mb">-</div></div>
+              <div class="stat"><div class="k">CUDA Reserved</div><div class="v" id="cuda_reserved_mb">-</div></div>
+              <div class="stat"><div class="k">CUDA Max Allocated</div><div class="v" id="cuda_max_allocated_mb">-</div></div>
+              <div class="stat"><div class="k">CUDA Max Reserved</div><div class="v" id="cuda_max_reserved_mb">-</div></div>
+            </div>
+
+            <div style="margin-top:12px;">
+              <div class="progress" aria-label="Step Fortschrittsbalken">
+                <div class="bar" id="step_progress_bar"></div>
+              </div>
+            </div>
+
+            <div class="card" style="margin-top:14px;">
+              <div class="hd">
+                <h2>Adaptive Scheduler / Producer</h2>
+              </div>
+              <div class="bd">
+                <div class="stat-grid">
+                  <div class="stat"><div class="k">Scheduler Mode</div><div class="v" id="scheduler_mode">-</div></div>
+                  <div class="stat"><div class="k">Scheduler Source</div><div class="v" id="scheduler_source">-</div></div>
+                  <div class="stat"><div class="k">Adaptive Scheduler</div><div class="v" id="adaptive_scheduler_status">-</div></div>
+                  <div class="stat"><div class="k">Freeze aktiv</div><div class="v" id="adaptive_scheduler_frozen">-</div></div>
+                  <div class="stat"><div class="k">LR nie erhöhen</div><div class="v" id="adaptive_scheduler_never_increase_lr">-</div></div>
+                  <div class="stat"><div class="k">Nur Steps verlängern</div><div class="v" id="adaptive_scheduler_only_extend_steps">-</div></div>
+
+                  <div class="stat"><div class="k">Projected Samples</div><div class="v" id="projected_samples">-</div></div>
+                  <div class="stat"><div class="k">Seen Samples</div><div class="v" id="producer_seen_samples">-</div></div>
+                  <div class="stat"><div class="k">Tokenized Samples</div><div class="v" id="producer_tokenized_samples">-</div></div>
+                  <div class="stat"><div class="k">Shards Written</div><div class="v" id="producer_num_shards">-</div></div>
+                  <div class="stat"><div class="k">Producer Done</div><div class="v" id="producer_done">-</div></div>
+                  <div class="stat"><div class="k">Rel. Change</div><div class="v" id="scheduler_rel_change">-</div></div>
+                </div>
+              </div>
+            </div>
+
+          </div>
+
+          <!-- CSV Formats Pane -->
+          <div id="pane-formats" class="pane">
+            <div class="card" style="margin-bottom:12px;">
+              <div class="hd">
+                <h2>Dialog (chat / dialogplus)</h2>
+                <button type="button" class="btn secondary small" onclick="downloadExample('chat')">Beispiel-CSV</button>
+              </div>
+              <div class="bd">
+                <div style="color:var(--muted); font-size:13px; line-height:1.45;">
+                  Spalten:
+                  <ul>
+                    <li><code>id</code> — eindeutige ID</li>
+                    <li><code>parent_id</code> — leer wenn kein Parent</li>
+                    <li><code>system</code> — optional</li>
+                    <li><code>Benutzer</code> — user message</li>
+                    <li><code>Kontext</code> — optional</li>
+                    <li><code>Assistentin</code> — target (Pflicht)</li>
+                  </ul>
+                </div>
+                <pre class="logbox" style="height:auto;">id,parent_id,system,Benutzer,Kontext,Assistentin
 1,,Du bist ein freundlicher Chatbot.,Hallo!,,"Hallo! Wie kann ich dir helfen?"
 2,1,,Wie spät ist es?,,"Ich habe keinen Zugriff auf deine Uhr, aber du kannst oben rechts schauen."
-3,,Du bist Übersetzer.,Übersetze: "Guten Morgen",,Auf Englisch: "Good morning".
-      </pre>
+3,,Du bist Übersetzer.,Übersetze: "Guten Morgen",,Auf Englisch: "Good morning".</pre>
+              </div>
+            </div>
 
-      <b>Nur-Text-Modus (template_mode=plain):</b>
-      <button type="button" onclick="downloadExample('plain')" class="download-btn">Beispiel-CSV herunterladen</button>
-      <pre style="background:#f8fbff; color:#1e3a8a; border:1px solid var(--border); border-radius:6px; padding:0.7em;">
-text
+            <div class="card">
+              <div class="hd">
+                <h2>Nur-Text-Modus (template_mode=plain)</h2>
+                <button type="button" class="btn secondary small" onclick="downloadExample('plain')">Beispiel-CSV</button>
+              </div>
+              <div class="bd">
+                <pre class="logbox" style="height:auto;">text
 Das ist ein Beispielsatz für Pretraining.
-Hier folgt eine weitere Trainingszeile.
-      </pre>
+Hier folgt eine weitere Trainingszeile.</pre>
+                <div style="margin-top:10px; color:var(--muted); font-size:13px; line-height:1.45;">
+                  Hinweis: Im Dialog-Modus werden automatisch nur so viele komplette Turns verwendet, wie ins Tokenfenster passen. Zu große Samples werden übersprungen.
+                </div>
+              </div>
+            </div>
+          </div>
 
-      <div style="opacity:0.85; margin-top:0.6em;">
-        <b>Hinweis:</b> Bei <code>template_mode=chat</code> oder <code>dialogplus</code> werden jetzt automatisch nur so viele <b>komplette Turns</b> verwendet, wie ins Tokenfenster passen. Zu große Samples werden übersprungen. <br><br>
-        Bei <code>template_mode=plain</code> wird nur <code>column_name</code> genutzt; parent_id/History-Felder werden ignoriert.
+        </div>
+      </div>
+
+      <!-- RIGHT: Live -->
+      <div>
+        <div class="card">
+          <div class="hd">
+            <h2>Live</h2>
+            <div class="tabs">
+              <div class="tab active" data-tab="pane-live-loss">Loss</div>
+              <div class="tab" data-tab="pane-live-logs">Logs</div>
+              <div class="tab" data-tab="pane-live-history">Historie</div>
+              <div class="tab" data-tab="pane-live-chat">Chat</div>
+            </div>
+          </div>
+          <div class="bd">
+            <div id="pane-live-loss" class="pane active">
+              <div class="chart-wrap">
+                <canvas id="lossChart"></canvas>
+              </div>
+
+              <div style="margin-top:12px;" class="preview">
+                <div style="display:flex; align-items:center; justify-content:space-between; gap:10px;">
+                  <div style="font-family:var(--mono); font-weight:900; color:var(--brand2); text-transform:uppercase; font-size:13px;">
+                    Aktuelles Trainings-Sample
+                  </div>
+                  <button id="togglePreviewBtn" type="button" class="btn secondary small">Mehr anzeigen</button>
+                </div>
+                <div id="livepreview" style="margin-top:10px;"></div>
+              </div>
+            </div>
+
+            <div id="pane-live-logs" class="pane">
+              <pre id="logbox" class="logbox"></pre>
+            </div>
+
+            <div id="pane-live-history" class="pane">
+              <div id="trainingsHistory"><i>Lade Trainingshistorie…</i></div>
+            </div>
+
+            <div id="pane-live-chat" class="pane">
+              <div style="display:flex; gap:10px; flex-wrap:wrap; align-items:center;">
+                <label style="font-family:var(--mono); color:var(--muted); font-size:13px;">Modell</label>
+                <select id="chat_model_select" style="max-width: 360px;">
+                  <option value="">(letztes Training / aktuelles Inference-Modell)</option>
+                </select>
+
+                <label style="font-family:var(--mono); color:var(--muted); font-size:13px;">Device</label>
+                <select id="chat_device" style="max-width: 140px;"></select>
+
+                <button id="chat_load_btn" type="button" class="btn secondary small">Laden</button>
+                <button id="chat_unload_btn" type="button" class="btn danger small">Entladen</button>
+              </div>
+
+              <textarea id="chat_system" placeholder="(optional) Systemprompt…" rows="2" style="margin-top:10px;"></textarea>
+
+              <div id="chat_history" class="chat-history" style="margin-top:10px;"></div>
+
+              <div class="chat-row">
+                <input id="chat_input" type="text" placeholder="Nachricht eingeben…">
+                <button id="chat_send_btn" type="button" class="btn">Senden</button>
+              </div>
+
+              <div style="display:flex; gap:10px; flex-wrap:wrap; margin-top:10px; color:var(--muted); font-family:var(--mono); font-size:12.5px;">
+                <label>max_new_tokens <input id="chat_max_new" type="number" value="256" style="width:92px; margin-left:6px;"></label>
+                <label>temperature <input id="chat_temp" type="number" step="0.05" value="0.7" style="width:92px; margin-left:6px;"></label>
+                <label>top_p <input id="chat_topp" type="number" step="0.05" value="0.9" style="width:92px; margin-left:6px;"></label>
+              </div>
+            </div>
+
+          </div>
+        </div>
+
+        <footer>
+          © 2026 TMP-SYSTEM-SERVICE GmbH – Alle Rechte vorbehalten. Version 6.8
+        </footer>
       </div>
     </div>
   </div>
 
-</main>
-
-<footer id="site-footer">
-  <p>© 2026 TMP-SYSTEM-SERVICE GmbH – Alle Rechte vorbehalten. Version 6.8</p>
-</footer>
-
-<div id="matrix-spinner-overlay">
-  <div id="matrix-spinner-content">
-    <span class="matrix-loader"></span>
-    <div id="matrix-spinner-label">Training läuft ...<br>Bitte warten</div>
+  <!-- Loader Overlay -->
+  <div id="dashboard-overlay" class="overlay" role="dialog" aria-modal="true" aria-label="Training läuft">
+    <div class="box">
+      <div class="spinner" aria-hidden="true"></div>
+      <p class="title">Training läuft</p>
+      <p class="subtitle">Bitte warten… Logs und Status aktualisieren sich automatisch.</p>
+      <div style="display:flex; gap:10px; justify-content:flex-end;">
+        <button type="button" class="btn danger small" id="overlayStopBtn">Training stoppen</button>
+        <button type="button" class="btn secondary small" id="overlayHideBtn">Ausblenden</button>
+      </div>
+    </div>
   </div>
-</div>
 
-<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 
-<script>
-function numberOrNull(v) {
-  if (v === null || v === undefined) return null;
-  const s = String(v).trim();
-  if (!s) return null;
-  const n = Number(s);
-  return Number.isFinite(n) ? n : null;
-}
-
-function integerOrNull(v) {
-  const n = numberOrNull(v);
-  if (n === null) return null;
-  return Math.trunc(n);
-}
-
-function fmtValue(v) {
-  if (v === null || v === undefined || v === "") return "-";
-  return String(v);
-}
-function fmtBool(v) {
-  if (v === null || v === undefined) return "-";
-  return v ? "ja" : "nein";
-}
-function fmtNum(v, digits = null) {
-  if (typeof v !== "number" || !Number.isFinite(v)) return "-";
-  return digits === null ? String(v) : v.toFixed(digits);
-}
-function fmtMb(v) {
-  if (typeof v !== "number" || !Number.isFinite(v)) return "-";
-  return `${v} MB`;
-}
-
-function escapeHtml(s){
-  return String(s).replace(/[&<>"']/g, c=>({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-}
-function escapeHtmlWithBreaks(s){
-  return escapeHtml(s).replace(/\n/g, "<br>");
-}
-
-async function populateChatDevices() {
-  const sel = document.getElementById('chat_device');
-  sel.innerHTML = '';
-  try {
-    const hw = await (await fetch('/hardware')).json();
-    const opts = [{v:'cpu', label:'CPU'}];
-    if (hw.cuda) opts.push({v:'cuda', label:'CUDA'});
-    if (hw.mps)  opts.push({v:'mps',  label:'MPS'});
-    for (const o of opts) {
-      const op = document.createElement('option');
-      op.value = o.v; op.textContent = o.label;
-      sel.appendChild(op);
+  <script>
+    // ---------- Helpers ----------
+    function numberOrNull(v) {
+      if (v === null || v === undefined) return null;
+      const s = String(v).trim();
+      if (!s) return null;
+      const n = Number(s);
+      return Number.isFinite(n) ? n : null;
     }
-    sel.value = hw.cuda ? 'cuda' : (hw.mps ? 'mps' : 'cpu');
-  } catch {
-    const op = document.createElement('option');
-    op.value = 'cpu'; op.textContent = 'CPU';
-    sel.appendChild(op);
-  }
-}
-window.addEventListener('DOMContentLoaded', populateChatDevices);
-
-let cpuGauge=null, ramGauge=null, gpuGauge=null;
-
-function makeGauge(canvasEl, color) {
-  if (!canvasEl || typeof Chart === 'undefined') return null;
-  const ctx = canvasEl.getContext('2d');
-  return new Chart(ctx, {
-    type: 'doughnut',
-    data: { datasets: [{ data: [0, 100], backgroundColor: [color, '#224133'], borderWidth: 0, cutout: '70%', circumference: 180, rotation: 270 }] },
-    options: { responsive: false, plugins: { legend: { display: false }, tooltip: { enabled: false } }, animation: false }
-  });
-}
-
-function setGaugeLabel(chart, label) {
-  if (!chart) return;
-  const ctx = chart.ctx;
-  ctx.save();
-  ctx.font = "bold 1.13em 'Fira Mono',monospace";
-  ctx.textAlign = "center";
-  ctx.textBaseline = "middle";
-  ctx.fillStyle = '#33b8ff';
-  ctx.clearRect(0, 0, chart.width, chart.height);
-  chart.draw();
-  ctx.fillText(label, chart.width/2, chart.height/1.36);
-  ctx.restore();
-}
-
-async function pollSysStatus(){
-  if (!cpuGauge || !ramGauge || !gpuGauge) return;
-  try{
-    const d = await (await fetch('/sysstatus')).json();
-
-    const cpuValue = Number(d.cpu_percent || 0);
-    cpuGauge.data.datasets[0].data = [cpuValue, Math.max(0, 100-cpuValue)];
-    cpuGauge.update('none');
-    setGaugeLabel(cpuGauge, cpuValue.toFixed(0) + "%");
-
-    const ramValue = Number(d.ram_percent || 0);
-    ramGauge.data.datasets[0].data = [ramValue, Math.max(0, 100-ramValue)];
-    ramGauge.update('none');
-    setGaugeLabel(ramGauge, ramValue.toFixed(0) + "%");
-
-    const gpuValue = (d.gpu_util ?? ((d.gpu_mem_used && d.gpu_mem) ? (d.gpu_mem_used/d.gpu_mem*100) : 0)) || 0;
-    if (d.gpu_name && d.gpu_util != null) {
-      gpuGauge.data.datasets[0].data = [gpuValue, Math.max(0, 100-gpuValue)];
-      gpuGauge.update('none');
-      setGaugeLabel(gpuGauge, Number(gpuValue).toFixed(0) + "%");
-    } else {
-      gpuGauge.data.datasets[0].data = [0, 100];
-      gpuGauge.update('none');
-      setGaugeLabel(gpuGauge, "n/a");
+    function integerOrNull(v) {
+      const n = numberOrNull(v);
+      if (n === null) return null;
+      return Math.trunc(n);
+    }
+    function fmtValue(v) {
+      if (v === null || v === undefined || v === "") return "-";
+      return String(v);
+    }
+    function fmtBool(v) {
+      if (v === null || v === undefined) return "-";
+      return v ? "ja" : "nein";
+    }
+    function fmtNum(v, digits = null) {
+      if (typeof v !== "number" || !Number.isFinite(v)) return "-";
+      return digits === null ? String(v) : v.toFixed(digits);
+    }
+    function fmtMb(v) {
+      if (typeof v !== "number" || !Number.isFinite(v)) return "-";
+      return `${v} MB`;
+    }
+    function escapeHtml(s){
+      return String(s).replace(/[&<>"']/g, c=>({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+    }
+    function escapeHtmlWithBreaks(s){
+      return escapeHtml(s).replace(/\\n/g, "<br>");
     }
 
-    document.getElementById('ramStat').textContent = `${d.ram_used} / ${d.ram_total} MB (${d.ram_percent}%)`;
-    document.getElementById('gpuName').textContent = d.gpu_name || "n/a";
-    const gpuRamText = (d.gpu_mem && d.gpu_mem_used) ? `${d.gpu_mem_used} / ${d.gpu_mem} MB` : "n/a";
-    document.getElementById('gpuRam').textContent = gpuRamText;
-    document.getElementById('numGpus').textContent = d.num_cuda ?? 0;
+    // ---------- Tabs ----------
+    function initTabs(){
+      document.querySelectorAll('.tab').forEach(t=>{
+        t.addEventListener('click', ()=>{
+          const target = t.getAttribute('data-tab');
+          const container = t.parentElement; // tabs row
+          // deactivate siblings in same row
+          container.querySelectorAll('.tab').forEach(x=>x.classList.remove('active'));
+          t.classList.add('active');
 
-    const allGpus = d.gpus || [];
-    const gpusDiv = document.getElementById('all-gpus-list');
-    if (allGpus.length > 1) {
-      let html = "<b>Alle GPUs:</b><br><table style='margin:0 auto; color:#63c8ff; background:#11243b; border-radius:7px;'><tr><th style='padding:0 1em;'>#</th><th>Name</th><th>Mem</th><th>Util</th></tr>";
-      allGpus.forEach((g,i) => {
-        html += `<tr>
-          <td style='text-align:right;'>GPU ${i}</td>
-          <td>${escapeHtml(g.name)}</td>
-          <td>${g.mem_used} / ${g.mem_total} MB</td>
-          <td>${g.util}%</td>
-        </tr>`;
+          // find card body and panes in same card
+          const card = t.closest('.card');
+          if (!card) return;
+          card.querySelectorAll('.pane').forEach(p=>p.classList.remove('active'));
+          const pane = card.querySelector('#' + target);
+          if (pane) pane.classList.add('active');
+        });
       });
-      html += "</table>";
-      gpusDiv.innerHTML = html;
-    } else if (allGpus.length === 1) {
-      gpusDiv.innerHTML = `<b>GPU 0:</b> ${escapeHtml(allGpus[0].name)} (${allGpus[0].mem_used} / ${allGpus[0].mem_total} MB, ${allGpus[0].util}%)`;
-    } else {
-      gpusDiv.innerHTML = "";
     }
-  }catch(e){
-    cpuGauge.data.datasets[0].data = [0,100]; cpuGauge.update('none'); setGaugeLabel(cpuGauge, "?");
-    ramGauge.data.datasets[0].data = [0,100]; ramGauge.update('none'); setGaugeLabel(ramGauge, "?");
-    gpuGauge.data.datasets[0].data = [0,100]; gpuGauge.update('none'); setGaugeLabel(gpuGauge, "?");
-  }
-}
+    window.addEventListener('DOMContentLoaded', initTabs);
 
-window.addEventListener('DOMContentLoaded', () => {
-  cpuGauge = makeGauge(document.getElementById('cpuGauge'), '#33b8ff');
-  ramGauge = makeGauge(document.getElementById('ramGauge'), '#49c8ff');
-  gpuGauge = makeGauge(document.getElementById('gpuGauge'), '#8ad1ff');
+    // ---------- Overlay ----------
+    const overlay = () => document.getElementById('dashboard-overlay');
+    function showOverlay(){ overlay().style.display = 'flex'; }
+    function hideOverlay(){ overlay().style.display = 'none'; }
+    document.getElementById('overlayHideBtn').addEventListener('click', hideOverlay);
+    document.getElementById('overlayStopBtn').addEventListener('click', async ()=>{
+      try { await fetch("/stop", {method:"POST"}); } catch {}
+    });
 
-  if (!cpuGauge || !ramGauge || !gpuGauge) return;
+    // ---------- Refresh button ----------
+    document.getElementById('refreshBtn').addEventListener('click', ()=>{
+      pollSysStatus();
+      getStatus();
+      loadTrainings();
+      fillModelDropdown();
+      fillDatasetDropdown();
+    });
 
-  pollSysStatus();
-  setInterval(pollSysStatus, 2000);
-});
+    // ---------- System status (KPIs) ----------
+    async function pollSysStatus(){
+      try{
+        const d = await (await fetch('/sysstatus')).json();
 
-let previewShort = "";
-let previewFull  = "";
-let previewExpanded = false;
+        const cpuValue = Number(d.cpu_percent || 0);
+        document.getElementById('cpuKpi').textContent = cpuValue.toFixed(0) + "%";
+        document.getElementById('cpuHint').textContent = "live";
 
-async function pollLivePreview(){
-  try {
-    const d = await (await fetch('/livepreview')).json();
-    previewShort = d.preview || "";
-    previewFull  = d.preview_full || previewShort || "";
-    renderPreview();
-  } catch {}
-}
-function renderPreview(){
-  const box = document.getElementById("livepreview");
-  const btn = document.getElementById("togglePreviewBtn");
-  if (!box || !btn) return;
+        const ramValue = Number(d.ram_percent || 0);
+        document.getElementById('ramKpi').textContent = ramValue.toFixed(0) + "%";
+        document.getElementById('ramHint').textContent = `${d.ram_used} / ${d.ram_total} MB`;
 
-  if (previewExpanded) {
-    box.textContent = previewFull;
-    btn.textContent = "Weniger anzeigen";
-  } else {
-    const base = previewShort || previewFull || "";
-    const s = base.length > 200 ? base.slice(0, 200) + " ..." : base;
-    box.textContent = s;
-    btn.textContent = "Mehr anzeigen";
-  }
-}
-document.getElementById("togglePreviewBtn").onclick = () => {
-  previewExpanded = !previewExpanded;
-  renderPreview();
-};
-setInterval(pollLivePreview, 2000);
+        const gpuValue = (d.gpu_util ?? ((d.gpu_mem_used && d.gpu_mem) ? (d.gpu_mem_used/d.gpu_mem*100) : 0)) || 0;
+        document.getElementById('gpuKpi').textContent = (d.gpu_name ? Number(gpuValue).toFixed(0) + "%" : "n/a");
+        document.getElementById('gpuHint').innerHTML = `#GPUs: <span id="numGpus">${d.num_cuda ?? 0}</span>`;
 
-async function getStatus(){
-  try{
-    const s = await (await fetch('/status')).json();
+        document.getElementById('gpuName').textContent = d.gpu_name || "n/a";
+        const gpuRamText = (d.gpu_mem && d.gpu_mem_used) ? `${d.gpu_mem_used} / ${d.gpu_mem} MB` : "n/a";
+        document.getElementById('gpuRam').textContent = gpuRamText;
 
-    document.getElementById("status").textContent = s.running ? "läuft" : "gestoppt";
-
-    const totalSteps = (typeof s.scheduler_total_steps === "number" && s.scheduler_total_steps > 0)
-      ? s.scheduler_total_steps
-      : ((typeof s.total_steps === "number" && s.total_steps > 0) ? s.total_steps : null);
-
-    const currentStep = (typeof s.step === "number" && s.step >= 0) ? s.step : null;
-
-    document.getElementById("step").textContent = currentStep !== null ? currentStep : "-";
-    document.getElementById("loss").textContent = (typeof s.loss==="number" && Number.isFinite(s.loss)) ? s.loss.toFixed(6) : "-";
-    document.getElementById("learning_rate_display").textContent = (typeof s.learning_rate==="number") ? s.learning_rate : "-";
-    document.getElementById("eta").textContent = s.eta || "-";
-    document.getElementById("tokens_per_step").textContent = s.tokens_per_step || "-";
-    document.getElementById("total_tokens").textContent = s.total_tokens || "-";
-
-    document.getElementById("scheduler_total_steps").textContent = fmtValue(totalSteps);
-    document.getElementById("csv_total_samples_est").textContent = fmtValue(s.csv_total_samples_est);
-    document.getElementById("total_samples_real").textContent = fmtValue(s.total_samples_real);
-    document.getElementById("skipped_samples").textContent = fmtValue(s.skipped_samples);
-
-    if (currentStep !== null && totalSteps !== null) {
-      const pct = Math.max(0, Math.min(100, (currentStep / totalSteps) * 100));
-      document.getElementById("step_progress").textContent = `${currentStep} / ${totalSteps} (${pct.toFixed(1)}%)`;
-      const bar = document.getElementById("step_progress_bar");
-      if (bar) bar.style.width = pct.toFixed(2) + "%";
-    } else {
-      document.getElementById("step_progress").textContent = "-";
-      const bar = document.getElementById("step_progress_bar");
-      if (bar) bar.style.width = "0%";
-    }
-
-    const cfg = s.config || {};
-    const epochsConfigured = numberOrNull(cfg.num_train_epochs);
-    const batchSize = Math.max(1, numberOrNull(cfg.per_device_train_batch_size) || 1);
-    const gradAccum = Math.max(1, numberOrNull(cfg.gradient_accumulation_steps) || 1);
-    const worldSize = Math.max(1, numberOrNull(s.world_size) || 1);
-
-    const realSamples = numberOrNull(s.total_samples_real);
-    const estSamples = numberOrNull(s.csv_total_samples_est);
-    const effectiveSamples = realSamples !== null && realSamples > 0 ? realSamples : estSamples;
-
-    let updatesPerEpoch = null;
-    if (effectiveSamples !== null && effectiveSamples > 0) {
-      const localSamples = Math.ceil(effectiveSamples / worldSize);
-      const batchesPerEpoch = Math.ceil(localSamples / batchSize);
-      updatesPerEpoch = Math.max(1, Math.ceil(batchesPerEpoch / gradAccum));
-    }
-
-    if (updatesPerEpoch !== null) {
-      document.getElementById("updates_per_epoch").textContent = String(updatesPerEpoch);
-    } else {
-      document.getElementById("updates_per_epoch").textContent = "-";
-    }
-
-    if (currentStep !== null && updatesPerEpoch !== null && epochsConfigured !== null) {
-      const epochFloat = (currentStep / Math.max(1, updatesPerEpoch));
-      const epochDisplay = Math.min(epochsConfigured, epochFloat);
-      document.getElementById("epoch_progress").textContent = `${epochDisplay.toFixed(2)} / ${epochsConfigured}`;
-    } else {
-      document.getElementById("epoch_progress").textContent = "-";
-    }
-
-    const producerProgress = s.producer_progress || {};
-    const producerMeta = s.producer_meta || {};
-
-    document.getElementById("scheduler_mode").textContent = fmtValue(s.scheduler_mode);
-    document.getElementById("scheduler_source").textContent = fmtValue(s.scheduler_source);
-    document.getElementById("adaptive_scheduler_status").textContent = fmtBool(s.adaptive_scheduler);
-    document.getElementById("adaptive_scheduler_frozen").textContent = fmtBool(s.adaptive_scheduler_frozen);
-    document.getElementById("adaptive_scheduler_never_increase_lr").textContent = fmtBool(s.adaptive_scheduler_never_increase_lr);
-    document.getElementById("adaptive_scheduler_only_extend_steps").textContent = fmtBool(s.adaptive_scheduler_only_extend_steps);
-
-    document.getElementById("projected_samples").textContent = fmtValue(s.projected_samples);
-    document.getElementById("producer_seen_samples").textContent = fmtValue(producerProgress.seen_samples);
-    document.getElementById("producer_tokenized_samples").textContent = fmtValue(producerProgress.tokenized_samples);
-    document.getElementById("producer_num_shards").textContent = fmtValue(
-      producerMeta.num_shards ?? producerProgress.num_shards_written
-    );
-    document.getElementById("producer_done").textContent = fmtBool(
-      s.producer_done ?? producerMeta.done ?? producerProgress.done
-    );
-    document.getElementById("scheduler_rel_change").textContent = fmtNum(s.scheduler_rel_change, 4);
-
-    const cudaMem = s.cuda_memory || {};
-    document.getElementById("cuda_allocated_mb").textContent = fmtMb(cudaMem.allocated_mb);
-    document.getElementById("cuda_reserved_mb").textContent = fmtMb(cudaMem.reserved_mb);
-    document.getElementById("cuda_max_allocated_mb").textContent = fmtMb(cudaMem.max_allocated_mb);
-    document.getElementById("cuda_max_reserved_mb").textContent = fmtMb(cudaMem.max_reserved_mb);
-
-  } catch {}
-}
-getStatus(); setInterval(getStatus,1500);
-
-window.lossData=[]; window.lossSteps=[];
-let lossChart=null;
-
-function initLossChart(){
-  const canvas = document.getElementById('lossChart');
-  if (!canvas || typeof Chart === 'undefined') return;
-  const ctx = canvas.getContext('2d');
-  lossChart = new Chart(ctx,{
-    type:'line',
-    data:{ labels:[], datasets:[{ label:'Loss', data:[], fill:false, borderColor:'#33b8ff', tension:0.2, pointRadius:1.5 }] },
-    options:{ responsive:false, animation:false, scales:{ x:{title:{display:true,text:'Step'},ticks:{color:'#49b9ff'}}, y:{title:{display:true,text:'Loss'},ticks:{color:'#49b9ff'}} } }
-  });
-}
-function updateChart(){
-  if (!lossChart) return;
-  lossChart.data.labels = window.lossSteps;
-  lossChart.data.datasets[0].data = window.lossData;
-  lossChart.update('none');
-}
-
-function connectLogsWS(){
-  const logbox = document.getElementById("logbox");
-  if (!logbox) return;
-
-  const proto = (location.protocol === 'https:') ? 'wss' : 'ws';
-  let ws;
-  try {
-    ws = new WebSocket(`${proto}://${location.host}/ws/logs`);
-  } catch {
-    return;
-  }
-
-  ws.onmessage = evt => {
-    logbox.textContent += evt.data + "\n";
-    if (logbox.textContent.length > 200000) logbox.textContent = logbox.textContent.slice(-200000);
-    logbox.scrollTop = logbox.scrollHeight;
-
-    (evt.data || "").split('\n').forEach(line=>{
-      const m = line.match(/Step (\d+)\s+\|\s+Loss:\s+([0-9\.eE\-]+)/);
-      if(m){
-        const step = Number(m[1]);
-        const loss = Number(m[2]);
-        if(!window.lossSteps.length || step>window.lossSteps[window.lossSteps.length-1]){
-          window.lossSteps.push(step);
-          window.lossData.push(loss);
-          updateChart();
-        }
+      }catch(e){
+        document.getElementById('cpuKpi').textContent = "?";
+        document.getElementById('ramKpi').textContent = "?";
+        document.getElementById('gpuKpi').textContent = "?";
       }
-    });
-  };
-
-  ws.onclose = () => {
-    setTimeout(connectLogsWS, 1200);
-  };
-  ws.onerror = () => {
-    try { ws.close(); } catch {}
-  };
-}
-
-window.addEventListener('DOMContentLoaded', () => {
-  initLossChart();
-  connectLogsWS();
-});
-
-let hw = {};
-window.addEventListener('DOMContentLoaded', async () => {
-  try { hw = await (await fetch('/hardware')).json(); }
-  catch { hw = {cuda:false,mps:false}; }
-
-  const sel = document.getElementById("device");
-  sel.innerHTML = "";
-  ["cpu","mps","cuda"].forEach(d => {
-    if (d==="cpu" || (d==="mps"&&hw.mps) || (d==="cuda"&&hw.cuda)) {
-      const o = document.createElement("option");
-      o.value = d; o.textContent = d.toUpperCase();
-      sel.appendChild(o);
     }
-  });
-  sel.value = hw.cuda ? "cuda" : (hw.mps ? "mps" : "cpu");
-});
-
-function applyTrainModeUI() {
-  const trainMode = document.getElementById("train_mode");
-  const scratch = document.getElementById("train_from_scratch");
-  const scratchEnabled = !!scratch.checked;
-  if (scratchEnabled && trainMode.value === "lora") {
-    trainMode.value = "full";
-  }
-  const showLora = trainMode.value === "lora" && !scratchEnabled;
-  document.querySelectorAll('.lora_row').forEach(e => e.style.display = showLora ? "" : "none");
-  document.querySelectorAll('.scratch_cfg_row').forEach(e => e.style.display = scratchEnabled ? "" : "none");
-  const includePromptLoss = document.getElementById("include_prompt_loss");
-  if (includePromptLoss && !scratchEnabled) includePromptLoss.checked = false;
-}
-
-document.getElementById("train_mode").addEventListener("change", applyTrainModeUI);
-document.getElementById("train_from_scratch").addEventListener("change", applyTrainModeUI);
-window.addEventListener('DOMContentLoaded', applyTrainModeUI);
-
-document.getElementById("use_ngrams").addEventListener("change", function() {
-  const show = this.checked;
-  document.querySelectorAll('.ngram_row').forEach(e => e.style.display = show ? "" : "none");
-});
-window.addEventListener('DOMContentLoaded', function() {
-  document.querySelectorAll('.ngram_row').forEach(e => e.style.display = "none");
-});
-
-function applyTemplateModeUI() {
-  const mode = document.getElementById("template_mode").value;
-  const isHf = document.getElementById("dataset_source").value === "huggingface";
-  const isText = mode === "plain" && !isHf;
-  document.querySelectorAll('.column_row').forEach(e => e.style.display = isText ? "" : "none");
-}
-document.getElementById("template_mode").addEventListener("change", applyTemplateModeUI);
-window.addEventListener('DOMContentLoaded', applyTemplateModeUI);
-
-async function loadTrainings() {
-  try {
-    const res = await fetch('/trainings');
-    const data = await res.json();
-    const container = document.getElementById('trainingsHistory');
-    if (!data.length) { container.innerHTML = "<i>Noch keine Trainingsdurchläufe gefunden.</i>"; return; }
-    let html = "";
-    for (const run of data.reverse()) {
-      html += `
-        <details style="margin-bottom:1.1em;">
-          <summary><b>${escapeHtml(run.folder)}</b></summary>
-          <pre style="max-height:220px; overflow:auto; background:#1a2e49; border-radius:6px; padding:0.6em 0.9em;">${escapeHtml(JSON.stringify(run.config, null, 2))}</pre>
-          <a href="/training_outputs/${encodeURIComponent(run.folder)}/train_config.json" download>Trainings-Config herunterladen</a>
-        </details>
-      `;
-    }
-    container.innerHTML = html;
-  } catch (e) {
-    document.getElementById('trainingsHistory').innerHTML = "<i>Fehler beim Laden der Historie.</i>";
-  }
-}
-window.addEventListener('DOMContentLoaded', loadTrainings);
-
-async function fillModelDropdown() {
-  const select = document.getElementById('model_dir_select');
-  const prev = select.value;
-  const staticOptions = Array.from(select.querySelectorAll('option[value="custom"], option[value^="MTSmash/"]'));
-
-  let data = [];
-  try {
-    const res = await fetch('/available_models');
-    data = await res.json();
-  } catch {}
-
-  select.innerHTML = '';
-  staticOptions.forEach(o => select.appendChild(o));
-
-  if (Array.isArray(data) && data.length) {
-    const localGroup = document.createElement('optgroup');
-    localGroup.label = "Eigene Trainingsmodelle";
-    for (const folder of data.slice().reverse()) {
-      const opt = document.createElement('option');
-      opt.value = "./training_outputs/" + folder;
-      opt.textContent = folder;
-      localGroup.appendChild(opt);
-    }
-    select.appendChild(localGroup);
-  }
-
-  if ([...select.options].some(o => o.value === prev)) select.value = prev;
-}
-window.addEventListener('DOMContentLoaded', fillModelDropdown);
-
-async function fillDatasetDropdown() {
-  const select = document.getElementById('csv_path_select');
-  let data = [];
-  try {
-    const res = await fetch('/available_datasets');
-    data = await res.json();
-  } catch {}
-
-  select.innerHTML = '';
-  const customOpt = document.createElement('option');
-  customOpt.value = "custom";
-  customOpt.textContent = "Pfad manuell eingeben …";
-  select.appendChild(customOpt);
-
-  if (Array.isArray(data) && data.length) {
-    for (const csv of data) {
-      const opt = document.createElement('option');
-      opt.value = "./datasets/" + csv;
-      opt.textContent = csv;
-      select.appendChild(opt);
-    }
-    select.value = select.options[1]?.value || "custom";
-  } else {
-    select.value = "custom";
-  }
-  updateCsvInput();
-}
-function updateCsvInput() {
-  const select = document.getElementById('csv_path_select');
-  const input = document.getElementById('csv_path');
-  if (select.value === "custom") {
-    input.style.display = "";
-    input.required = true;
-    input.value = "";
-  } else {
-    input.style.display = "none";
-    input.required = false;
-    input.value = select.value;
-  }
-}
-document.getElementById('csv_path_select').addEventListener('change', updateCsvInput);
-document.getElementById('dataset_source').addEventListener('change', applyDatasetSourceUI);
-window.addEventListener('DOMContentLoaded', () => { fillDatasetDropdown(); applyDatasetSourceUI(); });
-
-
-let lastLocalTemplateMode = document.getElementById('template_mode').value;
-
-function applyDatasetSourceUI() {
-  const src = document.getElementById('dataset_source').value;
-  const isHf = src === 'huggingface';
-  const csvSelect = document.getElementById('csv_path_select');
-  const csvInput = document.getElementById('csv_path');
-  const templateMode = document.getElementById('template_mode');
-  const templateModeLabel = document.getElementById('template_mode_label');
-  document.getElementById('hf_dataset_id').style.display = isHf ? '' : 'none';
-  document.getElementById('hf_dataset_id_label').style.display = isHf ? '' : 'none';
-  document.getElementById('hf_dataset_split').style.display = isHf ? '' : 'none';
-  document.getElementById('hf_dataset_split_label').style.display = isHf ? '' : 'none';
-  csvSelect.disabled = isHf;
-  csvInput.disabled = isHf;
-  if (isHf) {
-    lastLocalTemplateMode = templateMode.value;
-    templateMode.value = 'plain';
-  } else {
-    templateMode.value = lastLocalTemplateMode || 'dialogplus';
-  }
-  templateMode.style.display = isHf ? 'none' : '';
-  templateModeLabel.style.display = isHf ? 'none' : '';
-  applyTemplateModeUI();
-}
-
-const modelDirSelect = document.getElementById('model_dir_select');
-const modelDirInput = document.getElementById('model_dir');
-const modelDirLabel = document.getElementById('model_dir_label');
-
-modelDirSelect.addEventListener('change', function() {
-  if (this.value === 'custom') {
-    modelDirInput.style.display = '';
-    modelDirLabel.style.display = '';
-    modelDirInput.required = true;
-    modelDirInput.value = '';
-    modelDirInput.focus();
-  } else {
-    modelDirInput.style.display = 'none';
-    modelDirLabel.style.display = 'none';
-    modelDirInput.required = false;
-    modelDirInput.value = '';
-  }
-});
-
-document.getElementById("settings").onsubmit = async e => {
-  e.preventDefault();
-
-  const scratchEnabled = document.getElementById("train_from_scratch").checked;
-  const selectedTrainMode = document.getElementById("train_mode").value;
-  if (scratchEnabled && selectedTrainMode === "lora") {
-    alert("Von Scratch trainieren ist nicht mit LoRA kombinierbar. Bitte Trainingsmodus auf Vollständiges Training stellen oder Scratch deaktivieren.");
-    return;
-  }
-
-  if (lossChart) {
-    lossChart.data.labels = [];
-    lossChart.data.datasets[0].data = [];
-    lossChart.update('none');
-  }
-  window.lossData = [];
-  window.lossSteps = [];
-
-  const maxSteps = integerOrNull(document.getElementById("max_steps").value);
-  const maxHistoryTurns = integerOrNull(document.getElementById("max_history_turns").value);
-
-  const modelDir = (modelDirSelect.value === "custom" ? modelDirInput.value.trim() : modelDirSelect.value);
-  if (!modelDir) { alert("Bitte model_dir angeben."); return; }
-
-  const csvPath = (document.getElementById("csv_path").style.display !== "none")
-    ? document.getElementById("csv_path").value.trim()
-    : document.getElementById("csv_path_select").value;
-
-  const datasetSource = document.getElementById("dataset_source").value;
-  const hfDatasetId = document.getElementById("hf_dataset_id").value.trim();
-  const hfDatasetSplit = document.getElementById("hf_dataset_split").value.trim() || "train";
-  if (datasetSource === "local_csv" && !csvPath) { alert("Bitte csv_path angeben."); return; }
-  if (datasetSource === "huggingface" && !hfDatasetId) { alert("Bitte HF Dataset ID angeben."); return; }
-
-  const payload = {
-    model_dir: modelDir,
-    dataset_source: datasetSource,
-    hf_dataset_id: hfDatasetId || null,
-    hf_dataset_split: hfDatasetSplit,
-    csv_path: csvPath || "./datasets/placeholder.csv",
-    save_dir: document.getElementById("save_dir").value.trim() || null,
-
-    template_mode: document.getElementById("template_mode").value,
-    column_name: document.getElementById("column_name").value.trim() || "text",
-
-    learning_rate: parseFloat(document.getElementById("learning_rate").value),
-    lr_schedule: document.getElementById("lr_schedule").value,
-    lr_decay_factor: parseFloat(document.getElementById("lr_decay_factor").value || "1.0"),
-    warmup_steps: parseInt(document.getElementById("warmup_steps").value || "0"),
-    warmup_ratio: parseFloat(document.getElementById("warmup_ratio").value || "0.0"),
-    min_lr_ratio: parseFloat(document.getElementById("min_lr_ratio").value || "0.0"),
-    lr_adjust_interval_steps: parseInt(document.getElementById("lr_adjust_interval_steps").value || "25"),
-    lr_adjust_min_change: parseFloat(document.getElementById("lr_adjust_min_change").value || "0.05"),
-
-    adaptive_scheduler: document.getElementById("adaptive_scheduler").checked,
-    adaptive_scheduler_freeze_on_producer_done: document.getElementById("adaptive_scheduler_freeze_on_producer_done").checked,
-    adaptive_scheduler_never_increase_lr: document.getElementById("adaptive_scheduler_never_increase_lr").checked,
-    adaptive_scheduler_only_extend_steps: document.getElementById("adaptive_scheduler_only_extend_steps").checked,
-
-    per_device_train_batch_size: parseInt(document.getElementById("per_device_train_batch_size").value),
-    gradient_accumulation_steps: parseInt(document.getElementById("gradient_accumulation_steps").value),
-
-    num_train_epochs: parseFloat(document.getElementById("num_train_epochs").value || "3"),
-    max_steps: maxSteps,
-
-    max_seq_length: parseInt(document.getElementById("max_seq_length").value || "1024"),
-    max_history_turns: maxHistoryTurns,
-
-    shuffle: document.getElementById("shuffle").checked,
-    sort_by_length: document.getElementById("sort_by_length").checked,
-    sort_by_similarity: document.getElementById("sort_by_similarity").checked,
-    rebuild_dataset_cache: document.getElementById("rebuild_dataset_cache").checked,
-
-    device: document.getElementById("device").value,
-
-    train_mode: document.getElementById("train_mode").value,
-    train_from_scratch: document.getElementById("train_from_scratch").checked,
-    include_prompt_loss: document.getElementById("include_prompt_loss").checked,
-    scratch_hidden_size: integerOrNull(document.getElementById("scratch_hidden_size").value),
-    scratch_num_hidden_layers: integerOrNull(document.getElementById("scratch_num_hidden_layers").value),
-    scratch_num_attention_heads: integerOrNull(document.getElementById("scratch_num_attention_heads").value),
-    scratch_intermediate_size: integerOrNull(document.getElementById("scratch_intermediate_size").value),
-    scratch_num_key_value_heads: integerOrNull(document.getElementById("scratch_num_key_value_heads").value),
-    scratch_max_position_embeddings: integerOrNull(document.getElementById("scratch_max_position_embeddings").value),
-    lora_r: parseInt(document.getElementById("lora_r").value || "8"),
-    lora_alpha: parseInt(document.getElementById("lora_alpha").value || "16"),
-
-    precision_mode: document.getElementById("precision_mode").value,
-    gradient_checkpointing: document.getElementById("gradient_checkpointing").checked,
-
-    log_cuda_memory: document.getElementById("log_cuda_memory").checked,
-    cuda_memory_log_interval_steps: parseInt(document.getElementById("cuda_memory_log_interval_steps").value || "25"),
-    cuda_empty_cache_interval_steps: parseInt(document.getElementById("cuda_empty_cache_interval_steps").value || "0"),
-
-    dataloader_num_workers: 0,
-    merge_lora_on_save: document.getElementById("merge_lora_on_save")
-      ? document.getElementById("merge_lora_on_save").checked
-      : true,
-
-    max_grad_norm: 1.0,
-    weight_decay: 0.01,
-
-    use_ngrams: document.getElementById("use_ngrams").checked,
-    ngram_max: parseInt(document.getElementById("ngram_max").value || "12"),
-    ngram_top_k: parseInt(document.getElementById("ngram_top_k").value || "1500"),
-    ngram_min_chars: parseInt(document.getElementById("ngram_min_chars").value || "16"),
-    ngram_min_words: parseInt(document.getElementById("ngram_min_words").value || "2"),
-    ngram_max_samples: parseInt(document.getElementById("ngram_max_samples").value || "4000"),
-    ngram_budgeted: document.getElementById("ngram_budgeted").checked,
-    ngram_target_fit: parseFloat(document.getElementById("ngram_target_fit").value || "0.98"),
-    ngram_eval_samples: parseInt(document.getElementById("ngram_eval_samples").value || "512"),
-    ngram_add_batch: parseInt(document.getElementById("ngram_add_batch").value || "64"),
-    ngram_min_count: 2,
-    ngram_max_token_chars: 384,
-    ngram_max_tokens_per_text: 4096,
-
-    ngram_conflict_overlap_ratio: parseFloat(document.getElementById("ngram_conflict_overlap_ratio").value || "0.8"),
-    ngram_prefer_longest_match: document.getElementById("ngram_prefer_longest_match").checked,
-    ngram_use_code_lines: document.getElementById("ngram_use_code_lines").checked,
-    ngram_code_line_min_chars: parseInt(document.getElementById("ngram_code_line_min_chars").value || "12"),
-    ngram_code_line_min_count: parseInt(document.getElementById("ngram_code_line_min_count").value || "2"),
-    ngram_code_line_top_k: parseInt(document.getElementById("ngram_code_line_top_k").value || "400"),
-    ngram_code_line_score_boost: parseFloat(document.getElementById("ngram_code_line_score_boost").value || "1.35"),
-    ngram_code_pattern_boost: document.getElementById("ngram_code_pattern_boost").checked,
-    ngram_code_pattern_extra_boost: parseFloat(document.getElementById("ngram_code_pattern_extra_boost").value || "1.2"),
-
-    ngram_focus_oversize_samples: document.getElementById("ngram_focus_oversize_samples").checked,
-    ngram_oversize_sample_boost: parseFloat(document.getElementById("ngram_oversize_sample_boost").value || "4.0"),
-    ngram_near_limit_threshold: parseFloat(document.getElementById("ngram_near_limit_threshold").value || "0.90"),
-    ngram_near_limit_boost: parseFloat(document.getElementById("ngram_near_limit_boost").value || "1.5"),
-    ngram_eval_max_seq_length: parseInt(document.getElementById("ngram_eval_max_seq_length").value || document.getElementById("max_seq_length").value || "1024"),
-    ngram_track_saved_samples: document.getElementById("ngram_track_saved_samples").checked,
-    ngram_saved_sample_boost: parseFloat(document.getElementById("ngram_saved_sample_boost").value || "8.0")
-  };
-
-  const overlay = document.getElementById("matrix-spinner-overlay");
-  overlay.style.display = "flex";
-  try {
-    const resp = await fetch("/start", {
-      method: "POST",
-      headers: {"Content-Type":"application/json"},
-      body: JSON.stringify(payload)
+    window.addEventListener('DOMContentLoaded', ()=>{
+      pollSysStatus();
+      setInterval(pollSysStatus, 2000);
     });
 
-    const raw = await resp.text();
-    let json;
-    try { json = JSON.parse(raw); }
-    catch { json = { error: "Server-Antwort war kein JSON", raw: raw.slice(0, 400) }; }
+    // ---------- Live preview ----------
+    let previewShort = "";
+    let previewFull  = "";
+    let previewExpanded = false;
 
-    if (!resp.ok || json.running === false) {
-      alert("Fehler beim Starten des Trainings: " + (json.error || json.msg || ("HTTP " + resp.status)));
-    } else if (json.msg) {
-      alert(json.msg);
+    async function pollLivePreview(){
+      try {
+        const d = await (await fetch('/livepreview')).json();
+        previewShort = d.preview || "";
+        previewFull  = d.preview_full || previewShort || "";
+        renderPreview();
+      } catch {}
     }
-  } catch (err) {
-    alert("Fehler beim Start-Request: " + (err?.message || err));
-  } finally {
-    overlay.style.display = "none";
-  }
-};
+    function renderPreview(){
+      const box = document.getElementById("livepreview");
+      const btn = document.getElementById("togglePreviewBtn");
+      if (!box || !btn) return;
 
-document.getElementById("stopBtn").onclick = async function() {
-  try { await fetch("/stop", {method: "POST"}); }
-  catch {}
-};
-
-window.downloadExample = function(mode) {
-  let csvContent = "";
-  if (mode === "plain") {
-    csvContent = `text
-Das ist ein Beispielsatz für Pretraining.
-Hier folgt eine weitere Trainingszeile.
-`;
-  } else {
-    csvContent = `id,parent_id,system,Benutzer,Kontext,Assistentin
-1,,Du bist ein freundlicher Chatbot.,Hallo!,,"Hallo! Wie kann ich dir helfen?"
-2,1,,Wie spät ist es?,,"Ich habe keinen Zugriff auf deine Uhr, aber du kannst oben rechts schauen."
-3,,Du bist Übersetzer.,Übersetze: "Guten Morgen",,Auf Englisch: "Good morning".
-`;
-  }
-  const blob = new Blob([csvContent], { type: "text/csv;charset=utf-8;" });
-  const link = document.createElement("a");
-  link.href = URL.createObjectURL(blob);
-  link.setAttribute("download", mode === "plain" ? "text_beispiel.csv" : "row_sft_dialog_beispiel.csv");
-  document.body.appendChild(link);
-  link.click();
-  document.body.removeChild(link);
-};
-
-let chatMessages = [];
-function renderChat() {
-  const box = document.getElementById('chat_history');
-  box.innerHTML = chatMessages.map(m => {
-    const who = m.role === 'user' ? '<b>Du</b>' : '<b>Assistentin</b>';
-    return `<div style="margin:0.3em 0;"><span style="color:#5ec6ff;">${who}:</span> ${escapeHtmlWithBreaks(m.content)}</div>`;
-  }).join('');
-  box.scrollTop = box.scrollHeight;
-}
-
-async function loadChatModel() {
-  const model = document.getElementById('chat_model_select').value || null;
-  const device = document.getElementById('chat_device').value;
-  const resp = await fetch('/load_inference', {
-    method:'POST',
-    headers:{'Content-Type':'application/json'},
-    body: JSON.stringify({ model_dir: model, device })
-  });
-  const j = await resp.json();
-  alert(j.msg || j.error || 'geladen');
-}
-
-async function sendChat() {
-  const inp = document.getElementById('chat_input');
-  const sys = document.getElementById('chat_system').value.trim();
-  const max_new = parseInt(document.getElementById('chat_max_new').value || '256');
-  const temp = parseFloat(document.getElementById('chat_temp').value || '0.7');
-  const top_p = parseFloat(document.getElementById('chat_topp').value || '0.9');
-
-  const model = document.getElementById('chat_model_select').value || null;
-  const device = document.getElementById('chat_device').value;
-
-  const text = inp.value.trim();
-  if (!text) return;
-
-  chatMessages.push({ role: 'user', content: text });
-  renderChat();
-  inp.value = '';
-
-  const req = {
-    model_dir: model,
-    device: device,
-    system: sys || null,
-    messages: chatMessages,
-    max_new_tokens: max_new,
-    temperature: temp,
-    top_p: top_p,
-    top_k: 50,
-    repetition_penalty: 1.05,
-    do_sample: true
-  };
-
-  const assistantMsg = { role: 'assistant', content: '' };
-  chatMessages.push(assistantMsg);
-  renderChat();
-
-  try {
-    const resp = await fetch('/chat_stream', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(req)
-    });
-
-    if (!resp.ok || !resp.body) throw new Error('Streaming nicht verfügbar');
-
-    const reader = resp.body.getReader();
-    const decoder = new TextDecoder('utf-8');
-
-    while (true) {
-      const { value, done } = await reader.read();
-      if (done) break;
-      assistantMsg.content += decoder.decode(value, { stream: true });
-      renderChat();
+      if (previewExpanded) {
+        box.textContent = previewFull;
+        btn.textContent = "Weniger anzeigen";
+      } else {
+        const base = previewShort || previewFull || "";
+        const s = base.length > 240 ? base.slice(0, 240) + " ..." : base;
+        box.textContent = s;
+        btn.textContent = "Mehr anzeigen";
+      }
     }
-  } catch (err) {
-    try {
-      const r = await fetch('/chat', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(req)
+    document.getElementById("togglePreviewBtn").onclick = () => {
+      previewExpanded = !previewExpanded;
+      renderPreview();
+    };
+    setInterval(pollLivePreview, 2000);
+
+    // ---------- Loss chart ----------
+    window.lossData=[]; window.lossSteps=[];
+    let lossChart=null;
+
+    function initLossChart(){
+      const canvas = document.getElementById('lossChart');
+      if (!canvas || typeof Chart === 'undefined') return;
+      const ctx = canvas.getContext('2d');
+      lossChart = new Chart(ctx,{
+        type:'line',
+        data:{ labels:[], datasets:[{
+          label:'Loss',
+          data:[],
+          fill:false,
+          borderColor:'rgba(77,184,255,.95)',
+          borderWidth: 2,
+          tension:0.25,
+          pointRadius: 0
+        }]},
+        options:{
+          responsive:true,
+          maintainAspectRatio:false,
+          animation:false,
+          plugins:{
+            legend:{ display:false },
+            tooltip:{ enabled:true }
+          },
+          scales:{
+            x:{ ticks:{ color:'rgba(159,192,239,.9)' }, grid:{ color:'rgba(255,255,255,.06)' } },
+            y:{ ticks:{ color:'rgba(159,192,239,.9)' }, grid:{ color:'rgba(255,255,255,.06)' } }
+          }
+        }
       });
+    }
+    function updateChart(){
+      if (!lossChart) return;
+      lossChart.data.labels = window.lossSteps;
+      lossChart.data.datasets[0].data = window.lossData;
+      lossChart.update('none');
+    }
 
-      const rawText = await r.text();
-      let j;
+    // ---------- Logs WS ----------
+    function connectLogsWS(){
+      const logbox = document.getElementById("logbox");
+      if (!logbox) return;
 
-      try { j = JSON.parse(rawText); }
-      catch {
-        assistantMsg.content = '(Fehler: Chat-Antwort war kein gültiges JSON:\n' + rawText.slice(0, 400) + ')';
-        renderChat();
+      const proto = (location.protocol === 'https:') ? 'wss' : 'ws';
+      let ws;
+      try {
+        ws = new WebSocket(`${proto}://${location.host}/ws/logs`);
+      } catch {
         return;
       }
 
-      if (!r.ok) { assistantMsg.content = '(Fehler: ' + (j.error || ('HTTP ' + r.status)) + ')'; renderChat(); return; }
-      if (j.error) { assistantMsg.content = '(Fehler: ' + j.error + ')'; renderChat(); return; }
+      ws.onmessage = evt => {
+        logbox.textContent += evt.data + "\\n";
+        if (logbox.textContent.length > 200000) logbox.textContent = logbox.textContent.slice(-200000);
+        logbox.scrollTop = logbox.scrollHeight;
 
-      assistantMsg.content = j.response || '';
-      renderChat();
-    } catch (e2) {
-      assistantMsg.content = '(Fehler: ' + (e2.message || 'Unbekannt') + ')';
-      renderChat();
+        (evt.data || "").split('\\n').forEach(line=>{
+          const m = line.match(/Step (\\d+)\\s+\\|\\s+Loss:\\s+([0-9\\.eE\\-]+)/);
+          if(m){
+            const step = Number(m[1]);
+            const loss = Number(m[2]);
+            if(!window.lossSteps.length || step>window.lossSteps[window.lossSteps.length-1]){
+              window.lossSteps.push(step);
+              window.lossData.push(loss);
+              updateChart();
+            }
+          }
+        });
+      };
+
+      ws.onclose = () => setTimeout(connectLogsWS, 1200);
+      ws.onerror = () => { try { ws.close(); } catch {} };
     }
-  }
-}
 
-document.getElementById('chat_send_btn').addEventListener('click', sendChat);
-document.getElementById('chat_input').addEventListener('keydown', (e)=>{ if(e.key==='Enter'){ e.preventDefault(); sendChat(); }});
-document.getElementById('chat_load_btn').addEventListener('click', loadChatModel);
-
-window.addEventListener('DOMContentLoaded', async () => {
-  const sel = document.getElementById('chat_model_select');
-  try{
-    const res = await fetch('/available_models');
-    const runs = await res.json();
-    runs.reverse().forEach(folder => {
-      const opt = document.createElement('option');
-      opt.value = "./training_outputs/" + folder;
-      opt.textContent = folder;
-      sel.appendChild(opt);
+    window.addEventListener('DOMContentLoaded', () => {
+      initLossChart();
+      connectLogsWS();
     });
-  } catch {}
-});
 
-async function unloadChatModel() {
-  const btn = document.getElementById('chat_unload_btn');
-  const sendBtn = document.getElementById('chat_send_btn');
-  try {
-    btn.disabled = true;
-    sendBtn.disabled = true;
-    const resp = await fetch('/unload_inference', { method: 'POST' });
-    const j = await resp.json();
-    chatMessages = [];
-    renderChat();
-    alert(j.msg || j.error || 'Inferenz-Modell entladen.');
-  } catch (e) {
-    alert('Entladen fehlgeschlagen: ' + (e?.message || e));
-  } finally {
-    btn.disabled = false;
-    sendBtn.disabled = false;
-  }
-}
-document.getElementById('chat_unload_btn').addEventListener('click', unloadChatModel);
-</script>
+    // ---------- Hardware / device ----------
+    let hw = {};
+    window.addEventListener('DOMContentLoaded', async () => {
+      try { hw = await (await fetch('/hardware')).json(); }
+      catch { hw = {cuda:false,mps:false}; }
+
+      const sel = document.getElementById("device");
+      sel.innerHTML = "";
+      ["cpu","mps","cuda"].forEach(d => {
+        if (d==="cpu" || (d==="mps"&&hw.mps) || (d==="cuda"&&hw.cuda)) {
+          const o = document.createElement("option");
+          o.value = d; o.textContent = d.toUpperCase();
+          sel.appendChild(o);
+        }
+      });
+      sel.value = hw.cuda ? "cuda" : (hw.mps ? "mps" : "cpu");
+    });
+
+    async function populateChatDevices() {
+      const sel = document.getElementById('chat_device');
+      sel.innerHTML = '';
+      try {
+        const hw = await (await fetch('/hardware')).json();
+        const opts = [{v:'cpu', label:'CPU'}];
+        if (hw.cuda) opts.push({v:'cuda', label:'CUDA'});
+        if (hw.mps)  opts.push({v:'mps',  label:'MPS'});
+        for (const o of opts) {
+          const op = document.createElement('option');
+          op.value = o.v; op.textContent = o.label;
+          sel.appendChild(op);
+        }
+        sel.value = hw.cuda ? 'cuda' : (hw.mps ? 'mps' : 'cpu');
+      } catch {
+        const op = document.createElement('option');
+        op.value = 'cpu'; op.textContent = 'CPU';
+        sel.appendChild(op);
+      }
+    }
+    window.addEventListener('DOMContentLoaded', populateChatDevices);
+
+    // ---------- UI toggles ----------
+    function applyTrainModeUI() {
+      const trainMode = document.getElementById("train_mode");
+      const scratch = document.getElementById("train_from_scratch");
+      const scratchEnabled = !!scratch.checked;
+      if (scratchEnabled && trainMode.value === "lora") trainMode.value = "full";
+
+      const showLora = trainMode.value === "lora" && !scratchEnabled;
+      document.querySelectorAll('.lora_row').forEach(e => e.style.display = showLora ? "" : "none");
+      document.querySelectorAll('.scratch_cfg_row').forEach(e => e.style.display = scratchEnabled ? "" : "none");
+      const includePromptLoss = document.getElementById("include_prompt_loss");
+      if (includePromptLoss && !scratchEnabled) includePromptLoss.checked = false;
+    }
+    document.getElementById("train_mode").addEventListener("change", applyTrainModeUI);
+    document.getElementById("train_from_scratch").addEventListener("change", applyTrainModeUI);
+    window.addEventListener('DOMContentLoaded', applyTrainModeUI);
+
+    document.getElementById("use_ngrams").addEventListener("change", function() {
+      const show = this.checked;
+      document.querySelectorAll('.ngram_row').forEach(e => e.style.display = show ? "" : "none");
+    });
+    window.addEventListener('DOMContentLoaded', function() {
+      document.querySelectorAll('.ngram_row').forEach(e => e.style.display = "none");
+    });
+
+    function applyTemplateModeUI() {
+      const mode = document.getElementById("template_mode").value;
+      const isHf = document.getElementById("dataset_source").value === "huggingface";
+      const isText = mode === "plain" && !isHf;
+      document.querySelectorAll('.column_row').forEach(e => e.style.display = isText ? "" : "none");
+    }
+    document.getElementById("template_mode").addEventListener("change", applyTemplateModeUI);
+    window.addEventListener('DOMContentLoaded', applyTemplateModeUI);
+
+    // Dataset source UI
+    let lastLocalTemplateMode = document.getElementById('template_mode').value;
+
+    function applyDatasetSourceUI() {
+      const src = document.getElementById('dataset_source').value;
+      const isHf = src === 'huggingface';
+      const csvSelect = document.getElementById('csv_path_select');
+      const csvInput = document.getElementById('csv_path');
+      const templateMode = document.getElementById('template_mode');
+      const templateModeLabel = document.getElementById('template_mode_label');
+
+      document.getElementById('hf_dataset_id').style.display = isHf ? '' : 'none';
+      document.getElementById('hf_dataset_id_label').style.display = isHf ? '' : 'none';
+      document.getElementById('hf_dataset_split').style.display = isHf ? '' : 'none';
+      document.getElementById('hf_dataset_split_label').style.display = isHf ? '' : 'none';
+
+      csvSelect.disabled = isHf;
+      csvInput.disabled = isHf;
+
+      if (isHf) {
+        lastLocalTemplateMode = templateMode.value;
+        templateMode.value = 'plain';
+      } else {
+        templateMode.value = lastLocalTemplateMode || 'dialogplus';
+      }
+      templateMode.style.display = isHf ? 'none' : '';
+      templateModeLabel.style.display = isHf ? 'none' : '';
+      applyTemplateModeUI();
+    }
+
+    // Model dir custom toggle
+    const modelDirSelect = document.getElementById('model_dir_select');
+    const modelDirInput = document.getElementById('model_dir');
+    const modelDirLabel = document.getElementById('model_dir_label');
+
+    modelDirSelect.addEventListener('change', function() {
+      if (this.value === 'custom') {
+        modelDirInput.style.display = '';
+        modelDirLabel.style.display = '';
+        modelDirInput.required = true;
+        modelDirInput.value = '';
+        modelDirInput.focus();
+      } else {
+        modelDirInput.style.display = 'none';
+        modelDirLabel.style.display = 'none';
+        modelDirInput.required = false;
+        modelDirInput.value = '';
+      }
+    });
+
+    // ---------- Status polling ----------
+    async function getStatus(){
+      try{
+        const s = await (await fetch('/status')).json();
+
+        const running = !!s.running;
+        document.getElementById("status").textContent = running ? "läuft" : "gestoppt";
+
+        // top pill
+        const dot = document.getElementById('runDot');
+        const lbl = document.getElementById('runLabel');
+        dot.classList.remove('good','bad');
+        if (running) { dot.classList.add('good'); lbl.textContent = "Status: läuft"; }
+        else { dot.classList.add('bad'); lbl.textContent = "Status: gestoppt"; }
+
+        // KPI Training
+        document.getElementById('trainKpi').textContent = running ? "RUN" : "IDLE";
+        document.getElementById('lossKpi').textContent = (typeof s.loss==="number" && Number.isFinite(s.loss)) ? s.loss.toFixed(6) : "-";
+        document.getElementById('lrKpi').textContent = (typeof s.learning_rate==="number") ? s.learning_rate : "-";
+
+        const totalSteps = (typeof s.scheduler_total_steps === "number" && s.scheduler_total_steps > 0)
+          ? s.scheduler_total_steps
+          : ((typeof s.total_steps === "number" && s.total_steps > 0) ? s.total_steps : null);
+
+        const currentStep = (typeof s.step === "number" && s.step >= 0) ? s.step : null;
+
+        document.getElementById("step").textContent = currentStep !== null ? currentStep : "-";
+        document.getElementById("loss").textContent = (typeof s.loss==="number" && Number.isFinite(s.loss)) ? s.loss.toFixed(6) : "-";
+        document.getElementById("learning_rate_display").textContent = (typeof s.learning_rate==="number") ? s.learning_rate : "-";
+        document.getElementById("eta").textContent = s.eta || "-";
+        document.getElementById("tokens_per_step").textContent = s.tokens_per_step || "-";
+        document.getElementById("total_tokens").textContent = s.total_tokens || "-";
+
+        document.getElementById("scheduler_total_steps").textContent = fmtValue(totalSteps);
+        document.getElementById("csv_total_samples_est").textContent = fmtValue(s.csv_total_samples_est);
+        document.getElementById("total_samples_real").textContent = fmtValue(s.total_samples_real);
+        document.getElementById("skipped_samples").textContent = fmtValue(s.skipped_samples);
+
+        if (currentStep !== null && totalSteps !== null) {
+          const pct = Math.max(0, Math.min(100, (currentStep / totalSteps) * 100));
+          document.getElementById("step_progress").textContent = `${currentStep} / ${totalSteps} (${pct.toFixed(1)}%)`;
+          const bar = document.getElementById("step_progress_bar");
+          if (bar) bar.style.width = pct.toFixed(2) + "%";
+        } else {
+          document.getElementById("step_progress").textContent = "-";
+          const bar = document.getElementById("step_progress_bar");
+          if (bar) bar.style.width = "0%";
+        }
+
+        const cfg = s.config || {};
+        const epochsConfigured = numberOrNull(cfg.num_train_epochs);
+        const batchSize = Math.max(1, numberOrNull(cfg.per_device_train_batch_size) || 1);
+        const gradAccum = Math.max(1, numberOrNull(cfg.gradient_accumulation_steps) || 1);
+        const worldSize = Math.max(1, numberOrNull(s.world_size) || 1);
+
+        const realSamples = numberOrNull(s.total_samples_real);
+        const estSamples = numberOrNull(s.csv_total_samples_est);
+        const effectiveSamples = realSamples !== null && realSamples > 0 ? realSamples : estSamples;
+
+        let updatesPerEpoch = null;
+        if (effectiveSamples !== null && effectiveSamples > 0) {
+          const localSamples = Math.ceil(effectiveSamples / worldSize);
+          const batchesPerEpoch = Math.ceil(localSamples / batchSize);
+          updatesPerEpoch = Math.max(1, Math.ceil(batchesPerEpoch / gradAccum));
+        }
+
+        document.getElementById("updates_per_epoch").textContent = (updatesPerEpoch !== null) ? String(updatesPerEpoch) : "-";
+
+        if (currentStep !== null && updatesPerEpoch !== null && epochsConfigured !== null) {
+          const epochFloat = (currentStep / Math.max(1, updatesPerEpoch));
+          const epochDisplay = Math.min(epochsConfigured, epochFloat);
+          document.getElementById("epoch_progress").textContent = `${epochDisplay.toFixed(2)} / ${epochsConfigured}`;
+        } else {
+          document.getElementById("epoch_progress").textContent = "-";
+        }
+
+        const producerProgress = s.producer_progress || {};
+        const producerMeta = s.producer_meta || {};
+
+        document.getElementById("scheduler_mode").textContent = fmtValue(s.scheduler_mode);
+        document.getElementById("scheduler_source").textContent = fmtValue(s.scheduler_source);
+        document.getElementById("adaptive_scheduler_status").textContent = fmtBool(s.adaptive_scheduler);
+        document.getElementById("adaptive_scheduler_frozen").textContent = fmtBool(s.adaptive_scheduler_frozen);
+        document.getElementById("adaptive_scheduler_never_increase_lr").textContent = fmtBool(s.adaptive_scheduler_never_increase_lr);
+        document.getElementById("adaptive_scheduler_only_extend_steps").textContent = fmtBool(s.adaptive_scheduler_only_extend_steps);
+
+        document.getElementById("projected_samples").textContent = fmtValue(s.projected_samples);
+        document.getElementById("producer_seen_samples").textContent = fmtValue(producerProgress.seen_samples);
+        document.getElementById("producer_tokenized_samples").textContent = fmtValue(producerProgress.tokenized_samples);
+        document.getElementById("producer_num_shards").textContent = fmtValue(
+          producerMeta.num_shards ?? producerProgress.num_shards_written
+        );
+        document.getElementById("producer_done").textContent = fmtBool(
+          s.producer_done ?? producerMeta.done ?? producerProgress.done
+        );
+        document.getElementById("scheduler_rel_change").textContent = fmtNum(s.scheduler_rel_change, 4);
+
+        const cudaMem = s.cuda_memory || {};
+        document.getElementById("cuda_allocated_mb").textContent = fmtMb(cudaMem.allocated_mb);
+        document.getElementById("cuda_reserved_mb").textContent = fmtMb(cudaMem.reserved_mb);
+        document.getElementById("cuda_max_allocated_mb").textContent = fmtMb(cudaMem.max_allocated_mb);
+        document.getElementById("cuda_max_reserved_mb").textContent = fmtMb(cudaMem.max_reserved_mb);
+
+      } catch {}
+    }
+    getStatus(); setInterval(getStatus,1500);
+
+    // ---------- Trainings history ----------
+    async function loadTrainings() {
+      try {
+        const res = await fetch('/trainings');
+        const data = await res.json();
+        const container = document.getElementById('trainingsHistory');
+        if (!data.length) { container.innerHTML = "<i>Noch keine Trainingsdurchläufe gefunden.</i>"; return; }
+        let html = "";
+        for (const run of data.reverse()) {
+          html += `
+            <details>
+              <summary>${escapeHtml(run.folder)}</summary>
+              <pre>${escapeHtml(JSON.stringify(run.config, null, 2))}</pre>
+              <a href="/training_outputs/${encodeURIComponent(run.folder)}/train_config.json" download>Trainings-Config herunterladen</a>
+            </details>
+          `;
+        }
+        container.innerHTML = html;
+      } catch (e) {
+        document.getElementById('trainingsHistory').innerHTML = "<i>Fehler beim Laden der Historie.</i>";
+      }
+    }
+    window.addEventListener('DOMContentLoaded', loadTrainings);
+
+    // ---------- Available models ----------
+    async function fillModelDropdown() {
+      const select = document.getElementById('model_dir_select');
+      const prev = select.value;
+      const staticOptions = Array.from(select.querySelectorAll('option[value="custom"], option[value^="MTSmash/"]'));
+
+      let data = [];
+      try {
+        const res = await fetch('/available_models');
+        data = await res.json();
+      } catch {}
+
+      select.innerHTML = '';
+      staticOptions.forEach(o => select.appendChild(o));
+
+      if (Array.isArray(data) && data.length) {
+        const localGroup = document.createElement('optgroup');
+        localGroup.label = "Eigene Trainingsmodelle";
+        for (const folder of data.slice().reverse()) {
+          const opt = document.createElement('option');
+          opt.value = "./training_outputs/" + folder;
+          opt.textContent = folder;
+          localGroup.appendChild(opt);
+        }
+        select.appendChild(localGroup);
+      }
+
+      if ([...select.options].some(o => o.value === prev)) select.value = prev;
+    }
+    window.addEventListener('DOMContentLoaded', fillModelDropdown);
+
+    // ---------- Datasets dropdown ----------
+    async function fillDatasetDropdown() {
+      const select = document.getElementById('csv_path_select');
+      let data = [];
+      try {
+        const res = await fetch('/available_datasets');
+        data = await res.json();
+      } catch {}
+
+      select.innerHTML = '';
+      const customOpt = document.createElement('option');
+      customOpt.value = "custom";
+      customOpt.textContent = "Pfad manuell eingeben …";
+      select.appendChild(customOpt);
+
+      if (Array.isArray(data) && data.length) {
+        for (const csv of data) {
+          const opt = document.createElement('option');
+          opt.value = "./datasets/" + csv;
+          opt.textContent = csv;
+          select.appendChild(opt);
+        }
+        select.value = select.options[1]?.value || "custom";
+      } else {
+        select.value = "custom";
+      }
+      updateCsvInput();
+    }
+
+    function updateCsvInput() {
+      const select = document.getElementById('csv_path_select');
+      const input = document.getElementById('csv_path');
+      const label = document.querySelector('label[for="csv_path"]');
+      if (select.value === "custom") {
+        input.style.display = "";
+        if (label) label.style.display = "";
+        input.required = true;
+        input.value = "";
+      } else {
+        input.style.display = "none";
+        if (label) label.style.display = "none";
+        input.required = false;
+        input.value = select.value;
+      }
+    }
+
+    document.getElementById('csv_path_select').addEventListener('change', updateCsvInput);
+    document.getElementById('dataset_source').addEventListener('change', applyDatasetSourceUI);
+    window.addEventListener('DOMContentLoaded', () => { fillDatasetDropdown(); applyDatasetSourceUI(); });
+
+    // ---------- Start / Stop ----------
+    document.getElementById("settings").onsubmit = async e => {
+      e.preventDefault();
+
+      const scratchEnabled = document.getElementById("train_from_scratch").checked;
+      const selectedTrainMode = document.getElementById("train_mode").value;
+      if (scratchEnabled && selectedTrainMode === "lora") {
+        alert("Von Scratch trainieren ist nicht mit LoRA kombinierbar. Bitte Trainingsmodus auf Vollständiges Training stellen oder Scratch deaktivieren.");
+        return;
+      }
+
+      if (lossChart) {
+        lossChart.data.labels = [];
+        lossChart.data.datasets[0].data = [];
+        lossChart.update('none');
+      }
+      window.lossData = [];
+      window.lossSteps = [];
+
+      const maxSteps = integerOrNull(document.getElementById("max_steps").value);
+      const maxHistoryTurns = integerOrNull(document.getElementById("max_history_turns").value);
+
+      const modelDir = (modelDirSelect.value === "custom" ? modelDirInput.value.trim() : modelDirSelect.value);
+      if (!modelDir) { alert("Bitte model_dir angeben."); return; }
+
+      const csvPath = (document.getElementById("csv_path").style.display !== "none")
+        ? document.getElementById("csv_path").value.trim()
+        : document.getElementById("csv_path_select").value;
+
+      const datasetSource = document.getElementById("dataset_source").value;
+      const hfDatasetId = document.getElementById("hf_dataset_id").value.trim();
+      const hfDatasetSplit = document.getElementById("hf_dataset_split").value.trim() || "train";
+      if (datasetSource === "local_csv" && !csvPath) { alert("Bitte csv_path angeben."); return; }
+      if (datasetSource === "huggingface" && !hfDatasetId) { alert("Bitte HF Dataset ID angeben."); return; }
+
+      const payload = {
+        model_dir: modelDir,
+        dataset_source: datasetSource,
+        hf_dataset_id: hfDatasetId || null,
+        hf_dataset_split: hfDatasetSplit,
+        csv_path: csvPath || "./datasets/placeholder.csv",
+        save_dir: document.getElementById("save_dir").value.trim() || null,
+
+        template_mode: document.getElementById("template_mode").value,
+        column_name: document.getElementById("column_name").value.trim() || "text",
+
+        learning_rate: parseFloat(document.getElementById("learning_rate").value),
+        lr_schedule: document.getElementById("lr_schedule").value,
+        lr_decay_factor: parseFloat(document.getElementById("lr_decay_factor").value || "1.0"),
+        warmup_steps: parseInt(document.getElementById("warmup_steps").value || "0"),
+        warmup_ratio: parseFloat(document.getElementById("warmup_ratio").value || "0.0"),
+        min_lr_ratio: parseFloat(document.getElementById("min_lr_ratio").value || "0.0"),
+        lr_adjust_interval_steps: parseInt(document.getElementById("lr_adjust_interval_steps").value || "25"),
+        lr_adjust_min_change: parseFloat(document.getElementById("lr_adjust_min_change").value || "0.05"),
+
+        adaptive_scheduler: document.getElementById("adaptive_scheduler").checked,
+        adaptive_scheduler_freeze_on_producer_done: document.getElementById("adaptive_scheduler_freeze_on_producer_done").checked,
+        adaptive_scheduler_never_increase_lr: document.getElementById("adaptive_scheduler_never_increase_lr").checked,
+        adaptive_scheduler_only_extend_steps: document.getElementById("adaptive_scheduler_only_extend_steps").checked,
+
+        per_device_train_batch_size: parseInt(document.getElementById("per_device_train_batch_size").value),
+        gradient_accumulation_steps: parseInt(document.getElementById("gradient_accumulation_steps").value),
+
+        num_train_epochs: parseFloat(document.getElementById("num_train_epochs").value || "3"),
+        max_steps: maxSteps,
+
+        max_seq_length: parseInt(document.getElementById("max_seq_length").value || "1024"),
+        max_history_turns: maxHistoryTurns,
+
+        shuffle: document.getElementById("shuffle").checked,
+        sort_by_length: document.getElementById("sort_by_length").checked,
+        sort_by_similarity: document.getElementById("sort_by_similarity").checked,
+        rebuild_dataset_cache: document.getElementById("rebuild_dataset_cache").checked,
+
+        device: document.getElementById("device").value,
+
+        train_mode: document.getElementById("train_mode").value,
+        train_from_scratch: document.getElementById("train_from_scratch").checked,
+        include_prompt_loss: document.getElementById("include_prompt_loss").checked,
+        scratch_hidden_size: integerOrNull(document.getElementById("scratch_hidden_size").value),
+        scratch_num_hidden_layers: integerOrNull(document.getElementById("scratch_num_hidden_layers").value),
+        scratch_num_attention_heads: integerOrNull(document.getElementById("scratch_num_attention_heads").value),
+        scratch_intermediate_size: integerOrNull(document.getElementById("scratch_intermediate_size").value),
+        scratch_num_key_value_heads: integerOrNull(document.getElementById("scratch_num_key_value_heads").value),
+        scratch_max_position_embeddings: integerOrNull(document.getElementById("scratch_max_position_embeddings").value),
+        lora_r: parseInt(document.getElementById("lora_r").value || "8"),
+        lora_alpha: parseInt(document.getElementById("lora_alpha").value || "16"),
+
+        precision_mode: document.getElementById("precision_mode").value,
+        gradient_checkpointing: document.getElementById("gradient_checkpointing").checked,
+
+        log_cuda_memory: document.getElementById("log_cuda_memory").checked,
+        cuda_memory_log_interval_steps: parseInt(document.getElementById("cuda_memory_log_interval_steps").value || "25"),
+        cuda_empty_cache_interval_steps: parseInt(document.getElementById("cuda_empty_cache_interval_steps").value || "0"),
+
+        dataloader_num_workers: 0,
+        merge_lora_on_save: document.getElementById("merge_lora_on_save")
+          ? document.getElementById("merge_lora_on_save").checked
+          : true,
+
+        max_grad_norm: 1.0,
+        weight_decay: 0.01,
+
+        use_ngrams: document.getElementById("use_ngrams").checked,
+        ngram_max: parseInt(document.getElementById("ngram_max").value || "12"),
+        ngram_top_k: parseInt(document.getElementById("ngram_top_k").value || "1500"),
+        ngram_min_chars: parseInt(document.getElementById("ngram_min_chars").value || "16"),
+        ngram_min_words: parseInt(document.getElementById("ngram_min_words").value || "2"),
+        ngram_max_samples: parseInt(document.getElementById("ngram_max_samples").value || "4000"),
+        ngram_budgeted: document.getElementById("ngram_budgeted").checked,
+        ngram_target_fit: parseFloat(document.getElementById("ngram_target_fit").value || "0.98"),
+        ngram_eval_samples: parseInt(document.getElementById("ngram_eval_samples").value || "512"),
+        ngram_add_batch: parseInt(document.getElementById("ngram_add_batch").value || "64"),
+        ngram_min_count: 2,
+        ngram_max_token_chars: 384,
+        ngram_max_tokens_per_text: 4096,
+
+        ngram_conflict_overlap_ratio: parseFloat(document.getElementById("ngram_conflict_overlap_ratio").value || "0.8"),
+        ngram_prefer_longest_match: document.getElementById("ngram_prefer_longest_match").checked,
+        ngram_use_code_lines: document.getElementById("ngram_use_code_lines").checked,
+        ngram_code_line_min_chars: parseInt(document.getElementById("ngram_code_line_min_chars").value || "12"),
+        ngram_code_line_min_count: parseInt(document.getElementById("ngram_code_line_min_count").value || "2"),
+        ngram_code_line_top_k: parseInt(document.getElementById("ngram_code_line_top_k").value || "400"),
+        ngram_code_line_score_boost: parseFloat(document.getElementById("ngram_code_line_score_boost").value || "1.35"),
+        ngram_code_pattern_boost: document.getElementById("ngram_code_pattern_boost").checked,
+        ngram_code_pattern_extra_boost: parseFloat(document.getElementById("ngram_code_pattern_extra_boost").value || "1.2"),
+
+        ngram_focus_oversize_samples: document.getElementById("ngram_focus_oversize_samples").checked,
+        ngram_oversize_sample_boost: parseFloat(document.getElementById("ngram_oversize_sample_boost").value || "4.0"),
+        ngram_near_limit_threshold: parseFloat(document.getElementById("ngram_near_limit_threshold").value || "0.90"),
+        ngram_near_limit_boost: parseFloat(document.getElementById("ngram_near_limit_boost").value || "1.5"),
+        ngram_eval_max_seq_length: parseInt(document.getElementById("ngram_eval_max_seq_length").value || document.getElementById("max_seq_length").value || "1024"),
+        ngram_track_saved_samples: document.getElementById("ngram_track_saved_samples").checked,
+        ngram_saved_sample_boost: parseFloat(document.getElementById("ngram_saved_sample_boost").value || "8.0")
+      };
+
+      showOverlay();
+      try {
+        const resp = await fetch("/start", {
+          method: "POST",
+          headers: {"Content-Type":"application/json"},
+          body: JSON.stringify(payload)
+        });
+
+        const raw = await resp.text();
+        let json;
+        try { json = JSON.parse(raw); }
+        catch { json = { error: "Server-Antwort war kein JSON", raw: raw.slice(0, 400) }; }
+
+        if (!resp.ok || json.running === false) {
+          alert("Fehler beim Starten des Trainings: " + (json.error || json.msg || ("HTTP " + resp.status)));
+          hideOverlay();
+        } else if (json.msg) {
+          alert(json.msg);
+        }
+      } catch (err) {
+        alert("Fehler beim Start-Request: " + (err?.message || err));
+        hideOverlay();
+      }
+    };
+
+    document.getElementById("stopBtn").onclick = async function() {
+      try { await fetch("/stop", {method: "POST"}); }
+      catch {}
+    };
+
+    // ---------- Download examples ----------
+    window.downloadExample = function(mode) {
+      let csvContent = "";
+      if (mode === "plain") {
+        csvContent = `text
+Das ist ein Beispielsatz für Pretraining.
+Hier folgt eine weitere Trainingszeile.
+`;
+      } else {
+        csvContent = `id,parent_id,system,Benutzer,Kontext,Assistentin
+1,,Du bist ein freundlicher Chatbot.,Hallo!,,"Hallo! Wie kann ich dir helfen?"
+2,1,,Wie spät ist es?,,"Ich habe keinen Zugriff auf deine Uhr, aber du kannst oben rechts schauen."
+3,,Du bist Übersetzer.,Übersetze: "Guten Morgen",,Auf Englisch: "Good morning".
+`;
+      }
+      const blob = new Blob([csvContent], { type: "text/csv;charset=utf-8;" });
+      const link = document.createElement("a");
+      link.href = URL.createObjectURL(blob);
+      link.setAttribute("download", mode === "plain" ? "text_beispiel.csv" : "row_sft_dialog_beispiel.csv");
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+    };
+
+    // ---------- Chat ----------
+    let chatMessages = [];
+    function renderChat() {
+      const box = document.getElementById('chat_history');
+      box.innerHTML = chatMessages.map(m => {
+        const who = m.role === 'user' ? 'Du' : 'Assistentin';
+        return `<div class="chat-msg"><span class="who">${who}:</span> ${escapeHtmlWithBreaks(m.content)}</div>`;
+      }).join('');
+      box.scrollTop = box.scrollHeight;
+    }
+
+    async function loadChatModel() {
+      const model = document.getElementById('chat_model_select').value || null;
+      const device = document.getElementById('chat_device').value;
+      const resp = await fetch('/load_inference', {
+        method:'POST',
+        headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({ model_dir: model, device })
+      });
+      const j = await resp.json();
+      alert(j.msg || j.error || 'geladen');
+    }
+
+    async function sendChat() {
+      const inp = document.getElementById('chat_input');
+      const sys = document.getElementById('chat_system').value.trim();
+      const max_new = parseInt(document.getElementById('chat_max_new').value || '256');
+      const temp = parseFloat(document.getElementById('chat_temp').value || '0.7');
+      const top_p = parseFloat(document.getElementById('chat_topp').value || '0.9');
+
+      const model = document.getElementById('chat_model_select').value || null;
+      const device = document.getElementById('chat_device').value;
+
+      const text = inp.value.trim();
+      if (!text) return;
+
+      chatMessages.push({ role: 'user', content: text });
+      renderChat();
+      inp.value = '';
+
+      const req = {
+        model_dir: model,
+        device: device,
+        system: sys || null,
+        messages: chatMessages,
+        max_new_tokens: max_new,
+        temperature: temp,
+        top_p: top_p,
+        top_k: 50,
+        repetition_penalty: 1.05,
+        do_sample: true
+      };
+
+      const assistantMsg = { role: 'assistant', content: '' };
+      chatMessages.push(assistantMsg);
+      renderChat();
+
+      try {
+        const resp = await fetch('/chat_stream', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(req)
+        });
+
+        if (!resp.ok || !resp.body) throw new Error('Streaming nicht verfügbar');
+
+        const reader = resp.body.getReader();
+        const decoder = new TextDecoder('utf-8');
+
+        while (true) {
+          const { value, done } = await reader.read();
+          if (done) break;
+          assistantMsg.content += decoder.decode(value, { stream: true });
+          renderChat();
+        }
+      } catch (err) {
+        try {
+          const r = await fetch('/chat', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(req)
+          });
+
+          const rawText = await r.text();
+          let j;
+
+          try { j = JSON.parse(rawText); }
+          catch {
+            assistantMsg.content = '(Fehler: Chat-Antwort war kein gültiges JSON:\\n' + rawText.slice(0, 400) + ')';
+            renderChat();
+            return;
+          }
+
+          if (!r.ok) { assistantMsg.content = '(Fehler: ' + (j.error || ('HTTP ' + r.status)) + ')'; renderChat(); return; }
+          if (j.error) { assistantMsg.content = '(Fehler: ' + j.error + ')'; renderChat(); return; }
+
+          assistantMsg.content = j.response || '';
+          renderChat();
+        } catch (e2) {
+          assistantMsg.content = '(Fehler: ' + (e2.message || 'Unbekannt') + ')';
+          renderChat();
+        }
+      }
+    }
+
+    document.getElementById('chat_send_btn').addEventListener('click', sendChat);
+    document.getElementById('chat_input').addEventListener('keydown', (e)=>{ if(e.key==='Enter'){ e.preventDefault(); sendChat(); }});
+    document.getElementById('chat_load_btn').addEventListener('click', loadChatModel);
+
+    window.addEventListener('DOMContentLoaded', async () => {
+      const sel = document.getElementById('chat_model_select');
+      try{
+        const res = await fetch('/available_models');
+        const runs = await res.json();
+        runs.reverse().forEach(folder => {
+          const opt = document.createElement('option');
+          opt.value = "./training_outputs/" + folder;
+          opt.textContent = folder;
+          sel.appendChild(opt);
+        });
+      } catch {}
+    });
+
+    async function unloadChatModel() {
+      const btn = document.getElementById('chat_unload_btn');
+      const sendBtn = document.getElementById('chat_send_btn');
+      try {
+        btn.disabled = true;
+        sendBtn.disabled = true;
+        const resp = await fetch('/unload_inference', { method: 'POST' });
+        const j = await resp.json();
+        chatMessages = [];
+        renderChat();
+        alert(j.msg || j.error || 'Inferenz-Modell entladen.');
+      } catch (e) {
+        alert('Entladen fehlgeschlagen: ' + (e?.message || e));
+      } finally {
+        btn.disabled = false;
+        sendBtn.disabled = false;
+      }
+    }
+    document.getElementById('chat_unload_btn').addEventListener('click', unloadChatModel);
+  </script>
 </body>
 </html>
