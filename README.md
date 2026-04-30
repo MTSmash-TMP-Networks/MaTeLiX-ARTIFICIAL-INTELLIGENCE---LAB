@@ -12,6 +12,19 @@ Local **LLM training and inference lab** with **FastAPI**, **Web UI**, **DDP / M
 
 > Built for local fine-tuning, chat datasets, text datasets and controlled inference workflows.
 
+
+
+## Aktuelle Version
+
+**Stand: Version 6.8**
+
+Enthalten sind unter anderem:
+
+- token-budget-gesteuertes Whole-Turn-Packing
+- DDP / Multi-GPU-Training
+- LoRA-Training mit optionalem Merge
+- OpenAI-kompatible `/v1/*` API und Web-UI
+
 ---
 
 ## Table of Contents
