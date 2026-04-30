@@ -26,10 +26,6 @@ MaTeLiX AI is a trademark/brand of TMP-SYSTEM-SERVICE GmbH.
     :root{
       --bg0:#070b14;
       --bg1:#0b1222;
-      --card:#0f1a31cc;
-      --card2:#0f1a31;
-      --stroke:#1d3a66;
-      --stroke2:#2b5aa0;
 
       --text:#dbeaff;
       --muted:#9fc0ef;
@@ -56,6 +52,8 @@ MaTeLiX AI is a trademark/brand of TMP-SYSTEM-SERVICE GmbH.
       min-height: 100%;
       background: linear-gradient(180deg, var(--bg0), var(--bg1)); /* fallback */
     }
+
+    /* Sticky footer base */
     body{
       min-height: 100vh;
       margin:0;
@@ -63,7 +61,9 @@ MaTeLiX AI is a trademark/brand of TMP-SYSTEM-SERVICE GmbH.
       font-family:var(--sans);
       overflow-x:hidden;
 
-      /* Use fixed layers so it never "ends" with content height */
+      display:flex;
+      flex-direction:column;
+
       background:
         radial-gradient(1200px 700px at 15% 10%, rgba(77,184,255,.25), transparent 60%),
         radial-gradient(900px 600px at 85% 20%, rgba(67,240,181,.14), transparent 55%),
@@ -91,15 +91,15 @@ MaTeLiX AI is a trademark/brand of TMP-SYSTEM-SERVICE GmbH.
       will-change: transform;
     }
 
+    /* App must grow to push footer down */
     .app{
       position:relative;
       z-index:1;
+      width:100%;
       max-width: 1400px;
-      min-height: 100vh;
       margin: 0 auto;
-      padding: 18px 16px 20px;
-      display:flex;
-      flex-direction:column;
+      padding: 18px 16px 18px;
+      flex: 1 0 auto; /* key for sticky footer */
     }
 
     /* Topbar */
@@ -190,7 +190,7 @@ MaTeLiX AI is a trademark/brand of TMP-SYSTEM-SERVICE GmbH.
       border-radius: 14px;
       cursor:pointer;
       box-shadow: 0 14px 26px rgba(77,184,255,.14);
-      transition: transform .12s ease, filter .12s ease, box-shadow .12s ease;
+      transition: transform .12s ease, filter .12s ease, box-shadow .12s ease, opacity .12s ease;
       font-family: var(--mono);
       letter-spacing:.01em;
       white-space:nowrap;
@@ -215,6 +215,13 @@ MaTeLiX AI is a trademark/brand of TMP-SYSTEM-SERVICE GmbH.
       border-radius: 12px;
       font-size: 12.5px;
       font-weight: 800;
+    }
+    .btn:disabled{
+      opacity:.45;
+      cursor:not-allowed;
+      transform:none;
+      filter:none;
+      box-shadow:none;
     }
 
     /* Layout */
@@ -341,6 +348,33 @@ MaTeLiX AI is a trademark/brand of TMP-SYSTEM-SERVICE GmbH.
     }
     @media (max-width: 720px){
       .form-grid{ grid-template-columns: 1fr; }
+    }
+
+    /* Training lock box (only STOP visible) */
+    .train-lock{
+      border-radius: 18px;
+      border:1px solid rgba(255,255,255,.10);
+      background: rgba(6,10,20,.40);
+      padding: 14px;
+    }
+    .train-lock .title{
+      font-family: var(--mono);
+      font-weight: 900;
+      color: var(--brand2);
+      text-transform: uppercase;
+      letter-spacing:.02em;
+      margin: 0 0 6px 0;
+      font-size: 13.5px;
+    }
+    .train-lock .desc{
+      margin:0 0 12px 0;
+      color: var(--muted);
+      font-size: 13px;
+      line-height: 1.45;
+    }
+    .train-lock .actions{
+      display:flex;
+      justify-content:flex-end;
     }
 
     /* Status list */
@@ -476,15 +510,18 @@ MaTeLiX AI is a trademark/brand of TMP-SYSTEM-SERVICE GmbH.
       font-weight: 900;
     }
 
-    /* Footer */
+    /* Footer always at bottom */
     footer{
-      margin-top: auto;
-      padding: 14px 4px 0;
+      flex: 0 0 auto;
+      width:100%;
+      text-align:center;
+      padding: 14px 10px 18px;
       color: var(--muted);
       font-family: var(--mono);
       font-size: 12px;
       opacity:.9;
-      text-align:center;
+      position: relative;
+      z-index: 1;
     }
 
     /* Loader overlay */
@@ -599,6 +636,20 @@ MaTeLiX AI is a trademark/brand of TMP-SYSTEM-SERVICE GmbH.
         <div class="bd">
           <!-- Setup Pane -->
           <div id="pane-setup" class="pane active">
+
+            <!-- NEW: Lock box shown only while running -->
+            <div id="trainLockBox" class="train-lock" style="display:none;">
+              <p class="title">Training läuft – Konsole gesperrt</p>
+              <p class="desc">
+                Während das Training läuft, ist die Konfiguration eingeklappt, damit kein weiterer Start ausgelöst wird.
+                Du kannst das Training jederzeit stoppen.
+              </p>
+              <div class="actions">
+                <button class="btn danger" type="button" id="stopBtnLocked">Training stoppen</button>
+              </div>
+            </div>
+
+            <!-- Form shown only while NOT running -->
             <form id="settings" autocomplete="off" class="form-grid">
               <label for="model_dir_select">Base Modell</label>
               <select id="model_dir_select">
@@ -758,84 +809,6 @@ MaTeLiX AI is a trademark/brand of TMP-SYSTEM-SERVICE GmbH.
               <label for="rebuild_dataset_cache">Cache neu aufbauen</label>
               <input type="checkbox" id="rebuild_dataset_cache" checked>
 
-              <label for="use_ngrams">N-Gramm-Optimierung (Beta)</label>
-              <input type="checkbox" id="use_ngrams" title="Aktiviert N-Gramm-Tokenisierung für bessere Kompression">
-
-              <label for="ngram_max" class="ngram_row" style="display:none;">Max N-Gramm-Länge</label>
-              <input type="number" id="ngram_max" class="ngram_row" style="display:none;" value="12" min="2" max="64">
-
-              <label for="ngram_top_k" class="ngram_row" style="display:none;">Top-K N-Grams</label>
-              <input type="number" id="ngram_top_k" class="ngram_row" style="display:none;" value="1500" min="10">
-
-              <label for="ngram_min_chars" class="ngram_row" style="display:none;">Min. Zeichen</label>
-              <input type="number" id="ngram_min_chars" class="ngram_row" style="display:none;" value="16" min="1">
-
-              <label for="ngram_min_words" class="ngram_row" style="display:none;">Min. Wörter</label>
-              <input type="number" id="ngram_min_words" class="ngram_row" style="display:none;" value="2" min="0">
-
-              <label for="ngram_max_samples" class="ngram_row" style="display:none;">Max Samples</label>
-              <input type="number" id="ngram_max_samples" class="ngram_row" style="display:none;" value="4000" min="100">
-
-              <label for="ngram_budgeted" class="ngram_row" style="display:none;">Budget-gesteuert</label>
-              <input type="checkbox" id="ngram_budgeted" class="ngram_row" style="display:none;" checked>
-
-              <label for="ngram_target_fit" class="ngram_row" style="display:none;">Ziel-Fit</label>
-              <input type="number" step="0.01" id="ngram_target_fit" class="ngram_row" style="display:none;" value="0.98" min="0.8" max="1.0">
-
-              <label for="ngram_eval_samples" class="ngram_row" style="display:none;">Eval Samples</label>
-              <input type="number" id="ngram_eval_samples" class="ngram_row" style="display:none;" value="512" min="32">
-
-              <label for="ngram_add_batch" class="ngram_row" style="display:none;">Add Batch</label>
-              <input type="number" id="ngram_add_batch" class="ngram_row" style="display:none;" value="64" min="1">
-
-              <label for="ngram_conflict_overlap_ratio" class="ngram_row" style="display:none;">Conflict Overlap Ratio</label>
-              <input type="number" step="0.01" id="ngram_conflict_overlap_ratio" class="ngram_row" style="display:none;" value="0.8" min="0" max="1">
-
-              <label for="ngram_prefer_longest_match" class="ngram_row" style="display:none;">Prefer Longest Match</label>
-              <input type="checkbox" id="ngram_prefer_longest_match" class="ngram_row" style="display:none;" checked>
-
-              <label for="ngram_use_code_lines" class="ngram_row" style="display:none;">Code-Zeilen nutzen</label>
-              <input type="checkbox" id="ngram_use_code_lines" class="ngram_row" style="display:none;" checked>
-
-              <label for="ngram_code_line_min_chars" class="ngram_row" style="display:none;">Code-Zeile Min. Zeichen</label>
-              <input type="number" id="ngram_code_line_min_chars" class="ngram_row" style="display:none;" value="12" min="1">
-
-              <label for="ngram_code_line_min_count" class="ngram_row" style="display:none;">Code-Zeile Min. Count</label>
-              <input type="number" id="ngram_code_line_min_count" class="ngram_row" style="display:none;" value="2" min="1">
-
-              <label for="ngram_code_line_top_k" class="ngram_row" style="display:none;">Code-Zeile Top-K</label>
-              <input type="number" id="ngram_code_line_top_k" class="ngram_row" style="display:none;" value="400" min="1">
-
-              <label for="ngram_code_line_score_boost" class="ngram_row" style="display:none;">Code-Zeile Score Boost</label>
-              <input type="number" step="0.01" id="ngram_code_line_score_boost" class="ngram_row" style="display:none;" value="1.35" min="0">
-
-              <label for="ngram_code_pattern_boost" class="ngram_row" style="display:none;">Code-Pattern Boost</label>
-              <input type="checkbox" id="ngram_code_pattern_boost" class="ngram_row" style="display:none;" checked>
-
-              <label for="ngram_code_pattern_extra_boost" class="ngram_row" style="display:none;">Code-Pattern Extra Boost</label>
-              <input type="number" step="0.01" id="ngram_code_pattern_extra_boost" class="ngram_row" style="display:none;" value="1.2" min="0">
-
-              <label for="ngram_focus_oversize_samples" class="ngram_row" style="display:none;">Oversize-Samples priorisieren</label>
-              <input type="checkbox" id="ngram_focus_oversize_samples" class="ngram_row" style="display:none;" checked>
-
-              <label for="ngram_oversize_sample_boost" class="ngram_row" style="display:none;">Oversize Sample Boost</label>
-              <input type="number" step="0.1" id="ngram_oversize_sample_boost" class="ngram_row" style="display:none;" value="4.0" min="0">
-
-              <label for="ngram_near_limit_threshold" class="ngram_row" style="display:none;">Near-Limit Threshold</label>
-              <input type="number" step="0.01" id="ngram_near_limit_threshold" class="ngram_row" style="display:none;" value="0.90" min="0" max="1">
-
-              <label for="ngram_near_limit_boost" class="ngram_row" style="display:none;">Near-Limit Boost</label>
-              <input type="number" step="0.1" id="ngram_near_limit_boost" class="ngram_row" style="display:none;" value="1.5" min="0">
-
-              <label for="ngram_eval_max_seq_length" class="ngram_row" style="display:none;">Eval Max Seq Length</label>
-              <input type="number" id="ngram_eval_max_seq_length" class="ngram_row" style="display:none;" value="1024" min="1">
-
-              <label for="ngram_track_saved_samples" class="ngram_row" style="display:none;">Saved Samples tracken</label>
-              <input type="checkbox" id="ngram_track_saved_samples" class="ngram_row" style="display:none;" checked>
-
-              <label for="ngram_saved_sample_boost" class="ngram_row" style="display:none;">Saved Sample Boost</label>
-              <input type="number" step="0.1" id="ngram_saved_sample_boost" class="ngram_row" style="display:none;" value="8.0" min="0">
-
               <label for="gradient_checkpointing">Grad Checkpointing</label>
               <input type="checkbox" id="gradient_checkpointing" checked>
 
@@ -849,7 +822,7 @@ MaTeLiX AI is a trademark/brand of TMP-SYSTEM-SERVICE GmbH.
               <input type="number" id="cuda_empty_cache_interval_steps" value="50" min="0">
 
               <div class="row-actions">
-                <button class="btn" type="submit">Training starten</button>
+                <button class="btn" type="submit" id="startBtn">Training starten</button>
                 <button class="btn danger" type="button" id="stopBtn">Training stoppen</button>
               </div>
             </form>
@@ -1028,13 +1001,13 @@ Hier folgt eine weitere Trainingszeile.</pre>
 
           </div>
         </div>
-
-        <footer>
-          © 2026 TMP-SYSTEM-SERVICE GmbH – Alle Rechte vorbehalten. Version 6.8
-        </footer>
       </div>
     </div>
   </div>
+
+  <footer>
+    © 2026 TMP-SYSTEM-SERVICE GmbH – Alle Rechte vorbehalten. Version 7.0
+  </footer>
 
   <!-- Loader Overlay -->
   <div id="dashboard-overlay" class="overlay" role="dialog" aria-modal="true" aria-label="Training läuft">
@@ -1093,7 +1066,7 @@ Hier folgt eine weitere Trainingszeile.</pre>
       document.querySelectorAll('.tab').forEach(t=>{
         t.addEventListener('click', ()=>{
           const target = t.getAttribute('data-tab');
-          const container = t.parentElement; // tabs row
+          const container = t.parentElement;
           container.querySelectorAll('.tab').forEach(x=>x.classList.remove('active'));
           t.classList.add('active');
 
@@ -1123,6 +1096,28 @@ Hier folgt eine weitere Trainingszeile.</pre>
       loadTrainings();
       fillModelDropdown();
       fillDatasetDropdown();
+    });
+
+    // ---------- Training lock UI ----------
+    function setTrainingLock(running){
+      const form = document.getElementById('settings');
+      const lock = document.getElementById('trainLockBox');
+      const startBtn = document.getElementById('startBtn');
+
+      if (running){
+        if (form) form.style.display = "none";
+        if (lock) lock.style.display = "";
+        if (startBtn) startBtn.disabled = true;
+      } else {
+        if (form) form.style.display = "";
+        if (lock) lock.style.display = "none";
+        if (startBtn) startBtn.disabled = false;
+        hideOverlay(); // wenn Training beendet ist, Overlay sicher schließen
+      }
+    }
+
+    document.getElementById('stopBtnLocked').addEventListener('click', async ()=>{
+      try { await fetch("/stop", {method:"POST"}); } catch {}
     });
 
     // ---------- System status (KPIs) ----------
@@ -1327,14 +1322,6 @@ Hier folgt eine weitere Trainingszeile.</pre>
     document.getElementById("train_from_scratch").addEventListener("change", applyTrainModeUI);
     window.addEventListener('DOMContentLoaded', applyTrainModeUI);
 
-    document.getElementById("use_ngrams").addEventListener("change", function() {
-      const show = this.checked;
-      document.querySelectorAll('.ngram_row').forEach(e => e.style.display = show ? "" : "none");
-    });
-    window.addEventListener('DOMContentLoaded', function() {
-      document.querySelectorAll('.ngram_row').forEach(e => e.style.display = "none");
-    });
-
     function applyTemplateModeUI() {
       const mode = document.getElementById("template_mode").value;
       const isHf = document.getElementById("dataset_source").value === "huggingface";
@@ -1346,7 +1333,6 @@ Hier folgt eine weitere Trainingszeile.</pre>
 
     // Dataset source UI
     let lastLocalTemplateMode = document.getElementById('template_mode').value;
-
     function applyDatasetSourceUI() {
       const src = document.getElementById('dataset_source').value;
       const isHf = src === 'huggingface';
@@ -1378,7 +1364,6 @@ Hier folgt eine weitere Trainingszeile.</pre>
     const modelDirSelect = document.getElementById('model_dir_select');
     const modelDirInput = document.getElementById('model_dir');
     const modelDirLabel = document.getElementById('model_dir_label');
-
     modelDirSelect.addEventListener('change', function() {
       if (this.value === 'custom') {
         modelDirInput.style.display = '';
@@ -1393,111 +1378,6 @@ Hier folgt eine weitere Trainingszeile.</pre>
         modelDirInput.value = '';
       }
     });
-
-    // ---------- Status polling ----------
-    async function getStatus(){
-      try{
-        const s = await (await fetch('/status')).json();
-
-        const running = !!s.running;
-        document.getElementById("status").textContent = running ? "läuft" : "gestoppt";
-
-        const dot = document.getElementById('runDot');
-        const lbl = document.getElementById('runLabel');
-        dot.classList.remove('good','bad');
-        if (running) { dot.classList.add('good'); lbl.textContent = "Status: läuft"; }
-        else { dot.classList.add('bad'); lbl.textContent = "Status: gestoppt"; }
-
-        document.getElementById('trainKpi').textContent = running ? "RUN" : "IDLE";
-        document.getElementById('lossKpi').textContent = (typeof s.loss==="number" && Number.isFinite(s.loss)) ? s.loss.toFixed(6) : "-";
-        document.getElementById('lrKpi').textContent = (typeof s.learning_rate==="number") ? s.learning_rate : "-";
-
-        const totalSteps = (typeof s.scheduler_total_steps === "number" && s.scheduler_total_steps > 0)
-          ? s.scheduler_total_steps
-          : ((typeof s.total_steps === "number" && s.total_steps > 0) ? s.total_steps : null);
-
-        const currentStep = (typeof s.step === "number" && s.step >= 0) ? s.step : null;
-
-        document.getElementById("step").textContent = currentStep !== null ? currentStep : "-";
-        document.getElementById("loss").textContent = (typeof s.loss==="number" && Number.isFinite(s.loss)) ? s.loss.toFixed(6) : "-";
-        document.getElementById("learning_rate_display").textContent = (typeof s.learning_rate==="number") ? s.learning_rate : "-";
-        document.getElementById("eta").textContent = s.eta || "-";
-        document.getElementById("tokens_per_step").textContent = s.tokens_per_step || "-";
-        document.getElementById("total_tokens").textContent = s.total_tokens || "-";
-
-        document.getElementById("scheduler_total_steps").textContent = fmtValue(totalSteps);
-        document.getElementById("csv_total_samples_est").textContent = fmtValue(s.csv_total_samples_est);
-        document.getElementById("total_samples_real").textContent = fmtValue(s.total_samples_real);
-        document.getElementById("skipped_samples").textContent = fmtValue(s.skipped_samples);
-
-        if (currentStep !== null && totalSteps !== null) {
-          const pct = Math.max(0, Math.min(100, (currentStep / totalSteps) * 100));
-          document.getElementById("step_progress").textContent = `${currentStep} / ${totalSteps} (${pct.toFixed(1)}%)`;
-          const bar = document.getElementById("step_progress_bar");
-          if (bar) bar.style.width = pct.toFixed(2) + "%";
-        } else {
-          document.getElementById("step_progress").textContent = "-";
-          const bar = document.getElementById("step_progress_bar");
-          if (bar) bar.style.width = "0%";
-        }
-
-        const cfg = s.config || {};
-        const epochsConfigured = numberOrNull(cfg.num_train_epochs);
-        const batchSize = Math.max(1, numberOrNull(cfg.per_device_train_batch_size) || 1);
-        const gradAccum = Math.max(1, numberOrNull(cfg.gradient_accumulation_steps) || 1);
-        const worldSize = Math.max(1, numberOrNull(s.world_size) || 1);
-
-        const realSamples = numberOrNull(s.total_samples_real);
-        const estSamples = numberOrNull(s.csv_total_samples_est);
-        const effectiveSamples = realSamples !== null && realSamples > 0 ? realSamples : estSamples;
-
-        let updatesPerEpoch = null;
-        if (effectiveSamples !== null && effectiveSamples > 0) {
-          const localSamples = Math.ceil(effectiveSamples / worldSize);
-          const batchesPerEpoch = Math.ceil(localSamples / batchSize);
-          updatesPerEpoch = Math.max(1, Math.ceil(batchesPerEpoch / gradAccum));
-        }
-
-        document.getElementById("updates_per_epoch").textContent = (updatesPerEpoch !== null) ? String(updatesPerEpoch) : "-";
-
-        if (currentStep !== null && updatesPerEpoch !== null && epochsConfigured !== null) {
-          const epochFloat = (currentStep / Math.max(1, updatesPerEpoch));
-          const epochDisplay = Math.min(epochsConfigured, epochFloat);
-          document.getElementById("epoch_progress").textContent = `${epochDisplay.toFixed(2)} / ${epochsConfigured}`;
-        } else {
-          document.getElementById("epoch_progress").textContent = "-";
-        }
-
-        const producerProgress = s.producer_progress || {};
-        const producerMeta = s.producer_meta || {};
-
-        document.getElementById("scheduler_mode").textContent = fmtValue(s.scheduler_mode);
-        document.getElementById("scheduler_source").textContent = fmtValue(s.scheduler_source);
-        document.getElementById("adaptive_scheduler_status").textContent = fmtBool(s.adaptive_scheduler);
-        document.getElementById("adaptive_scheduler_frozen").textContent = fmtBool(s.adaptive_scheduler_frozen);
-        document.getElementById("adaptive_scheduler_never_increase_lr").textContent = fmtBool(s.adaptive_scheduler_never_increase_lr);
-        document.getElementById("adaptive_scheduler_only_extend_steps").textContent = fmtBool(s.adaptive_scheduler_only_extend_steps);
-
-        document.getElementById("projected_samples").textContent = fmtValue(s.projected_samples);
-        document.getElementById("producer_seen_samples").textContent = fmtValue(producerProgress.seen_samples);
-        document.getElementById("producer_tokenized_samples").textContent = fmtValue(producerProgress.tokenized_samples);
-        document.getElementById("producer_num_shards").textContent = fmtValue(
-          producerMeta.num_shards ?? producerProgress.num_shards_written
-        );
-        document.getElementById("producer_done").textContent = fmtBool(
-          s.producer_done ?? producerMeta.done ?? producerProgress.done
-        );
-        document.getElementById("scheduler_rel_change").textContent = fmtNum(s.scheduler_rel_change, 4);
-
-        const cudaMem = s.cuda_memory || {};
-        document.getElementById("cuda_allocated_mb").textContent = fmtMb(cudaMem.allocated_mb);
-        document.getElementById("cuda_reserved_mb").textContent = fmtMb(cudaMem.reserved_mb);
-        document.getElementById("cuda_max_allocated_mb").textContent = fmtMb(cudaMem.max_allocated_mb);
-        document.getElementById("cuda_max_reserved_mb").textContent = fmtMb(cudaMem.max_reserved_mb);
-
-      } catch {}
-    }
-    getStatus(); setInterval(getStatus,1500);
 
     // ---------- Trainings history ----------
     async function loadTrainings() {
@@ -1608,6 +1488,16 @@ Hier folgt eine weitere Trainingszeile.</pre>
     document.getElementById("settings").onsubmit = async e => {
       e.preventDefault();
 
+      // extra guard: do not start if already running
+      try{
+        const st = await (await fetch('/status')).json();
+        if (st && st.running){
+          alert("Training läuft bereits. Bitte zuerst stoppen.");
+          setTrainingLock(true);
+          return;
+        }
+      } catch {}
+
       const scratchEnabled = document.getElementById("train_from_scratch").checked;
       const selectedTrainMode = document.getElementById("train_mode").value;
       if (scratchEnabled && selectedTrainMode === "lora") {
@@ -1705,39 +1595,7 @@ Hier folgt eine weitere Trainingszeile.</pre>
           : true,
 
         max_grad_norm: 1.0,
-        weight_decay: 0.01,
-
-        use_ngrams: document.getElementById("use_ngrams").checked,
-        ngram_max: parseInt(document.getElementById("ngram_max").value || "12"),
-        ngram_top_k: parseInt(document.getElementById("ngram_top_k").value || "1500"),
-        ngram_min_chars: parseInt(document.getElementById("ngram_min_chars").value || "16"),
-        ngram_min_words: parseInt(document.getElementById("ngram_min_words").value || "2"),
-        ngram_max_samples: parseInt(document.getElementById("ngram_max_samples").value || "4000"),
-        ngram_budgeted: document.getElementById("ngram_budgeted").checked,
-        ngram_target_fit: parseFloat(document.getElementById("ngram_target_fit").value || "0.98"),
-        ngram_eval_samples: parseInt(document.getElementById("ngram_eval_samples").value || "512"),
-        ngram_add_batch: parseInt(document.getElementById("ngram_add_batch").value || "64"),
-        ngram_min_count: 2,
-        ngram_max_token_chars: 384,
-        ngram_max_tokens_per_text: 4096,
-
-        ngram_conflict_overlap_ratio: parseFloat(document.getElementById("ngram_conflict_overlap_ratio").value || "0.8"),
-        ngram_prefer_longest_match: document.getElementById("ngram_prefer_longest_match").checked,
-        ngram_use_code_lines: document.getElementById("ngram_use_code_lines").checked,
-        ngram_code_line_min_chars: parseInt(document.getElementById("ngram_code_line_min_chars").value || "12"),
-        ngram_code_line_min_count: parseInt(document.getElementById("ngram_code_line_min_count").value || "2"),
-        ngram_code_line_top_k: parseInt(document.getElementById("ngram_code_line_top_k").value || "400"),
-        ngram_code_line_score_boost: parseFloat(document.getElementById("ngram_code_line_score_boost").value || "1.35"),
-        ngram_code_pattern_boost: document.getElementById("ngram_code_pattern_boost").checked,
-        ngram_code_pattern_extra_boost: parseFloat(document.getElementById("ngram_code_pattern_extra_boost").value || "1.2"),
-
-        ngram_focus_oversize_samples: document.getElementById("ngram_focus_oversize_samples").checked,
-        ngram_oversize_sample_boost: parseFloat(document.getElementById("ngram_oversize_sample_boost").value || "4.0"),
-        ngram_near_limit_threshold: parseFloat(document.getElementById("ngram_near_limit_threshold").value || "0.90"),
-        ngram_near_limit_boost: parseFloat(document.getElementById("ngram_near_limit_boost").value || "1.5"),
-        ngram_eval_max_seq_length: parseInt(document.getElementById("ngram_eval_max_seq_length").value || document.getElementById("max_seq_length").value || "1024"),
-        ngram_track_saved_samples: document.getElementById("ngram_track_saved_samples").checked,
-        ngram_saved_sample_boost: parseFloat(document.getElementById("ngram_saved_sample_boost").value || "8.0")
+        weight_decay: 0.01
       };
 
       showOverlay();
@@ -1756,8 +1614,10 @@ Hier folgt eine weitere Trainingszeile.</pre>
         if (!resp.ok || json.running === false) {
           alert("Fehler beim Starten des Trainings: " + (json.error || json.msg || ("HTTP " + resp.status)));
           hideOverlay();
-        } else if (json.msg) {
-          alert(json.msg);
+        } else {
+          // lock UI immediately after successful start
+          setTrainingLock(true);
+          if (json.msg) alert(json.msg);
         }
       } catch (err) {
         alert("Fehler beim Start-Request: " + (err?.message || err));
@@ -1936,6 +1796,114 @@ Hier folgt eine weitere Trainingszeile.
       }
     }
     document.getElementById('chat_unload_btn').addEventListener('click', unloadChatModel);
+
+    // ---------- Status polling (also drives lock mode) ----------
+    async function getStatus(){
+      try{
+        const s = await (await fetch('/status')).json();
+
+        const running = !!s.running;
+        document.getElementById("status").textContent = running ? "läuft" : "gestoppt";
+
+        const dot = document.getElementById('runDot');
+        const lbl = document.getElementById('runLabel');
+        dot.classList.remove('good','bad');
+        if (running) { dot.classList.add('good'); lbl.textContent = "Status: läuft"; }
+        else { dot.classList.add('bad'); lbl.textContent = "Status: gestoppt"; }
+
+        // lock/unlock training console automatically
+        setTrainingLock(running);
+
+        document.getElementById('trainKpi').textContent = running ? "RUN" : "IDLE";
+        document.getElementById('lossKpi').textContent = (typeof s.loss==="number" && Number.isFinite(s.loss)) ? s.loss.toFixed(6) : "-";
+        document.getElementById('lrKpi').textContent = (typeof s.learning_rate==="number") ? s.learning_rate : "-";
+
+        const totalSteps = (typeof s.scheduler_total_steps === "number" && s.scheduler_total_steps > 0)
+          ? s.scheduler_total_steps
+          : ((typeof s.total_steps === "number" && s.total_steps > 0) ? s.total_steps : null);
+
+        const currentStep = (typeof s.step === "number" && s.step >= 0) ? s.step : null;
+
+        document.getElementById("step").textContent = currentStep !== null ? currentStep : "-";
+        document.getElementById("loss").textContent = (typeof s.loss==="number" && Number.isFinite(s.loss)) ? s.loss.toFixed(6) : "-";
+        document.getElementById("learning_rate_display").textContent = (typeof s.learning_rate==="number") ? s.learning_rate : "-";
+        document.getElementById("eta").textContent = s.eta || "-";
+        document.getElementById("tokens_per_step").textContent = s.tokens_per_step || "-";
+        document.getElementById("total_tokens").textContent = s.total_tokens || "-";
+
+        document.getElementById("scheduler_total_steps").textContent = fmtValue(totalSteps);
+        document.getElementById("csv_total_samples_est").textContent = fmtValue(s.csv_total_samples_est);
+        document.getElementById("total_samples_real").textContent = fmtValue(s.total_samples_real);
+        document.getElementById("skipped_samples").textContent = fmtValue(s.skipped_samples);
+
+        if (currentStep !== null && totalSteps !== null) {
+          const pct = Math.max(0, Math.min(100, (currentStep / totalSteps) * 100));
+          document.getElementById("step_progress").textContent = `${currentStep} / ${totalSteps} (${pct.toFixed(1)}%)`;
+          const bar = document.getElementById("step_progress_bar");
+          if (bar) bar.style.width = pct.toFixed(2) + "%";
+        } else {
+          document.getElementById("step_progress").textContent = "-";
+          const bar = document.getElementById("step_progress_bar");
+          if (bar) bar.style.width = "0%";
+        }
+
+        const cfg = s.config || {};
+        const epochsConfigured = numberOrNull(cfg.num_train_epochs);
+        const batchSize = Math.max(1, numberOrNull(cfg.per_device_train_batch_size) || 1);
+        const gradAccum = Math.max(1, numberOrNull(cfg.gradient_accumulation_steps) || 1);
+        const worldSize = Math.max(1, numberOrNull(s.world_size) || 1);
+
+        const realSamples = numberOrNull(s.total_samples_real);
+        const estSamples = numberOrNull(s.csv_total_samples_est);
+        const effectiveSamples = realSamples !== null && realSamples > 0 ? realSamples : estSamples;
+
+        let updatesPerEpoch = null;
+        if (effectiveSamples !== null && effectiveSamples > 0) {
+          const localSamples = Math.ceil(effectiveSamples / worldSize);
+          const batchesPerEpoch = Math.ceil(localSamples / batchSize);
+          updatesPerEpoch = Math.max(1, Math.ceil(batchesPerEpoch / gradAccum));
+        }
+
+        document.getElementById("updates_per_epoch").textContent = (updatesPerEpoch !== null) ? String(updatesPerEpoch) : "-";
+
+        if (currentStep !== null && updatesPerEpoch !== null && epochsConfigured !== null) {
+          const epochFloat = (currentStep / Math.max(1, updatesPerEpoch));
+          const epochDisplay = Math.min(epochsConfigured, epochFloat);
+          document.getElementById("epoch_progress").textContent = `${epochDisplay.toFixed(2)} / ${epochsConfigured}`;
+        } else {
+          document.getElementById("epoch_progress").textContent = "-";
+        }
+
+        const producerProgress = s.producer_progress || {};
+        const producerMeta = s.producer_meta || {};
+
+        document.getElementById("scheduler_mode").textContent = fmtValue(s.scheduler_mode);
+        document.getElementById("scheduler_source").textContent = fmtValue(s.scheduler_source);
+        document.getElementById("adaptive_scheduler_status").textContent = fmtBool(s.adaptive_scheduler);
+        document.getElementById("adaptive_scheduler_frozen").textContent = fmtBool(s.adaptive_scheduler_frozen);
+        document.getElementById("adaptive_scheduler_never_increase_lr").textContent = fmtBool(s.adaptive_scheduler_never_increase_lr);
+        document.getElementById("adaptive_scheduler_only_extend_steps").textContent = fmtBool(s.adaptive_scheduler_only_extend_steps);
+
+        document.getElementById("projected_samples").textContent = fmtValue(s.projected_samples);
+        document.getElementById("producer_seen_samples").textContent = fmtValue(producerProgress.seen_samples);
+        document.getElementById("producer_tokenized_samples").textContent = fmtValue(producerProgress.tokenized_samples);
+        document.getElementById("producer_num_shards").textContent = fmtValue(
+          producerMeta.num_shards ?? producerProgress.num_shards_written
+        );
+        document.getElementById("producer_done").textContent = fmtBool(
+          s.producer_done ?? producerMeta.done ?? producerProgress.done
+        );
+        document.getElementById("scheduler_rel_change").textContent = fmtNum(s.scheduler_rel_change, 4);
+
+        const cudaMem = s.cuda_memory || {};
+        document.getElementById("cuda_allocated_mb").textContent = fmtMb(cudaMem.allocated_mb);
+        document.getElementById("cuda_reserved_mb").textContent = fmtMb(cudaMem.reserved_mb);
+        document.getElementById("cuda_max_allocated_mb").textContent = fmtMb(cudaMem.max_allocated_mb);
+        document.getElementById("cuda_max_reserved_mb").textContent = fmtMb(cudaMem.max_reserved_mb);
+
+      } catch {}
+    }
+    getStatus(); setInterval(getStatus,1500);
   </script>
 </body>
 </html>
