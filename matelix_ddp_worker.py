@@ -1017,6 +1017,13 @@ def shard_producer_process_main(cfg_dict: Dict[str, Any], cache_dir_str: str) ->
             cfg=ngram_cfg,
             outdir=cache_dir,
             rebuild=bool(cfg.rebuild_dataset_cache),
+            progress_cb=lambda stage, current, total: LOGGER.info(
+                "NGRAM Fortschritt [%s]: %s/%s (%.1f%%)",
+                stage,
+                current,
+                total,
+                (100.0 * current / max(1, total)),
+            ),
         )
 
         shard_size = int(cfg.tokenized_shard_size)
@@ -1484,6 +1491,13 @@ def build_model_and_tokenizer(cfg: TrainConfig, ctx: DistContext):
         cfg=ngram_cfg,
         outdir=Path(cfg.output_dir or cfg.save_dir or "./training_outputs/worker_run"),
         rebuild=bool(cfg.rebuild_dataset_cache),
+        progress_cb=lambda stage, current, total: LOGGER.info(
+            "NGRAM Fortschritt [%s]: %s/%s (%.1f%%)",
+            stage,
+            current,
+            total,
+            (100.0 * current / max(1, total)),
+        ),
     )
     LOGGER.info(ngram_summary_text(ngram_state))
 
