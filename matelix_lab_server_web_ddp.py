@@ -504,14 +504,8 @@ def _resolve_hf_dataset_to_csv(cfg: WebTrainConfig) -> str:
             chosen_column = "text"
 
     if chosen_column is None:
-        cols = ", ".join(ds.column_names)
-        raise HTTPException(
-            status_code=400,
-            detail=(
-                f"Spalte '{requested_column}' nicht vorhanden und keine Standard-Spalte erkannt. "
-                f"Verfügbar: {cols}"
-            ),
-        )
+        conversion_mode = "row_with_headers"
+        chosen_column = "text"
 
     key = hashlib.sha256(f"{dataset_id}:{split_name}:{requested_column}:{conversion_mode}:{chosen_column}".encode("utf-8")).hexdigest()[:12]
     safe_name = dataset_id.replace("/", "__").replace(":", "_")
@@ -530,6 +524,20 @@ def _resolve_hf_dataset_to_csv(cfg: WebTrainConfig) -> str:
                     in_val = "" if row.get(input_col) is None else str(row.get(input_col))
                     out_val = "" if row.get(output_col) is None else str(row.get(output_col))
                     merged = f"Input:\n{in_val.strip()}\n\nOutput:\n{out_val.strip()}".strip()
+                    writer.writerow([_wrap_with_start_stop_token(merged)])
+            elif conversion_mode == "row_with_headers":
+                for row in ds:
+                    parts: List[str] = []
+                    for col in ds.column_names:
+                        value = row.get(col)
+                        if isinstance(value, (dict, list)):
+                            value_text = json.dumps(value, ensure_ascii=False)
+                        elif value is None:
+                            value_text = ""
+                        else:
+                            value_text = str(value)
+                        parts.append(f"{col}: {value_text}")
+                    merged = "\n".join(parts).strip()
                     writer.writerow([_wrap_with_start_stop_token(merged)])
             else:
                 for value in ds[chosen_column]:
