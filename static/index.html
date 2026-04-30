@@ -27,86 +27,46 @@ MaTeLiX AI is a trademark/brand of TMP-SYSTEM-SERVICE GmbH.
 
   <style>
 :root {
-  --bg: #060b14;
-  --bg-alt: #0a1220;
-  --card: rgba(13, 23, 40, 0.78);
-  --card-strong: rgba(16, 29, 50, 0.9);
-  --primary: #61d3ff;
-  --accent: #7d8bff;
-  --text: #eaf4ff;
-  --muted: #9eb4cc;
-  --border: rgba(120, 178, 255, 0.25);
-  --shadow: 0 16px 40px rgba(0, 8, 24, 0.45);
-  --radius: 18px;
+  --bg: #f4f7fb;
+  --surface: #ffffff;
+  --surface-alt: #eef3fb;
+  --primary: #2563eb;
+  --primary-soft: #dbe8ff;
+  --accent: #06b6d4;
+  --text: #111827;
+  --muted: #5b6473;
+  --border: #d7dfed;
+  --shadow: 0 12px 30px rgba(15, 23, 42, 0.08);
+  --radius: 16px;
 }
 *{box-sizing:border-box}
 html,body{margin:0;min-height:100%}
-body{
-  font-family:'Roboto','Open Sans','Lato','Segoe UI',sans-serif;
-  color:var(--text);
-  background:
-    radial-gradient(circle at 0% 0%, #213f6a 0%, transparent 38%),
-    radial-gradient(circle at 100% -10%, #2c2f73 0%, transparent 28%),
-    linear-gradient(155deg, var(--bg) 0%, var(--bg-alt) 55%, #050912 100%);
-  line-height:1.45;
-}
+body{font-family:'Roboto','Open Sans','Lato','Segoe UI',sans-serif;color:var(--text);background:linear-gradient(180deg,#f8fbff 0%,#eef4ff 100%);line-height:1.45}
 input, select, textarea, button{font:inherit}
-input, select, textarea{
-  width:100%;
-  background:rgba(10,22,40,.88);
-  border:1px solid var(--border);
-  color:var(--text);
-  border-radius:10px;
-  padding:.62rem .72rem;
-}
-input:focus, select:focus, textarea:focus, button:focus-visible{outline:2px solid rgba(97,211,255,.6);outline-offset:2px}
-#matrix-bg-canvas,#ekg-bg-canvas{position:fixed;inset:0;pointer-events:none}
-#matrix-bg-canvas{z-index:0;opacity:.11;filter:blur(.4px) brightness(1.35)}
-#ekg-bg-canvas{z-index:0;opacity:.12}
-#dashboard-header,#systemstatus,#gauge-stats,#all-gpus-list,#dashboard-main,.card,#site-footer,#matrix-spinner-overlay{position:relative;z-index:2}
-#dashboard-header{
-  margin:1rem auto .7rem;
-  width:min(1400px, calc(100% - 2rem));
-  padding:1.2rem 1.5rem;
-  border:1px solid var(--border);
-  border-radius:22px;
-  background:linear-gradient(120deg, rgba(27,51,84,.9), rgba(11,25,44,.92));
-  box-shadow:var(--shadow);
-}
+input, select, textarea{width:100%;background:#fff;border:1px solid var(--border);color:var(--text);border-radius:10px;padding:.62rem .72rem}
+input:focus, select:focus, textarea:focus, button:focus-visible{outline:2px solid rgba(37,99,235,.4);outline-offset:2px}
+#dashboard-header,#systemstatus,#gauge-stats,#all-gpus-list,#dashboard-main,.card,#site-footer,#matrix-spinner-overlay{position:relative}
+#dashboard-header{margin:1rem auto .8rem;width:min(1440px, calc(100% - 2rem));padding:1.4rem 1.6rem;border:1px solid var(--border);border-radius:20px;background:linear-gradient(120deg,#1e3a8a,#0f172a);color:#f8fbff;box-shadow:var(--shadow)}
 #dashboard-header h1{margin:0;font-size:clamp(1.35rem,3.5vw,2.2rem)}
-#dashboard-header span{display:block;margin-top:.35rem;color:var(--muted)}
-#systemstatus, #gauge-stats, #all-gpus-list, #dashboard-main, #site-footer{width:min(1400px, calc(100% - 2rem));margin-inline:auto}
-#systemstatus{
-  background:var(--card);
-  border:1px solid var(--border);
-  border-radius:var(--radius);
-  box-shadow:var(--shadow);
-  padding:1rem;
-}
+#dashboard-header span{display:block;margin-top:.35rem;color:#c6dcff}
+#systemstatus, #gauge-stats, #all-gpus-list, #dashboard-main, #site-footer{width:min(1440px, calc(100% - 2rem));margin-inline:auto}
+#systemstatus{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);box-shadow:var(--shadow);padding:1rem}
 .gauges{display:grid;grid-template-columns:repeat(3,minmax(120px,1fr));gap:1rem;align-items:end;text-align:center}
-.gauge-label{color:#67d6ff;font-size:.95rem;margin-top:.35rem}
-#gauge-stats{margin-top:.65rem;color:#73dbff;font-size:1.02rem;text-align:center}
-#all-gpus-list{margin-top:.35rem;margin-bottom:1.1rem;text-align:center;color:#67d6ff}
+.gauge-label{color:#1d4ed8;font-size:.95rem;margin-top:.35rem;font-weight:600}
+#gauge-stats{margin-top:.65rem;color:#334155;font-size:1rem;text-align:center;background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:.6rem}
+#all-gpus-list{margin-top:.45rem;margin-bottom:1.1rem;text-align:center;color:#334155}
 #dashboard-main{display:grid;grid-template-columns:repeat(12,minmax(0,1fr));gap:1rem;align-items:start;margin-bottom:1rem}
-.card{
-  grid-column:span 6;
-  background:var(--card);
-  border:1px solid var(--border);
-  border-radius:var(--radius);
-  box-shadow:var(--shadow);
-  backdrop-filter:blur(7px);
-  padding:1.1rem;
-}
-.card h2,.card h3{margin:.1rem 0 .95rem;color:var(--primary)}
+.card{grid-column:span 6;background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);box-shadow:var(--shadow);padding:1.1rem}
+.card h2,.card h3{margin:.1rem 0 .95rem;color:#0f172a}
 .settings-grid{display:grid;grid-template-columns:minmax(190px,1.1fr) 2fr;gap:.72rem .95rem;align-items:center}
-.settings-grid label{color:#c5d9ee;font-size:.94rem}
-button{background:linear-gradient(135deg,var(--primary),var(--accent));border:0;color:#031529;border-radius:10px;padding:.58rem .95rem;font-weight:700;cursor:pointer}
-button:hover{filter:brightness(1.08)}
-button.danger{background:linear-gradient(135deg,#f77b7b,#bf2f41);color:#fff}
-#site-footer{margin-top:1rem;margin-bottom:1rem;padding:1rem;border-radius:14px;border:1px solid var(--border);background:var(--card-strong);text-align:center;color:var(--muted)}
-#matrix-spinner-overlay{display:none;position:fixed;inset:0;z-index:1000;background:rgba(4,10,20,.75);backdrop-filter:blur(2px);justify-content:center;align-items:center}
-#matrix-spinner-content{background:rgba(8,20,34,.95);border:1px solid var(--border);border-radius:16px;padding:1.4rem 1.7rem;text-align:center}
-.matrix-loader{width:58px;height:58px;border-radius:999px;border:4px solid rgba(82,182,255,.3);border-top-color:var(--primary);margin:0 auto .8rem;animation:spin 1s linear infinite}
+.settings-grid label{color:#334155;font-size:.94rem;font-weight:500}
+button{background:linear-gradient(135deg,var(--primary),#1d4ed8);border:0;color:#fff;border-radius:10px;padding:.58rem .95rem;font-weight:700;cursor:pointer}
+button:hover{filter:brightness(1.05)}
+button.danger{background:linear-gradient(135deg,#ef4444,#b91c1c);color:#fff}
+#site-footer{margin-top:1rem;margin-bottom:1rem;padding:1rem;border-radius:14px;border:1px solid var(--border);background:var(--surface);text-align:center;color:var(--muted)}
+#matrix-spinner-overlay{display:none;position:fixed;inset:0;z-index:1000;background:rgba(15,23,42,.35);backdrop-filter:blur(2px);justify-content:center;align-items:center}
+#matrix-spinner-content{background:#fff;border:1px solid var(--border);border-radius:16px;padding:1.4rem 1.7rem;text-align:center;color:#0f172a}
+.matrix-loader{width:58px;height:58px;border-radius:999px;border:4px solid rgba(37,99,235,.2);border-top-color:var(--primary);margin:0 auto .8rem;animation:spin 1s linear infinite}
 @keyframes spin{to{transform:rotate(360deg)}}
 @media (max-width:1200px){.card{grid-column:span 12}.settings-grid{grid-template-columns:1fr}}
 @media (max-width:720px){#dashboard-header,#systemstatus,#gauge-stats,#all-gpus-list,#dashboard-main,#site-footer{width:calc(100% - 1rem)}#dashboard-header{margin-top:.5rem}.gauges{grid-template-columns:1fr;gap:.65rem}}
@@ -114,9 +74,6 @@ button.danger{background:linear-gradient(135deg,#f77b7b,#bf2f41);color:#fff}
 </head>
 
 <body>
-<canvas id="matrix-bg-canvas"></canvas>
-<canvas id="ekg-bg-canvas"></canvas>
-
 <header id="dashboard-header" role="banner">
   <h1>MaTeLiX ARTIFICIAL INTELLIGENCE - LAB</h1>
   <span>LLM Trainer (Row-SFT, Chat + Text) – powered by TMP-SYSTEM-SERVICE GmbH</span>
@@ -524,9 +481,9 @@ button.danger{background:linear-gradient(135deg,#f77b7b,#bf2f41);color:#fff}
     </div>
   </div>
 
-  <div class="card" style="max-width:650px; background:#0d1a2b; border:2px solid #2f9dff; margin-bottom:2.5em;">
+  <div class="card" style="max-width:700px; background:var(--surface-alt); border:1px solid var(--border); margin-bottom:2.5em;">
     <h3 style="margin-bottom:0.6em;">CSV-Dateiformate</h3>
-    <div style="font-size:1.09em; color:#98cbff;">
+    <div style="font-size:1.09em; color:#334155;">
       <b>Dialog (chat / dialogplus):</b>
       <button type="button" onclick="downloadExample('chat')" class="download-btn">Beispiel-CSV herunterladen</button>
       <ul style="margin-top:0.3em; margin-bottom:0.8em;">
@@ -537,7 +494,7 @@ button.danger{background:linear-gradient(135deg,#f77b7b,#bf2f41);color:#fff}
         <li><code>Kontext</code> — optional</li>
         <li><code>Assistentin</code> — target (Pflicht)</li>
       </ul>
-      <pre style="background:#11243b; color:#58bfff; border-radius:6px; padding:0.7em;">
+      <pre style="background:#f8fbff; color:#1e3a8a; border:1px solid var(--border); border-radius:6px; padding:0.7em;">
 id,parent_id,system,Benutzer,Kontext,Assistentin
 1,,Du bist ein freundlicher Chatbot.,Hallo!,,"Hallo! Wie kann ich dir helfen?"
 2,1,,Wie spät ist es?,,"Ich habe keinen Zugriff auf deine Uhr, aber du kannst oben rechts schauen."
@@ -546,7 +503,7 @@ id,parent_id,system,Benutzer,Kontext,Assistentin
 
       <b>Nur-Text-Modus (template_mode=plain):</b>
       <button type="button" onclick="downloadExample('plain')" class="download-btn">Beispiel-CSV herunterladen</button>
-      <pre style="background:#11243b; color:#6bc8ff; border-radius:6px; padding:0.7em;">
+      <pre style="background:#f8fbff; color:#1e3a8a; border:1px solid var(--border); border-radius:6px; padding:0.7em;">
 text
 Das ist ein Beispielsatz für Pretraining.
 Hier folgt eine weitere Trainingszeile.
@@ -575,137 +532,6 @@ Hier folgt eine weitere Trainingszeile.
 <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 
 <script>
-function resizeMatrixCanvas() {
-  const c = document.getElementById('matrix-bg-canvas');
-  if (!c) return;
-  c.width = window.innerWidth;
-  c.height = window.innerHeight;
-}
-window.addEventListener('resize', resizeMatrixCanvas);
-
-function animateMatrixRain() {
-  const canvas = document.getElementById('matrix-bg-canvas');
-  if (!canvas) return;
-  const ctx = canvas.getContext('2d');
-  const w = canvas.width, h = canvas.height;
-  const fontSize = 20;
-  const columns = Math.max(1, Math.floor(w / fontSize));
-  const drops = Array(columns).fill(0).map(() => Math.random() * h / fontSize);
-  function draw() {
-    ctx.fillStyle = "rgba(5,24,17,0.19)";
-    ctx.fillRect(0, 0, w, h);
-    ctx.font = fontSize + "px 'Fira Mono', Consolas, monospace";
-    ctx.fillStyle = '#2ea6ff';
-    for (let i = 0; i < drops.length; i++) {
-      const text = String.fromCharCode(0x30A0 + Math.random() * 96);
-      ctx.fillText(text, i * fontSize, drops[i] * fontSize);
-      if (Math.random() > 0.983) drops[i] = 0;
-      else drops[i] += 0.5 - Math.random() * 0.1;
-    }
-    requestAnimationFrame(draw);
-  }
-  draw();
-}
-
-function resizeEKGCanvas() {
-  const canvas = document.getElementById('ekg-bg-canvas');
-  if (!canvas) return;
-  canvas.width = window.innerWidth;
-  canvas.height = Math.floor(window.innerHeight * 0.14);
-}
-window.addEventListener('resize', resizeEKGCanvas);
-
-function drawEKGLine(ctx, w, h, t) {
-  const baseY = h * 0.72;
-  const amp = h * 0.18;
-  const step = 2;
-  const bpm = 61 + Math.sin(t * 0.33) * 2.2;
-  const period = 60 / bpm;
-  const scrollSpeed = w / (8 * period);
-
-  ctx.clearRect(0, 0, w, h);
-  ctx.save();
-  ctx.shadowColor = '#2aa8ff';
-  ctx.shadowBlur = 14;
-  ctx.lineWidth = 1.0;
-  ctx.strokeStyle = '#3db6ff';
-  ctx.beginPath();
-
-  function randomSeed(n) {
-    return Math.abs(Math.sin(n * 1123.2311 + n * n * 77.221)) % 1;
-  }
-
-  for (let x = 0; x <= w; x += step) {
-    const t_x = t - (w - x) / scrollSpeed;
-    const beatNumber = Math.floor(t_x / period);
-    const eventRand = randomSeed(beatNumber);
-
-    let event = "normal";
-    if (eventRand > 0.92) event = "big";
-    else if (eventRand > 0.88) event = "double";
-    else if (eventRand > 0.85) event = "pause";
-    else if (eventRand > 0.82) event = "noise";
-
-    const peakMod = event === "big" ? 2.2 : 1;
-    const isDouble = event === "double";
-    const isPause = event === "pause";
-    const isNoise = event === "noise";
-    const peakNoise = 0.98 + 0.07 * Math.sin(beatNumber * 771.17);
-
-    let beatPhase = (t_x % period) / period;
-    if (beatPhase < 0) beatPhase += 1;
-
-    let y = baseY;
-
-    if (isPause) {
-      y += Math.sin((x + t * 55) * 0.011) * amp * 0.10;
-    } else {
-      if (beatPhase > 0.02 && beatPhase < 0.045)
-        y -= amp * 0.18 * Math.exp(-120 * Math.pow(beatPhase - 0.032, 2));
-      else if (beatPhase > 0.055 && beatPhase < 0.068)
-        y += amp * 0.12 * Math.exp(-280 * Math.pow(beatPhase - 0.060, 2));
-      else if (beatPhase > 0.075 && beatPhase < 0.11)
-        y -= amp * 1.05 * peakMod * peakNoise * Math.exp(-180 * Math.pow(beatPhase - 0.092, 2));
-      else if (isDouble && beatPhase > 0.12 && beatPhase < 0.15)
-        y -= amp * 0.85 * peakNoise * Math.exp(-110 * Math.pow(beatPhase - 0.134, 2));
-      else if (beatPhase > 0.114 && beatPhase < 0.13)
-        y += amp * 0.27 * Math.exp(-50 * Math.pow(beatPhase - 0.122, 2));
-      else if (beatPhase > 0.16 && beatPhase < 0.23)
-        y -= amp * 0.31 * Math.exp(-30 * Math.pow(beatPhase - 0.19, 2));
-
-      if (isNoise) y += Math.sin((x + t * 210) * 0.093) * amp * 0.22;
-    }
-
-    y += Math.sin((x + t * 80) * 0.017) * amp * 0.08;
-    y += (Math.random() - 0.5) * (isNoise ? 5 : 1.9);
-
-    if (x === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
-  }
-  ctx.stroke();
-  ctx.restore();
-}
-
-function animateEKG() {
-  const canvas = document.getElementById('ekg-bg-canvas');
-  if (!canvas) return;
-  const ctx = canvas.getContext('2d');
-  let start = null;
-  function frame(ts) {
-    if (!start) start = ts;
-    let t = (ts - start) / 1000;
-    drawEKGLine(ctx, canvas.width, canvas.height, t);
-    requestAnimationFrame(frame);
-  }
-  requestAnimationFrame(frame);
-}
-
-window.addEventListener('DOMContentLoaded', function() {
-  resizeMatrixCanvas();
-  animateMatrixRain();
-  resizeEKGCanvas();
-  animateEKG();
-});
-
 function numberOrNull(v) {
   if (v === null || v === undefined) return null;
   const s = String(v).trim();
