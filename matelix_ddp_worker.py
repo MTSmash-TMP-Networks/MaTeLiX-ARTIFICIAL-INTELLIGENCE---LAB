@@ -236,6 +236,13 @@ class TrainConfig:
         if self.max_history_turns is not None:
             self.max_history_turns = max(1, int(self.max_history_turns))
 
+        # Bei Scratch-Training verhindert Länge-Sortierung ohne Shuffle den typischen
+        # "Loss fällt und springt pro Epoche wieder nach oben"-Effekt (Curriculum-Reset).
+        if self.train_from_scratch and not self.shuffle:
+            self.shuffle = True
+        if self.train_from_scratch and self.sort_by_length and self.shuffle:
+            self.sort_by_length = False
+
 
 def _coerce_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
     payload = dict(payload or {})
@@ -2231,7 +2238,11 @@ def train_epoch(
         )
 
         running_updates += 1
-        reduced_loss = float(last_micro_loss_value or 0.0) if ctx.is_distributed else all_reduce_mean(float(last_micro_loss_value or 0.0), ctx)
+        reduced_loss = (
+            all_reduce_mean(float(last_micro_loss_value or 0.0), ctx)
+            if ctx.is_distributed
+            else float(last_micro_loss_value or 0.0)
+        )
         running_loss += reduced_loss
 
         if ctx.is_main:
