@@ -368,6 +368,11 @@ curl -X POST http://127.0.0.1:8002/start \
   }'
 ```
 
+
+> Hinweis: Bei `train_from_scratch: true` aktiviert der Worker automatisch `shuffle=true`
+> und deaktiviert `sort_by_length`, falls beides sonst zu einem zyklischen
+> "Loss fällt innerhalb der Epoche und springt am Epochenanfang wieder hoch" führen würde.
+
 ### Stop training
 
 ```bash
