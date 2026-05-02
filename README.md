@@ -6,8 +6,7 @@
 ![Transformers](https://img.shields.io/badge/Transformers-Hugging%20Face-FFD21E)
 ![License](https://img.shields.io/badge/License-Apache%202.0-blue)
 
-<img width="3840" height="861" alt="Screenshot 2026-04-30 at 17-12-56 MaTeLiX AI – Training Dashboard" src="https://github.com/user-attachments/assets/116e4b85-ca30-44b0-a7e2-89d118dea085" />
-
+<img width="3024" height="2206" alt="Screenshot 2026-05-02 at 19-34-15 MaTeLiX AI – Training Dashboard" src="https://github.com/user-attachments/assets/6a7539df-8837-441a-93e6-bed1c1bc9c53" />
 
 
 Local **LLM training and inference lab** with **FastAPI**, **Web UI**, **DDP / Multi-GPU training**, **LoRA**, **live logs**, **live preview** and an **OpenAI-compatible API**.
