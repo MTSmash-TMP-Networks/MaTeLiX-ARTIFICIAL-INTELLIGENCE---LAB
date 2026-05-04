@@ -17,7 +17,7 @@ Local **LLM training and inference lab** with **FastAPI**, **Web UI**, **DDP / M
 
 ## Aktuelle Version
 
-**Stand: Version 6.8**
+**Stand: Version 7.0**
 
 Enthalten sind unter anderem:
 
