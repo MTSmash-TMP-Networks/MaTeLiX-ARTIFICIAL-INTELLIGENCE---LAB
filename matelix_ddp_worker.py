@@ -1974,13 +1974,14 @@ def train_epoch(
     epoch: int,
     global_step: int,
     total_steps_ref: Dict[str, int],
+    micro_step: int,
     csv_total_samples_est: int,
     cache_dir: Path,
     train_start_time: float,
     status_writer: JsonStatusWriter,
     preview_writer: Optional[JsonPreviewWriter],
     tokenizer,
-) -> Tuple[float, int, bool]:
+) -> Tuple[float, int, int, bool]:
     model.train()
 
     _, fp16, bf16 = pick_precision(cfg, ctx.device)
@@ -2012,6 +2013,7 @@ def train_epoch(
                 break
 
             batch = move_batch(batch, ctx.device)
+            micro_step += 1
 
             if ctx.is_main and preview_writer is not None:
                 try:
@@ -2138,6 +2140,7 @@ def train_epoch(
                     payload = {
                         "running": True,
                         "step": global_step,
+                        "micro_step": micro_step,
                         "loss": reduced_loss,
                         "learning_rate": lr,
                         "eta": eta,
@@ -2264,6 +2267,7 @@ def train_epoch(
             payload = {
                 "running": True,
                 "step": global_step,
+                "micro_step": micro_step,
                 "loss": reduced_loss,
                 "learning_rate": lr,
                 "eta": eta,
@@ -2296,7 +2300,7 @@ def train_epoch(
             status_writer.write(payload)
 
     avg_loss = running_loss / max(1, running_updates)
-    return avg_loss, global_step, reached_max_steps
+    return avg_loss, global_step, micro_step, reached_max_steps
 
 
 
@@ -2681,6 +2685,7 @@ def main() -> int:
             payload = {
                 "running": True,
                 "step": 0,
+                "micro_step": 0,
                 "loss": None,
                 "learning_rate": optimizer.param_groups[0]["lr"],
                 "eta": "",
@@ -2719,6 +2724,7 @@ def main() -> int:
         barrier(ctx)
 
         global_step = 0
+        micro_step = 0
         last_loss = None
         train_start_time = time.time()
 
@@ -2731,7 +2737,7 @@ def main() -> int:
 
             dataset.set_epoch(epoch)
 
-            avg_loss, global_step, reached_max_steps = train_epoch(
+            avg_loss, global_step, micro_step, reached_max_steps = train_epoch(
                 model=model,
                 loader=loader,
                 optimizer=optimizer,
@@ -2742,6 +2748,7 @@ def main() -> int:
                 epoch=epoch,
                 global_step=global_step,
                 total_steps_ref=total_steps_ref,
+                micro_step=micro_step,
                 csv_total_samples_est=total_samples_est,
                 cache_dir=cache_dir,
                 train_start_time=train_start_time,
@@ -2790,6 +2797,7 @@ def main() -> int:
                     status_payload = {
                         "running": False,
                         "step": global_step,
+                        "micro_step": micro_step,
                         "loss": last_loss,
                         "learning_rate": optimizer.param_groups[0]["lr"],
                         "eta": "stopped",
@@ -2923,6 +2931,7 @@ def main() -> int:
             final_payload = {
                 "running": False,
                 "step": global_step,
+                "micro_step": micro_step,
                 "loss": last_loss,
                 "learning_rate": optimizer.param_groups[0]["lr"],
                 "eta": "",
