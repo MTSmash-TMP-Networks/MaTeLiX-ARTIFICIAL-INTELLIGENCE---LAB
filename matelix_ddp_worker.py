@@ -125,6 +125,7 @@ class TrainConfig:
 
     train_mode: str = "full"
     train_from_scratch: bool = False
+    force_shuffle_on_scratch: bool = True
     include_prompt_loss: bool = False
     scratch_hidden_size: Optional[int] = None
     scratch_num_hidden_layers: Optional[int] = None
@@ -238,11 +239,12 @@ class TrainConfig:
         if self.max_history_turns is not None:
             self.max_history_turns = max(1, int(self.max_history_turns))
 
-        # Bei Scratch-Training verhindert Länge-Sortierung ohne Shuffle den typischen
-        # "Loss fällt und springt pro Epoche wieder nach oben"-Effekt (Curriculum-Reset).
-        if self.train_from_scratch and not self.shuffle:
+        # Optionaler Guard für Scratch-Training:
+        # Standardmäßig wird Shuffle erzwungen, kann aber via
+        # force_shuffle_on_scratch deaktiviert werden.
+        if self.train_from_scratch and self.force_shuffle_on_scratch and not self.shuffle:
             self.shuffle = True
-        if self.train_from_scratch and self.sort_by_length and self.shuffle:
+        if self.train_from_scratch and self.force_shuffle_on_scratch and self.sort_by_length and self.shuffle:
             self.sort_by_length = False
 
 

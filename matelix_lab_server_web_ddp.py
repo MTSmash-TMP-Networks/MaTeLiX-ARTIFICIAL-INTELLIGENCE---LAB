@@ -366,6 +366,7 @@ class WebTrainConfig(MatelixBaseModel):
     device: str = "auto"
     train_mode: str = "full"
     train_from_scratch: bool = False
+    force_shuffle_on_scratch: bool = True
     include_prompt_loss: bool = False
     scratch_hidden_size: Optional[int] = None
     scratch_num_hidden_layers: Optional[int] = None
