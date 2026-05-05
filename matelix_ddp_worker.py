@@ -39,7 +39,9 @@ from typing import Any, Dict, Iterator, List, Optional, Sequence, Tuple
 
 os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
 os.environ.setdefault("PYTHONUNBUFFERED", "1")
-os.environ.setdefault("PYTORCH_ALLOC_CONF", "expandable_segments:True")
+os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
+# Rueckwaertskompatibel: einige Umgebungen nutzen noch den alten (falschen) Schluessel.
+os.environ.setdefault("PYTORCH_ALLOC_CONF", os.environ["PYTORCH_CUDA_ALLOC_CONF"])
 
 if os.environ.get("MATELIX_NCCL_BLOCKING_WAIT", "0") == "1":
     os.environ["TORCH_NCCL_BLOCKING_WAIT"] = "1"
