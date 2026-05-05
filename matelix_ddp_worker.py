@@ -115,7 +115,7 @@ class TrainConfig:
     shuffle: bool = False
     sort_by_length: bool = True
     sort_by_similarity: bool = False
-    fixed_padding: bool = True
+    fixed_padding: bool = False
     dataloader_num_workers: int = 0
     max_grad_norm: float = 1.0
     weight_decay: float = 0.01
@@ -2039,7 +2039,12 @@ def train_epoch(
                 # fuehrt dann zu Collective-Mismatch/Haengern. Deshalb synchronisieren wir
                 # im Distributed-Fall jeden Backward und nutzen Grad-Accumulation nur fuer
                 # den Optimizer-Step-Rhythmus.
-                backward_sync_ctx = nullcontext()
+                sync_now = (accum_counter + 1) >= cfg.gradient_accumulation_steps
+
+                if ctx.is_distributed and isinstance(model, DDP) and not sync_now:
+                    backward_sync_ctx = model.no_sync()
+                else:
+                    backward_sync_ctx = nullcontext()
 
                 with backward_sync_ctx:
                     with autocast_ctx:
@@ -2118,11 +2123,7 @@ def train_epoch(
                 )
 
                 running_updates += 1
-                reduced_loss = (
-                    all_reduce_mean(float(loss.detach().item()), ctx)
-                    if ctx.is_distributed
-                    else float(loss.detach().item())
-                )
+                reduced_loss = float(loss.detach().item())
                 running_loss += reduced_loss
 
                 if ctx.is_main:
@@ -2245,11 +2246,7 @@ def train_epoch(
         )
 
         running_updates += 1
-        reduced_loss = (
-            all_reduce_mean(float(last_micro_loss_value or 0.0), ctx)
-            if ctx.is_distributed
-            else float(last_micro_loss_value or 0.0)
-        )
+        reduced_loss = float(last_micro_loss_value or 0.0)
         running_loss += reduced_loss
 
         if ctx.is_main:
