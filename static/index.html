@@ -1850,9 +1850,12 @@ Hier folgt eine weitere Trainingszeile.
           ? s.scheduler_total_steps
           : ((typeof s.total_steps === "number" && s.total_steps > 0) ? s.total_steps : null);
 
-        const currentStep = (typeof s.micro_step === "number" && s.micro_step >= 0)
-          ? s.micro_step
-          : ((typeof s.step === "number" && s.step >= 0) ? s.step : null);
+        const microStep = (typeof s.micro_step === "number" && s.micro_step >= 0) ? s.micro_step : null;
+        const updateStep = (typeof s.step === "number" && s.step >= 0) ? s.step : null;
+        const currentStep = (microStep !== null && updateStep !== null)
+          ? Math.max(microStep, updateStep)
+          : (microStep !== null ? microStep : updateStep);
+
 
         document.getElementById("step").textContent = currentStep !== null ? currentStep : "-";
         document.getElementById("loss").textContent = (typeof s.loss==="number" && Number.isFinite(s.loss)) ? s.loss.toFixed(6) : "-";
