@@ -738,6 +738,8 @@ MaTeLiX AI is a trademark/brand of TMP-SYSTEM-SERVICE GmbH.
 
               <label class="scratch_cfg_row" for="include_prompt_loss" style="display:none;">Prompt in Loss einbeziehen</label>
               <input type="checkbox" id="include_prompt_loss" class="scratch_cfg_row" style="display:none;">
+              <label class="scratch_cfg_row" for="force_shuffle_on_scratch" style="display:none;">Scratch Shuffle erzwingen</label>
+              <input type="checkbox" id="force_shuffle_on_scratch" class="scratch_cfg_row" style="display:none;" checked>
 
               <label for="precision_mode">Precision</label>
               <select id="precision_mode" title="fp16/bf16 nur auf CUDA; MPS/CPU immer FP32">
@@ -1597,6 +1599,7 @@ Hier folgt eine weitere Trainingszeile.</pre>
 
         train_mode: document.getElementById("train_mode").value,
         train_from_scratch: document.getElementById("train_from_scratch").checked,
+        force_shuffle_on_scratch: document.getElementById("force_shuffle_on_scratch").checked,
         include_prompt_loss: document.getElementById("include_prompt_loss").checked,
         scratch_hidden_size: integerOrNull(document.getElementById("scratch_hidden_size").value),
         scratch_num_hidden_layers: integerOrNull(document.getElementById("scratch_num_hidden_layers").value),
@@ -1847,7 +1850,9 @@ Hier folgt eine weitere Trainingszeile.
           ? s.scheduler_total_steps
           : ((typeof s.total_steps === "number" && s.total_steps > 0) ? s.total_steps : null);
 
-        const currentStep = (typeof s.step === "number" && s.step >= 0) ? s.step : null;
+        const currentStep = (typeof s.micro_step === "number" && s.micro_step >= 0)
+          ? s.micro_step
+          : ((typeof s.step === "number" && s.step >= 0) ? s.step : null);
 
         document.getElementById("step").textContent = currentStep !== null ? currentStep : "-";
         document.getElementById("loss").textContent = (typeof s.loss==="number" && Number.isFinite(s.loss)) ? s.loss.toFixed(6) : "-";
@@ -1873,9 +1878,12 @@ Hier folgt eine weitere Trainingszeile.
         document.getElementById("total_samples_real").textContent = fmtValue(s.total_samples_real);
         document.getElementById("skipped_samples").textContent = fmtValue(s.skipped_samples);
 
-        if (currentStep !== null && totalSteps !== null) {
-          const pct = Math.max(0, Math.min(100, (currentStep / totalSteps) * 100));
-          document.getElementById("step_progress").textContent = `${currentStep} / ${totalSteps} (${pct.toFixed(1)}%)`;
+        const cfg = s.config || {};
+        const gradAccum = Math.max(1, numberOrNull(cfg.gradient_accumulation_steps) || 1);
+        const totalProgressSteps = totalSteps !== null ? totalSteps * gradAccum : null;
+        if (currentStep !== null && totalProgressSteps !== null) {
+          const pct = Math.max(0, Math.min(100, (currentStep / totalProgressSteps) * 100));
+          document.getElementById("step_progress").textContent = `${currentStep} / ${totalProgressSteps} (${pct.toFixed(1)}%)`;
           const bar = document.getElementById("step_progress_bar");
           if (bar) bar.style.width = pct.toFixed(2) + "%";
         } else {
@@ -1884,10 +1892,8 @@ Hier folgt eine weitere Trainingszeile.
           if (bar) bar.style.width = "0%";
         }
 
-        const cfg = s.config || {};
         const epochsConfigured = numberOrNull(cfg.num_train_epochs);
         const batchSize = Math.max(1, numberOrNull(cfg.per_device_train_batch_size) || 1);
-        const gradAccum = Math.max(1, numberOrNull(cfg.gradient_accumulation_steps) || 1);
         const worldSize = Math.max(1, numberOrNull(s.world_size) || 1);
 
         const realSamples = numberOrNull(s.total_samples_real);

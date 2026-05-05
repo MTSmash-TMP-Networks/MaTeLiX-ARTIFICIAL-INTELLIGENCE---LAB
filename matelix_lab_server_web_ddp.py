@@ -252,6 +252,7 @@ class TrainingState:
         self.lock = threading.Lock()
         self.running = False
         self.step: int = 0
+        self.micro_step: int = 0
         self.loss: Optional[float] = None
         self.learning_rate: Optional[float] = None
         self.last_preview: str = ""
@@ -293,6 +294,7 @@ class TrainingState:
             return {
                 "running": self.running,
                 "step": self.step,
+                "micro_step": self.micro_step,
                 "loss": self.loss,
                 "learning_rate": self.learning_rate,
                 "eta": self.eta,
@@ -635,6 +637,7 @@ class DDPTrainingManager:
     def _merge_state_payload(self, payload: Dict[str, Any], source: str = "unknown") -> None:
         with self.state.lock:
             self.state.step = int(payload.get("step") or self.state.step or 0)
+            self.state.micro_step = int(payload.get("micro_step") or self.state.micro_step or 0)
 
             if payload.get("loss") is not None:
                 self.state.loss = payload.get("loss")
@@ -871,6 +874,7 @@ class DDPTrainingManager:
         with self.state.lock:
             self.state.running = True
             self.state.step = 0
+            self.state.micro_step = 0
             self.state.loss = None
             self.state.learning_rate = None
             self.state.eta = ""
