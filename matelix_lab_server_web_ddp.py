@@ -360,7 +360,6 @@ class WebTrainConfig(MatelixBaseModel):
     num_train_epochs: float = 3.0
     max_steps: Optional[int] = None
     max_seq_length: int = 1024
-    shuffle: bool = False
     sort_by_length: bool = True
     sort_by_similarity: bool = False
     max_history_turns: Optional[int] = None
@@ -368,7 +367,6 @@ class WebTrainConfig(MatelixBaseModel):
     device: str = "auto"
     train_mode: str = "full"
     train_from_scratch: bool = False
-    force_shuffle_on_scratch: bool = True
     include_prompt_loss: bool = False
     scratch_hidden_size: Optional[int] = None
     scratch_num_hidden_layers: Optional[int] = None
