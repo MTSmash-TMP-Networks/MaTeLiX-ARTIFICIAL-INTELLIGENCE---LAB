@@ -1955,6 +1955,8 @@ def train_epoch(
     running_updates = 0
     reached_max_steps = False
     accum_counter = 0
+    accum_tokens_local = 0
+    total_tokens_seen = 0
     last_micro_loss_value: Optional[float] = None
 
     join_ctx = model.join() if (ctx.is_distributed and isinstance(model, DDP)) else nullcontext()
@@ -1970,6 +1972,7 @@ def train_epoch(
                 break
 
             batch = move_batch(batch, ctx.device)
+            accum_tokens_local += int(batch["attention_mask"].sum().item())
             micro_step += 1
 
             if ctx.is_main and preview_writer is not None:
@@ -2084,6 +2087,8 @@ def train_epoch(
                 running_loss += reduced_loss
 
                 if ctx.is_main:
+                    step_tokens = int(accum_tokens_local * max(1, ctx.world_size))
+                    total_tokens_seen += step_tokens
                     elapsed = max(1e-6, time.time() - train_start_time)
                     steps_done = max(1, global_step)
                     steps_left = max(0, int(total_steps_ref["value"]) - int(global_step))
@@ -2102,19 +2107,8 @@ def train_epoch(
                         "loss": reduced_loss,
                         "learning_rate": lr,
                         "eta": eta,
-                        "tokens_per_step": int(
-                            cfg.max_seq_length
-                            * cfg.per_device_train_batch_size
-                            * cfg.gradient_accumulation_steps
-                            * max(1, ctx.world_size)
-                        ),
-                        "total_tokens": int(
-                            global_step
-                            * cfg.max_seq_length
-                            * cfg.per_device_train_batch_size
-                            * cfg.gradient_accumulation_steps
-                            * max(1, ctx.world_size)
-                        ),
+                        "tokens_per_step": step_tokens,
+                        "total_tokens": total_tokens_seen,
                         "epoch": epoch,
                         "total_steps": int(total_steps_ref["value"]),
                         "scheduler_total_steps": int(total_steps_ref["value"]),
@@ -2129,6 +2123,7 @@ def train_epoch(
                         )
                     )
                     status_writer.write(payload)
+                accum_tokens_local = 0
 
                 if SHUTDOWN.stop:
                     reached_max_steps = True
@@ -2207,6 +2202,8 @@ def train_epoch(
         running_loss += reduced_loss
 
         if ctx.is_main:
+            step_tokens = int(accum_tokens_local * max(1, ctx.world_size))
+            total_tokens_seen += step_tokens
             elapsed = max(1e-6, time.time() - train_start_time)
             steps_done = max(1, global_step)
             steps_left = max(0, int(total_steps_ref["value"]) - int(global_step))
@@ -2225,19 +2222,8 @@ def train_epoch(
                 "loss": reduced_loss,
                 "learning_rate": lr,
                 "eta": eta,
-                "tokens_per_step": int(
-                    cfg.max_seq_length
-                    * cfg.per_device_train_batch_size
-                    * cfg.gradient_accumulation_steps
-                    * max(1, ctx.world_size)
-                ),
-                "total_tokens": int(
-                    global_step
-                    * cfg.max_seq_length
-                    * cfg.per_device_train_batch_size
-                    * cfg.gradient_accumulation_steps
-                    * max(1, ctx.world_size)
-                ),
+                "tokens_per_step": step_tokens,
+                "total_tokens": total_tokens_seen,
                 "epoch": epoch,
                 "total_steps": int(total_steps_ref["value"]),
                 "scheduler_total_steps": int(total_steps_ref["value"]),
