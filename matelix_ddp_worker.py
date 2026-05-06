@@ -112,7 +112,6 @@ class TrainConfig:
     chunk_size: Optional[int] = None
     max_history_turns: Optional[int] = None
 
-    shuffle: bool = False
     sort_by_length: bool = True
     sort_by_similarity: bool = False
     fixed_padding: bool = False
@@ -125,7 +124,6 @@ class TrainConfig:
 
     train_mode: str = "full"
     train_from_scratch: bool = False
-    force_shuffle_on_scratch: bool = True
     include_prompt_loss: bool = False
     scratch_hidden_size: Optional[int] = None
     scratch_num_hidden_layers: Optional[int] = None
@@ -238,14 +236,6 @@ class TrainConfig:
         self.cuda_empty_cache_interval_steps = max(0, int(self.cuda_empty_cache_interval_steps))
         if self.max_history_turns is not None:
             self.max_history_turns = max(1, int(self.max_history_turns))
-
-        # Optionaler Guard für Scratch-Training:
-        # Standardmäßig wird Shuffle erzwungen, kann aber via
-        # force_shuffle_on_scratch deaktiviert werden.
-        if self.train_from_scratch and self.force_shuffle_on_scratch and not self.shuffle:
-            self.shuffle = True
-        if self.train_from_scratch and self.force_shuffle_on_scratch and self.sort_by_length and self.shuffle:
-            self.sort_by_length = False
 
 
 def _coerce_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
@@ -577,7 +567,7 @@ def _load_thread_rows(csv_path: str) -> Tuple[List[Dict[str, Any]], Dict[str, Di
     return rows, id2row
 
 
-def _iter_candidate_chains(csv_path: str, shuffle_threads: bool = False) -> Iterator[List[Dict[str, Any]]]:
+def _iter_candidate_chains(csv_path: str) -> Iterator[List[Dict[str, Any]]]:
     rows, id2row = _load_thread_rows(csv_path)
     candidates = [r for r in rows if (r.get("Assistentin") or "").strip() and r.get("id")]
     if not candidates:
@@ -604,8 +594,6 @@ def _iter_candidate_chains(csv_path: str, shuffle_threads: bool = False) -> Iter
         threads.setdefault(root_id, []).append((depth, int(r["_rowidx"]), r))
 
     order = list(threads.keys())
-    if shuffle_threads:
-        random.shuffle(order)
 
     for root_id in order:
         items = sorted(threads[root_id], key=lambda x: (x[0], x[1]))
@@ -626,8 +614,8 @@ def _iter_candidate_chains(csv_path: str, shuffle_threads: bool = False) -> Iter
                 yield chain
 
 
-def chat_structured_iter(csv_path: str, shuffle_threads: bool = False) -> Iterator[StructuredChatSample]:
-    for chain in _iter_candidate_chains(csv_path, shuffle_threads=shuffle_threads):
+def chat_structured_iter(csv_path: str) -> Iterator[StructuredChatSample]:
+    for chain in _iter_candidate_chains(csv_path):
         target_idx = len(chain) - 1
         answer = (chain[target_idx].get("Assistentin") or "").strip()
         if not answer:
@@ -656,8 +644,8 @@ def chat_structured_iter(csv_path: str, shuffle_threads: bool = False) -> Iterat
         yield StructuredChatSample(system=system_text, turns=turns, target_answer=answer)
 
 
-def dialogplus_structured_iter(csv_path: str, shuffle_threads: bool = False) -> Iterator[StructuredChatSample]:
-    for item in chat_structured_iter(csv_path, shuffle_threads=shuffle_threads):
+def dialogplus_structured_iter(csv_path: str) -> Iterator[StructuredChatSample]:
+    for item in chat_structured_iter(csv_path):
         yield item
 
 
@@ -697,11 +685,11 @@ def _csv_has_column(csv_path: str, column_name: str) -> bool:
 def build_examples_stream(cfg: TrainConfig) -> Iterator[Any]:
     if cfg.template_mode == "chat":
         if _csv_has_column(cfg.csv_path, "id") and _csv_has_column(cfg.csv_path, "Assistentin"):
-            return chat_structured_iter(cfg.csv_path, shuffle_threads=bool(cfg.shuffle))
+            return chat_structured_iter(cfg.csv_path)
         return column_iter(cfg.csv_path, cfg.column_name)
     if cfg.template_mode == "dialogplus":
         if _csv_has_column(cfg.csv_path, "id") and _csv_has_column(cfg.csv_path, "Assistentin"):
-            return dialogplus_structured_iter(cfg.csv_path, shuffle_threads=bool(cfg.shuffle))
+            return dialogplus_structured_iter(cfg.csv_path)
         return column_iter(cfg.csv_path, cfg.column_name)
     return column_iter(cfg.csv_path, cfg.column_name)
 
@@ -880,7 +868,6 @@ def compute_shard_cache_dir(cfg: TrainConfig) -> Path:
         "sort_by_length": bool(cfg.sort_by_length),
         "max_history_turns": cfg.max_history_turns,
         "strict_whole_turns": True,
-        "bucketed_shuffle": True,
         "use_ngrams": bool(cfg.use_ngrams),
         "ngram_max": int(cfg.ngram_max),
         "ngram_top_k": int(cfg.ngram_top_k),
@@ -1169,7 +1156,6 @@ def shard_producer_process_main(cfg_dict: Dict[str, Any], cache_dir_str: str) ->
             "sort_by_length": bool(cfg.sort_by_length),
             "sort_by_similarity": bool(cfg.sort_by_similarity),
             "sort_buffer_size": sort_buffer_size,
-            "bucketed_shuffle": True,
             "use_ngrams": bool(cfg.use_ngrams),
             "ngram_summary": ngram_summary_text(ngram_state),
             "ngram_selected_count": int((ngram_state.stats or {}).get("selected_count", 0)) if ngram_state else 0,
@@ -1319,7 +1305,6 @@ class TokenizedShardIterableDataset(IterableDataset):
         cache_dir: Path,
         rank: int,
         world_size: int,
-        shuffle: bool = False,
         sort_by_length: bool = True,
         epoch: int = 0,
     ):
@@ -1327,7 +1312,6 @@ class TokenizedShardIterableDataset(IterableDataset):
         self.cache_dir = cache_dir
         self.rank = rank
         self.world_size = world_size
-        self.shuffle = shuffle
         self.sort_by_length = sort_by_length
         self.epoch = epoch
 
@@ -1360,15 +1344,7 @@ class TokenizedShardIterableDataset(IterableDataset):
             samples = payload["samples"]
             global_start = int(payload["global_start"])
 
-            if self.shuffle:
-                rng = random.Random((self.epoch + 1) * 1000003 + shard_idx)
-                if self.sort_by_length:
-                    order = _make_bucketed_shuffle_order(samples, rng)
-                else:
-                    order = list(range(len(samples)))
-                    rng.shuffle(order)
-            else:
-                order = list(range(len(samples)))
+            order = list(range(len(samples)))
 
             for local_idx in order:
                 global_idx = global_start + local_idx
@@ -1383,25 +1359,6 @@ class TokenizedShardIterableDataset(IterableDataset):
 
             shard_idx += 1
 
-
-def _make_bucketed_shuffle_order(samples: List[Dict[str, Any]], rng: random.Random) -> List[int]:
-    order = list(range(len(samples)))
-    if not order:
-        return order
-
-    if not all(("seq_len" in s) for s in samples):
-        rng.shuffle(order)
-        return order
-
-    order.sort(key=lambda i: int(samples[i].get("seq_len") or len(samples[i]["input_ids"])))
-
-    bucket_size = max(8, min(64, len(order)))
-    buckets = [order[i:i + bucket_size] for i in range(0, len(order), bucket_size)]
-
-    for bucket in buckets:
-        rng.shuffle(bucket)
-    rng.shuffle(buckets)
-    return [idx for bucket in buckets for idx in bucket]
 
 
 class DataCollator:
@@ -2365,7 +2322,6 @@ def save_model_artifacts(
         "max_history_turns": cfg.max_history_turns,
         "strict_whole_turns": True,
         "sort_by_length": bool(cfg.sort_by_length),
-        "bucketed_shuffle": True,
         "use_ngrams": bool(cfg.use_ngrams),
         "ngram_summary": ngram_summary_text(ngram_state),
     }
@@ -2573,7 +2529,6 @@ def main() -> int:
             cache_dir=cache_dir,
             rank=ctx.rank,
             world_size=ctx.world_size,
-            shuffle=bool(cfg.shuffle),
             sort_by_length=bool(cfg.sort_by_length),
             epoch=0,
         )
@@ -2655,10 +2610,8 @@ def main() -> int:
                 cfg.max_history_turns,
             )
             LOGGER.info(
-                "sort_by_length=%s | shuffle=%s | bucketed_shuffle=%s",
+                "sort_by_length=%s",
                 cfg.sort_by_length,
-                cfg.shuffle,
-                bool(cfg.shuffle and cfg.sort_by_length),
             )
             LOGGER.info(
                 "CUDA memory diagnostics | enabled=%s interval_steps=%s empty_cache_interval_steps=%s",
@@ -2818,7 +2771,6 @@ def main() -> int:
                         "max_history_turns": cfg.max_history_turns,
                         "strict_whole_turns": True,
                         "sort_by_length": bool(cfg.sort_by_length),
-                        "bucketed_shuffle": True,
                         "use_ngrams": bool(cfg.use_ngrams),
                         "ngram_summary": ngram_summary_text(ngram_state),
                         "adaptive_scheduler": bool(cfg.adaptive_scheduler),
@@ -2963,7 +2915,6 @@ def main() -> int:
                 "max_history_turns": cfg.max_history_turns,
                 "strict_whole_turns": True,
                 "sort_by_length": bool(cfg.sort_by_length),
-                "bucketed_shuffle": True,
                 "use_ngrams": bool(cfg.use_ngrams),
                 "ngram_summary": ngram_summary_text(ngram_state),
                 "scheduler_state": scheduler.state_dict(),

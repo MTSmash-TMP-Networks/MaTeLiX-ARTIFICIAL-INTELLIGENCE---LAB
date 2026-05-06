@@ -354,7 +354,6 @@ curl -X POST http://127.0.0.1:8002/start \
     "num_train_epochs": 3,
     "max_seq_length": 1024,
     "max_history_turns": null,
-    "shuffle": false,
     "sort_by_length": true,
     "rebuild_dataset_cache": true,
     "device": "auto",
@@ -367,12 +366,6 @@ curl -X POST http://127.0.0.1:8002/start \
   }'
 ```
 
-
-> Hinweis: Bei `train_from_scratch: true` aktiviert der Worker standardmäßig
-> `shuffle=true` und deaktiviert `sort_by_length`, falls beides sonst zu einem
-> zyklischen "Loss fällt innerhalb der Epoche und springt am Epochenanfang wieder hoch"
-> führen würde. Dieses Verhalten kann mit `force_shuffle_on_scratch: false`
-> deaktiviert werden.
 
 ### Stop training
 

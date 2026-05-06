@@ -738,8 +738,6 @@ MaTeLiX AI is a trademark/brand of TMP-SYSTEM-SERVICE GmbH.
 
               <label class="scratch_cfg_row" for="include_prompt_loss" style="display:none;">Prompt in Loss einbeziehen</label>
               <input type="checkbox" id="include_prompt_loss" class="scratch_cfg_row" style="display:none;">
-              <label class="scratch_cfg_row" for="force_shuffle_on_scratch" style="display:none;">Scratch Shuffle erzwingen</label>
-              <input type="checkbox" id="force_shuffle_on_scratch" class="scratch_cfg_row" style="display:none;" checked>
 
               <label for="precision_mode">Precision</label>
               <select id="precision_mode" title="fp16/bf16 nur auf CUDA; MPS/CPU immer FP32">
@@ -805,9 +803,6 @@ MaTeLiX AI is a trademark/brand of TMP-SYSTEM-SERVICE GmbH.
 
               <label for="max_history_turns">Max History Turns (optional)</label>
               <input type="number" id="max_history_turns" placeholder="leer = auto" min="1">
-
-              <label for="shuffle">Shuffle</label>
-              <input type="checkbox" id="shuffle">
 
               <label for="sort_by_length">Sort by Length</label>
               <input type="checkbox" id="sort_by_length">
@@ -1590,7 +1585,6 @@ Hier folgt eine weitere Trainingszeile.</pre>
         max_seq_length: parseInt(document.getElementById("max_seq_length").value || "1024"),
         max_history_turns: maxHistoryTurns,
 
-        shuffle: document.getElementById("shuffle").checked,
         sort_by_length: document.getElementById("sort_by_length").checked,
         sort_by_similarity: document.getElementById("sort_by_similarity").checked,
         rebuild_dataset_cache: document.getElementById("rebuild_dataset_cache").checked,
@@ -1599,7 +1593,6 @@ Hier folgt eine weitere Trainingszeile.</pre>
 
         train_mode: document.getElementById("train_mode").value,
         train_from_scratch: document.getElementById("train_from_scratch").checked,
-        force_shuffle_on_scratch: document.getElementById("force_shuffle_on_scratch").checked,
         include_prompt_loss: document.getElementById("include_prompt_loss").checked,
         scratch_hidden_size: integerOrNull(document.getElementById("scratch_hidden_size").value),
         scratch_num_hidden_layers: integerOrNull(document.getElementById("scratch_num_hidden_layers").value),
