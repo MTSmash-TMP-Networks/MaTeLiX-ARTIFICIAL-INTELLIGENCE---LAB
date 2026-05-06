@@ -121,6 +121,7 @@ class TrainConfig:
 
     precision_mode: str = "auto"
     gradient_checkpointing: bool = False
+    skip_oom_microbatches: bool = True
 
     train_mode: str = "full"
     train_from_scratch: bool = False
@@ -201,6 +202,7 @@ class TrainConfig:
         self.force_template = bool(self.force_template)
         self.train_from_scratch = bool(self.train_from_scratch)
         self.include_prompt_loss = bool(self.include_prompt_loss)
+        self.skip_oom_microbatches = bool(self.skip_oom_microbatches)
         if self.scratch_hidden_size is not None:
             self.scratch_hidden_size = max(1, int(self.scratch_hidden_size))
         if self.scratch_num_hidden_layers is not None:
@@ -2028,7 +2030,25 @@ def train_epoch(
                         torch.cuda.empty_cache()
                 except Exception:
                     pass
-                raise RuntimeError(f"CUDA OOM im Trainingsschritt. Empfehlung: kleinere max_seq_length oder Batch. Original: {oom}")
+                if cfg.skip_oom_microbatches:
+                    LOGGER.warning(
+                        "CUDA OOM im Trainingsschritt (microbatch wird uebersprungen) | "
+                        "batch_size=%s max_seq_length=%s grad_accum=%s gradient_checkpointing=%s | original=%s",
+                        cfg.per_device_train_batch_size,
+                        cfg.max_seq_length,
+                        cfg.gradient_accumulation_steps,
+                        cfg.gradient_checkpointing,
+                        oom,
+                    )
+                    optimizer.zero_grad(set_to_none=True)
+                    accum_counter = 0
+                    continue
+                raise RuntimeError(
+                    "CUDA OOM im Trainingsschritt. Empfehlung: "
+                    "kleinere max_seq_length oder per_device_train_batch_size, "
+                    "ggf. gradient_checkpointing aktivieren. "
+                    f"Original: {oom}"
+                )
 
             accum_counter += 1
             should_step = accum_counter >= cfg.gradient_accumulation_steps
