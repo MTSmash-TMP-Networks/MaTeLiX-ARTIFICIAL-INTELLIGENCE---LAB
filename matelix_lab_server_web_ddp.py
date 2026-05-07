@@ -633,9 +633,25 @@ class DDPTrainingManager:
         self.lock = threading.Lock()
 
     def _merge_state_payload(self, payload: Dict[str, Any], source: str = "unknown") -> None:
+        def _safe_int(value: Any, fallback: int) -> int:
+            if value is None:
+                return fallback
+            try:
+                return int(value)
+            except (TypeError, ValueError):
+                return fallback
+
+        def _safe_float(value: Any, fallback: Optional[float]) -> Optional[float]:
+            if value is None:
+                return fallback
+            try:
+                return float(value)
+            except (TypeError, ValueError):
+                return fallback
+
         with self.state.lock:
-            self.state.step = int(payload.get("step") or self.state.step or 0)
-            self.state.micro_step = int(payload.get("micro_step") or self.state.micro_step or 0)
+            self.state.step = _safe_int(payload.get("step"), self.state.step or 0)
+            self.state.micro_step = _safe_int(payload.get("micro_step"), self.state.micro_step or 0)
 
             if payload.get("loss") is not None:
                 self.state.loss = payload.get("loss")
@@ -646,7 +662,7 @@ class DDPTrainingManager:
 
             if payload.get("tokens_per_step") is not None:
                 self.state.tokens_per_step = payload.get("tokens_per_step")
-            self.state.total_tokens = int(payload.get("total_tokens") or self.state.total_tokens or 0)
+            self.state.total_tokens = _safe_int(payload.get("total_tokens"), self.state.total_tokens or 0)
 
             self.state.last_preview = (payload.get("preview") or self.state.last_preview or "")[:4000]
             self.state.last_preview_full = (
@@ -656,18 +672,18 @@ class DDPTrainingManager:
             self.state.save_dir = payload.get("save_dir") or self.state.save_dir
             self.state.status_text = payload.get("status") or self.state.status_text
             self.state.error = payload.get("error") or self.state.error
-            self.state.world_size = int(payload.get("world_size") or self.state.world_size or 1)
+            self.state.world_size = _safe_int(payload.get("world_size"), self.state.world_size or 1)
 
             if payload.get("cuda_memory") is not None:
                 self.state.cuda_memory = payload.get("cuda_memory")
             if payload.get("scheduler_total_steps") is not None:
-                self.state.scheduler_total_steps = int(payload.get("scheduler_total_steps"))
+                self.state.scheduler_total_steps = _safe_int(payload.get("scheduler_total_steps"), self.state.scheduler_total_steps or 0)
             if payload.get("csv_total_samples_est") is not None:
-                self.state.csv_total_samples_est = int(payload.get("csv_total_samples_est"))
+                self.state.csv_total_samples_est = _safe_int(payload.get("csv_total_samples_est"), self.state.csv_total_samples_est or 0)
             if payload.get("total_samples_real") is not None:
-                self.state.total_samples_real = int(payload.get("total_samples_real"))
+                self.state.total_samples_real = _safe_int(payload.get("total_samples_real"), self.state.total_samples_real or 0)
             if payload.get("skipped_samples") is not None:
-                self.state.skipped_samples = int(payload.get("skipped_samples"))
+                self.state.skipped_samples = _safe_int(payload.get("skipped_samples"), self.state.skipped_samples or 0)
             if payload.get("producer_progress") is not None:
                 self.state.producer_progress = payload.get("producer_progress")
             if payload.get("producer_meta") is not None:
@@ -677,11 +693,11 @@ class DDPTrainingManager:
             if payload.get("scheduler_source") is not None:
                 self.state.scheduler_source = payload.get("scheduler_source")
             if payload.get("projected_samples") is not None:
-                self.state.projected_samples = int(payload.get("projected_samples"))
+                self.state.projected_samples = _safe_int(payload.get("projected_samples"), self.state.projected_samples or 0)
             if payload.get("scheduler_rel_change") is not None:
-                self.state.scheduler_rel_change = float(payload.get("scheduler_rel_change"))
+                self.state.scheduler_rel_change = _safe_float(payload.get("scheduler_rel_change"), self.state.scheduler_rel_change)
             if payload.get("warmup_steps") is not None:
-                self.state.warmup_steps = int(payload.get("warmup_steps"))
+                self.state.warmup_steps = _safe_int(payload.get("warmup_steps"), self.state.warmup_steps or 0)
             if payload.get("adaptive_scheduler") is not None:
                 self.state.adaptive_scheduler = bool(payload.get("adaptive_scheduler"))
             if payload.get("adaptive_scheduler_frozen") is not None:
