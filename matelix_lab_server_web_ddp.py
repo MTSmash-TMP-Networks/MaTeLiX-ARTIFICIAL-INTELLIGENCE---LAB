@@ -1071,16 +1071,26 @@ def get_native_fallback_chat_template(tokenizer) -> Optional[str]:
     return None
 
 
+def _is_matelix_chat_template(template: Optional[str]) -> bool:
+    if not template:
+        return False
+    t = str(template)
+    return ("<|Benutzer|>" in t) or ("<|Assistentin|>" in t) or ("<|System|>" in t)
+
+
 def prepare_tokenizer_for_matelix(tokenizer, force_template: bool = False, template_mode: str = "chat") -> bool:
     need_resize = False
-    has_native_template = bool(getattr(tokenizer, "chat_template", None))
+    current_template = getattr(tokenizer, "chat_template", None)
+    has_template = bool(current_template)
+    native_fallback = get_native_fallback_chat_template(tokenizer)
 
     if bool(force_template):
         apply_matelix_template = True
-    elif has_native_template:
+    elif has_template:
+        if native_fallback and _is_matelix_chat_template(current_template):
+            tokenizer.chat_template = native_fallback
         apply_matelix_template = False
     else:
-        native_fallback = get_native_fallback_chat_template(tokenizer)
         if native_fallback:
             tokenizer.chat_template = native_fallback
             apply_matelix_template = False
