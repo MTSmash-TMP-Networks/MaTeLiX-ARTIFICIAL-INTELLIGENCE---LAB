@@ -1056,10 +1056,36 @@ class DDPTrainingManager:
 TRAIN_MANAGER = DDPTrainingManager(TRAIN_STATE)
 
 
+def _tokenizer_has_all_tokens(tokenizer, tokens: List[str]) -> bool:
+    try:
+        vocab = tokenizer.get_vocab()
+        return all(t in vocab for t in tokens)
+    except Exception:
+        return False
+
+
+def get_native_fallback_chat_template(tokenizer) -> Optional[str]:
+    # OpenAI-style chat tokenizers (e.g. with <|start|><|message|> ... <|end|>)
+    if _tokenizer_has_all_tokens(tokenizer, ["<|start|>", "<|message|>", "<|end|>"]):
+        return """{% for message in messages %}{{ '<|start|>' + message['role'] + '<|message|>' + message['content'].strip() + '<|end|>' }}{% endfor %}{% if add_generation_prompt %}{{ '<|start|>assistant<|message|>' }}{% endif %}"""
+    return None
+
+
 def prepare_tokenizer_for_matelix(tokenizer, force_template: bool = False, template_mode: str = "chat") -> bool:
     need_resize = False
     has_native_template = bool(getattr(tokenizer, "chat_template", None))
-    apply_matelix_template = bool(force_template) or (not has_native_template)
+
+    if bool(force_template):
+        apply_matelix_template = True
+    elif has_native_template:
+        apply_matelix_template = False
+    else:
+        native_fallback = get_native_fallback_chat_template(tokenizer)
+        if native_fallback:
+            tokenizer.chat_template = native_fallback
+            apply_matelix_template = False
+        else:
+            apply_matelix_template = True
 
     if apply_matelix_template:
         if tokenizer.pad_token_id is None:
