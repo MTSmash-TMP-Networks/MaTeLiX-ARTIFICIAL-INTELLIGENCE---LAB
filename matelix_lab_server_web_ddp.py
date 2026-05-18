@@ -1227,6 +1227,7 @@ def load_inference_model(model_dir: str, device_name: str = "auto") -> Dict[str,
             effective_model_dir = str(Path(model_dir) / "merged")
 
         template_mode = "chat"
+        force_template = False
 
         template_info_path = Path(model_dir) / "template_info.json"
         if not template_info_path.exists():
@@ -1236,13 +1237,15 @@ def load_inference_model(model_dir: str, device_name: str = "auto") -> Dict[str,
             try:
                 template_info = json.loads(template_info_path.read_text(encoding="utf-8"))
                 template_mode = (template_info.get("template_mode") or "chat").strip().lower()
+                force_template = bool(template_info.get("force_template", False))
             except Exception:
                 template_mode = "chat"
+                force_template = False
 
         tok = AutoTokenizer.from_pretrained(effective_model_dir, trust_remote_code=False)
         need_resize = prepare_tokenizer_for_matelix(
             tok,
-            force_template=True,
+            force_template=force_template,
             template_mode=template_mode,
         )
 
