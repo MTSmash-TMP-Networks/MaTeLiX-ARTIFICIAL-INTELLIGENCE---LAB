@@ -1056,19 +1056,47 @@ class DDPTrainingManager:
 TRAIN_MANAGER = DDPTrainingManager(TRAIN_STATE)
 
 
+def _tokenizer_has_all_tokens(tokenizer, tokens: List[str]) -> bool:
+    try:
+        vocab = tokenizer.get_vocab()
+        return all(t in vocab for t in tokens)
+    except Exception:
+        return False
+
+
+def get_native_fallback_chat_template(tokenizer) -> Optional[str]:
+    # OpenAI-style chat tokenizers (e.g. with <|start|><|message|> ... <|end|>)
+    if _tokenizer_has_all_tokens(tokenizer, ["<|start|>", "<|message|>", "<|end|>"]):
+        return """{% for message in messages %}{{ '<|start|>' + message['role'] + '<|message|>' + message['content'].strip() + '<|end|>' }}{% endfor %}{% if add_generation_prompt %}{{ '<|start|>assistant<|message|>' }}{% endif %}"""
+    return None
+
+
 def prepare_tokenizer_for_matelix(tokenizer, force_template: bool = False, template_mode: str = "chat") -> bool:
     need_resize = False
-    if tokenizer.pad_token_id is None:
-        tokenizer.add_special_tokens({"pad_token": "<|pad|>"})
-        need_resize = True
+    has_native_template = bool(getattr(tokenizer, "chat_template", None))
 
-    added = tokenizer.add_tokens(["<|System|>", "<|Benutzer|>", "<|Assistentin|>"], special_tokens=False)
-    if added > 0:
-        need_resize = True
+    if bool(force_template):
+        apply_matelix_template = True
+    elif has_native_template:
+        apply_matelix_template = False
+    else:
+        native_fallback = get_native_fallback_chat_template(tokenizer)
+        if native_fallback:
+            tokenizer.chat_template = native_fallback
+            apply_matelix_template = False
+        else:
+            apply_matelix_template = True
 
-    tokenizer.padding_side = "left"
+    if apply_matelix_template:
+        if tokenizer.pad_token_id is None:
+            tokenizer.add_special_tokens({"pad_token": "<|pad|>"})
+            need_resize = True
 
-    if force_template or not getattr(tokenizer, "chat_template", None):
+        added = tokenizer.add_tokens(["<|System|>", "<|Benutzer|>", "<|Assistentin|>"], special_tokens=False)
+        if added > 0:
+            need_resize = True
+
+        tokenizer.padding_side = "left"
         tokenizer.chat_template = get_chat_template(template_mode)
 
     return need_resize
@@ -1227,6 +1255,7 @@ def load_inference_model(model_dir: str, device_name: str = "auto") -> Dict[str,
             effective_model_dir = str(Path(model_dir) / "merged")
 
         template_mode = "chat"
+        force_template = False
 
         template_info_path = Path(model_dir) / "template_info.json"
         if not template_info_path.exists():
@@ -1236,13 +1265,15 @@ def load_inference_model(model_dir: str, device_name: str = "auto") -> Dict[str,
             try:
                 template_info = json.loads(template_info_path.read_text(encoding="utf-8"))
                 template_mode = (template_info.get("template_mode") or "chat").strip().lower()
+                force_template = bool(template_info.get("force_template", False))
             except Exception:
                 template_mode = "chat"
+                force_template = False
 
         tok = AutoTokenizer.from_pretrained(effective_model_dir, trust_remote_code=False)
         need_resize = prepare_tokenizer_for_matelix(
             tok,
-            force_template=True,
+            force_template=force_template,
             template_mode=template_mode,
         )
 
@@ -1375,9 +1406,6 @@ def sanitize_sampling_args(
     if t <= 0.0:
         safe = {
             "max_new_tokens": max(1, int(max_new_tokens)),
-            "temperature": 0.0,
-            "top_p": 1.0,
-            "top_k": 0,
             "repetition_penalty": max(0.01, rp),
             "do_sample": False,
             "pad_token_id": pad_id,
