@@ -17,7 +17,7 @@ Local **LLM training and inference lab** with **FastAPI**, **Web UI**, **DDP / M
 
 ## Aktuelle Version
 
-**Stand: Version 8.3**
+**Stand: Version 8.4**
 
 Enthalten sind unter anderem:
 
@@ -169,13 +169,16 @@ It is designed for practical local experiments with reproducible outputs, cached
 │     ├─ training-status.png
 │     └─ browser-chat.png
 ├─ training_outputs/
+│  ├─ _dataset_cache/
+│  │  ├─ audits/
+│  │  ├─ tokenizers/
+│  │  └─ shards_*/
 │  └─ <model>_YYYY-MM-DD_HH-MM-SS/
 │     ├─ train_config.json
 │     ├─ worker_config.json
 │     ├─ training.log
 │     ├─ status.json
 │     ├─ livepreview.json
-│     ├─ dataset_cache/
 │     ├─ template_info.json
 │     ├─ merged/
 │     └─ ...
@@ -493,6 +496,14 @@ Optimizer-Steps. Cosine oder Linear Scheduling läuft anschließend fest auf die
 Plan; ein paralleler Producer und nachträgliche adaptive LR-Änderungen sind nicht
 mehr Teil des Trainingspfads.
 
+Audit, Scratch-Tokenizer und tokenisierte Shards liegen in einem gemeinsamen,
+eingabesignierten Cache unter `training_outputs/_dataset_cache`. Unveränderte
+Folgeläufe überspringen diese Arbeit vollständig. Beim ersten Aufbau verteilt
+`dataset_num_workers=-1` die Tokenisierung automatisch auf bis zu acht
+CPU-Worker; Misch-Datasets werden dabei nur einmal in den Speicher eingelesen.
+`rebuild_dataset_cache` sollte nur bewusst aktiviert werden, wenn der Cache trotz
+unveränderter Eingaben neu erzeugt werden soll.
+
 ---
 
 ## Training
@@ -518,7 +529,8 @@ curl -X POST http://127.0.0.1:8002/start \
     "dynamic_token_batching": true,
     "max_tokens_per_batch": 0,
     "token_normalized_loss": true,
-    "rebuild_dataset_cache": true,
+    "rebuild_dataset_cache": false,
+    "dataset_num_workers": -1,
     "device": "auto",
     "train_mode": "lora",
     "lora_r": 8,
@@ -777,10 +789,13 @@ curl -N -X POST http://127.0.0.1:8002/v1/chat/completions \
 | `pack_short_texts`       | kurze Texte optional split-sicher zusammenführen  |
 | `deduplicate_exact`      | normalisierte exakte Duplikate vorab entfernen    |
 | `near_duplicate_action`  | `off`, `warn` oder `exclude`                      |
+| `near_duplicate_max_shingles` | begrenzt den Near-Duplicate-Aufwand je Langtext; Standard `512` |
 | `quality_filter_mode`    | Qualitätsauffälligkeiten melden oder ausschließen |
 | `train_scratch_tokenizer` | neuen Tokenizer aus dem aktiven Scratch-Korpus lernen |
 | `max_history_turns`      | optional extra turn cap                  |
 | `rebuild_dataset_cache`  | rebuild tokenized cache                  |
+| `dataset_cache_dir`      | gemeinsamer Cache über mehrere Runs      |
+| `dataset_num_workers`    | parallele CPU-Tokenisierung; `-1` = auto |
 | `train_mode`             | `full` or `lora`                         |
 | `lora_r`                 | LoRA rank                                |
 | `lora_alpha`             | LoRA alpha                               |
@@ -870,7 +885,6 @@ Check:
 Usually solved by:
 
 * hard refresh / clear browser cache
-* `rebuild_dataset_cache=true`
 * verifying that the correct `static/index.html` is loaded
 
 ---
@@ -895,7 +909,8 @@ See `LICENSE`.
   "template_mode": "chat",
   "max_seq_length": 4096,
   "max_history_turns": null,
-  "rebuild_dataset_cache": true,
+  "rebuild_dataset_cache": false,
+  "dataset_num_workers": -1,
   "train_mode": "lora",
   "lora_r": 8,
   "lora_alpha": 16,

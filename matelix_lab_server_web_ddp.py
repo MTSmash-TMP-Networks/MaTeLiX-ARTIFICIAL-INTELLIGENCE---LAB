@@ -115,7 +115,7 @@ TRAINING_OUT_DIR.mkdir(parents=True, exist_ok=True)
 DATASETS_DIR.mkdir(parents=True, exist_ok=True)
 STATIC_DIR.mkdir(parents=True, exist_ok=True)
 
-app = FastAPI(title="MaTeLiX AI Lab (Web DDP)", version="8.3-safe-scratch-training")
+app = FastAPI(title="MaTeLiX AI Lab (Web DDP)", version="8.4-fast-dataset-build")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -364,6 +364,7 @@ class WebTrainConfig(MatelixBaseModel):
     deduplicate_exact: bool = True
     near_duplicate_action: str = "warn"
     near_duplicate_threshold: float = 0.92
+    near_duplicate_max_shingles: int = 512
     quality_filter_mode: str = "warn"
     quality_min_chars: int = 24
 
@@ -484,6 +485,9 @@ class WebTrainConfig(MatelixBaseModel):
 
     use_dataset_cache: bool = True
     rebuild_dataset_cache: bool = False
+    dataset_cache_dir: Optional[str] = None
+    dataset_num_workers: int = -1
+    dataset_tokenize_batch_size: int = 32
     tokenized_shard_size: int = 5000
 
     log_cuda_memory: bool = True
@@ -857,6 +861,11 @@ class DDPTrainingManager:
             worker_cfg["learning_rate"] = 2e-4
         worker_cfg["output_dir"] = str(run_dir)
         worker_cfg["save_dir"] = str(run_dir)
+        worker_cfg["dataset_cache_dir"] = str(
+            Path(worker_cfg.get("dataset_cache_dir") or (base_out / "_dataset_cache"))
+            .expanduser()
+            .resolve()
+        )
         worker_cfg["ddp_find_unused_parameters"] = self._resolve_find_unused(cfg, ddp_enabled, nproc, device)
         worker_cfg["force_template"] = True
 
@@ -989,6 +998,8 @@ class DDPTrainingManager:
                 f"deterministic={worker_cfg.get('deterministic', False)} "
                 f"allow_tf32={worker_cfg.get('allow_tf32', True)} "
                 f"dataloader_num_workers={worker_cfg.get('dataloader_num_workers', -1)} "
+                f"dataset_num_workers={worker_cfg.get('dataset_num_workers', -1)} "
+                f"dataset_cache_dir={worker_cfg.get('dataset_cache_dir')} "
                 f"max_history_turns={worker_cfg.get('max_history_turns')} "
                 f"log_cuda_memory={worker_cfg.get('log_cuda_memory', True)} "
                 f"cuda_memory_log_interval_steps={worker_cfg.get('cuda_memory_log_interval_steps', 25)} "
