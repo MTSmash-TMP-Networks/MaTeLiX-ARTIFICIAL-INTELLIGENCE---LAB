@@ -311,7 +311,39 @@ id,parent_id,system,Benutzer,Kontext,Assistentin
 
 ---
 
-## 3. `template_mode="dialogplus"`
+## 3. Gemischtes Dialog- und Texttraining
+
+Das erweiterte Format kombiniert strukturierte Dialoge mit freien Texten:
+
+```csv
+id,parent_id,system,Benutzer,Kontext,Assistentin,Text
+1,,Du bist ein freundlicher Chatbot.,Hallo!,,"Hallo! Wie kann ich dir helfen?",Eine freundliche Begrüßung eröffnet ein Gespräch.
+2,1,,Was ist ein Router?,,"Ein Router verbindet unterschiedliche Netzwerke.",
+3,,,,,,Ein Router leitet Datenpakete zwischen Netzwerken weiter.
+```
+
+Aktivierung:
+
+```json
+{
+  "template_mode": "dialogplus",
+  "mixed_training": true,
+  "mixed_text_column": "Text"
+}
+```
+
+Im Mischmodus kann eine Zeile einen Dialog, freien Text oder beides enthalten.
+Ein nicht leeres Feld `Text` wird als eigener Plain-Text-Trainingssample genutzt.
+Dialog und Text derselben ID beziehungsweise desselben Threads bleiben durch
+denselben Split-Schlüssel gemeinsam im Train- oder Validation-Split. Ist der
+gleiche freie Text in mehreren Threads vorhanden, werden auch diese Gruppen
+gekoppelt, sodass exakte Textduplikate nicht über beide Splits verteilt werden.
+Ist der Mischmodus ausgeschaltet, wird `Text` vollständig ignoriert und das bisherige
+sechsspaltige Dialogformat verhält sich unverändert.
+
+---
+
+## 4. `template_mode="dialogplus"`
 
 Works similar to `chat`, but uses a block-style conversation format.
 
@@ -597,6 +629,8 @@ curl -N -X POST http://127.0.0.1:8002/v1/chat/completions \
 | `model_dir`              | Hugging Face repo ID or local model path |
 | `csv_path`               | path to training CSV                     |
 | `template_mode`          | `chat`, `dialogplus`, `plain`            |
+| `mixed_training`         | Dialog- und `Text`-Samples gemeinsam trainieren |
+| `mixed_text_column`      | Name der zusätzlichen Textspalte; Standard `Text` |
 | `max_seq_length`         | maximum token window                     |
 | `max_history_turns`      | optional extra turn cap                  |
 | `rebuild_dataset_cache`  | rebuild tokenized cache                  |

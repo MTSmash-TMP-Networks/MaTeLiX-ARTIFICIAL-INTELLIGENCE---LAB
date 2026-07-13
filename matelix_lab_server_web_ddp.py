@@ -360,6 +360,8 @@ class WebTrainConfig(MatelixBaseModel):
     save_dir: Optional[str] = None
     template_mode: str = "chat"
     column_name: str = "text"
+    mixed_training: bool = False
+    mixed_text_column: str = "Text"
 
     learning_rate: float = 2e-5
     lr_schedule: str = "cosine"

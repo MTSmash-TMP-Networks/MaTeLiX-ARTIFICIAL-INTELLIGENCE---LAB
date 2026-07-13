@@ -12,6 +12,7 @@
 - pre-training CSV audit with strict mode and JSON report
 - hardware profile reporting with Volta/V100 capability detection
 - live batch-plan, padding-efficiency and worker metrics
+- optional mixed training from dialog fields and an additional `Text` column
 
 ### Changed
 
@@ -23,6 +24,7 @@
 - token telemetry reports the exact all-rank input-token count
 - FP16 gradient overflows no longer advance optimizer or scheduler step counters
 - DDP defaults to `find_unused_parameters=false` to avoid redundant graph traversal
+- mixed dialog/text samples from the same thread remain in the same data split
 
 ## 8.1.0 - 2026-07-13
 

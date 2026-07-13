@@ -89,6 +89,8 @@ class TrainConfig:
     device: str = "cuda"
     template_mode: str = "chat"
     column_name: str = "text"
+    mixed_training: bool = False
+    mixed_text_column: str = "Text"
 
     learning_rate: float = 2e-4
     lr_schedule: str = "cosine"
@@ -215,6 +217,8 @@ class TrainConfig:
         self.adaptive_scheduler_never_increase_lr = bool(self.adaptive_scheduler_never_increase_lr)
         self.adaptive_scheduler_only_extend_steps = bool(self.adaptive_scheduler_only_extend_steps)
         self.seed = int(self.seed)
+        self.mixed_training = bool(self.mixed_training)
+        self.mixed_text_column = str(self.mixed_text_column or "Text").strip() or "Text"
         self.dynamic_token_batching = bool(self.dynamic_token_batching)
         self.max_tokens_per_batch = max(0, int(self.max_tokens_per_batch))
         self.max_samples_per_batch = max(0, int(self.max_samples_per_batch))
@@ -590,6 +594,12 @@ class StructuredChatSample:
     split_key: str
 
 
+@dataclass
+class PlainTextSample:
+    text: str
+    split_key: str
+
+
 def column_iter(csv_path: str, column_name: str) -> Iterator[str]:
     with open(csv_path, "r", encoding="utf-8") as f:
         reader = csv.DictReader(f)
@@ -613,6 +623,29 @@ def _load_thread_rows(csv_path: str) -> Tuple[List[Dict[str, Any]], Dict[str, Di
     return rows, id2row
 
 
+def _resolve_root_and_depth(
+    rid: str, id2row: Dict[str, Dict[str, Any]],
+) -> Tuple[str, int]:
+    cur = id2row.get(rid)
+    if not cur:
+        return "", 0
+    depth = 0
+    seen: set[str] = set()
+    while cur:
+        current_id = normalize_id(cur.get("id"))
+        if not current_id:
+            return "", depth
+        if current_id in seen:
+            return min(seen), depth
+        seen.add(current_id)
+        parent_id = normalize_id(cur.get("parent_id"))
+        if not parent_id or parent_id not in id2row:
+            return current_id, depth
+        cur = id2row[parent_id]
+        depth += 1
+    return rid, depth
+
+
 def _iter_candidate_chains(csv_path: str) -> Iterator[Tuple[str, List[Dict[str, Any]]]]:
     rows, id2row = _load_thread_rows(csv_path)
     candidates = [r for r in rows if (r.get("Assistentin") or "").strip() and r.get("id")]
@@ -623,16 +656,7 @@ def _iter_candidate_chains(csv_path: str) -> Iterator[Tuple[str, List[Dict[str, 
 
     @lru_cache(maxsize=None)
     def root_and_depth(rid: str) -> Tuple[str, int]:
-        depth = 0
-        cur = id2row.get(rid)
-        if not cur:
-            return ("", 0)
-        while True:
-            pid = cur.get("parent_id", "")
-            if not pid or pid not in id2row:
-                return (cur["id"], depth)
-            cur = id2row[pid]
-            depth += 1
+        return _resolve_root_and_depth(rid, id2row)
 
     threads: Dict[str, List[Tuple[int, int, Dict[str, Any]]]] = {}
     for r in candidates:
@@ -700,6 +724,87 @@ def dialogplus_structured_iter(csv_path: str) -> Iterator[StructuredChatSample]:
         yield item
 
 
+def build_mixed_split_groups(csv_path: str, column_name: str) -> Dict[str, str]:
+    rows, id2row = _load_thread_rows(csv_path)
+    parents: Dict[str, str] = {}
+
+    def find(node: str) -> str:
+        parents.setdefault(node, node)
+        while parents[node] != node:
+            parents[node] = parents[parents[node]]
+            node = parents[node]
+        return node
+
+    def union(left: str, right: str) -> None:
+        left_root, right_root = find(left), find(right)
+        if left_root != right_root:
+            parents[max(left_root, right_root)] = min(left_root, right_root)
+
+    for row in rows:
+        text = (row.get(column_name) or "").strip()
+        if not text:
+            continue
+        text_node = "text:" + hashlib.sha256(text.encode("utf-8")).hexdigest()
+        find(text_node)
+        rid = normalize_id(row.get("id"))
+        root_id, _ = _resolve_root_and_depth(rid, id2row) if rid else ("", 0)
+        if root_id:
+            union(f"thread:{root_id}", text_node)
+
+    components: Dict[str, List[str]] = {}
+    for node in parents:
+        components.setdefault(find(node), []).append(node)
+
+    node_to_group: Dict[str, str] = {}
+    for nodes in components.values():
+        payload = "\0".join(sorted(nodes)).encode("utf-8")
+        group_key = "mixed:" + hashlib.sha256(payload).hexdigest()
+        for node in nodes:
+            node_to_group[node] = group_key
+    return node_to_group
+
+
+def remap_structured_split_keys(
+    samples: Iterator[StructuredChatSample], split_groups: Dict[str, str],
+) -> Iterator[StructuredChatSample]:
+    for sample in samples:
+        sample.split_key = split_groups.get(sample.split_key, sample.split_key)
+        yield sample
+
+
+def mixed_text_iter(
+    csv_path: str, column_name: str, split_groups: Optional[Dict[str, str]] = None,
+) -> Iterator[PlainTextSample]:
+    rows, id2row = _load_thread_rows(csv_path)
+    split_groups = split_groups or {}
+    for row in rows:
+        text = (row.get(column_name) or "").strip()
+        if not text:
+            continue
+        text_node = "text:" + hashlib.sha256(text.encode("utf-8")).hexdigest()
+        rid = normalize_id(row.get("id"))
+        root_id, _ = _resolve_root_and_depth(rid, id2row) if rid else ("", 0)
+        thread_node = f"thread:{root_id}" if root_id else ""
+        split_key = split_groups.get(
+            text_node,
+            split_groups.get(thread_node, thread_node or text_node),
+        )
+        yield PlainTextSample(text=text, split_key=split_key)
+
+
+def interleave_examples(*iterables: Iterator[Any]) -> Iterator[Any]:
+    active = [iter(iterator) for iterator in iterables]
+    while active:
+        remaining = []
+        for iterator in active:
+            try:
+                yield next(iterator)
+                remaining.append(iterator)
+            except StopIteration:
+                continue
+        active = remaining
+
+
 def _build_role_block(role: str, content: str, template_mode: str, eos_token: str) -> str:
     content = (content or "").strip()
     if role == "system":
@@ -733,14 +838,57 @@ def _csv_has_column(csv_path: str, column_name: str) -> bool:
         return False
 
 
+STRUCTURED_CSV_COLUMNS = (
+    "id", "parent_id", "system", "Benutzer", "Kontext", "Assistentin",
+)
+
+
+def _mixed_dataset_errors(
+    csv_path: str, text_column: str, require_text_sample: bool = False,
+) -> List[str]:
+    with open(csv_path, "r", encoding="utf-8") as handle:
+        reader = csv.DictReader(handle)
+        fieldnames = set(reader.fieldnames or [])
+        required = (*STRUCTURED_CSV_COLUMNS, text_column)
+        missing = [name for name in required if name not in fieldnames]
+        if missing:
+            return ["CSV-Spalten fehlen: " + ", ".join(missing)]
+        if require_text_sample and not any(
+            (row.get(text_column) or "").strip() for row in reader
+        ):
+            return [f"Keine nutzbaren Texte in {text_column}"]
+    return []
+
+
 def build_examples_stream(cfg: TrainConfig) -> Iterator[Any]:
-    if cfg.template_mode == "chat":
-        if _csv_has_column(cfg.csv_path, "id") and _csv_has_column(cfg.csv_path, "Assistentin"):
-            return chat_structured_iter(cfg.csv_path)
-        return column_iter(cfg.csv_path, cfg.column_name)
-    if cfg.template_mode == "dialogplus":
-        if _csv_has_column(cfg.csv_path, "id") and _csv_has_column(cfg.csv_path, "Assistentin"):
-            return dialogplus_structured_iter(cfg.csv_path)
+    if cfg.template_mode in {"chat", "dialogplus"}:
+        if cfg.mixed_training:
+            errors = _mixed_dataset_errors(cfg.csv_path, cfg.mixed_text_column)
+            if errors:
+                raise ValueError(
+                    "Gemischtes Training ist nicht möglich: " + "; ".join(errors)
+                )
+        has_structured_columns = (
+            _csv_has_column(cfg.csv_path, "id")
+            and _csv_has_column(cfg.csv_path, "Assistentin")
+        )
+        if has_structured_columns:
+            chat_examples = (
+                chat_structured_iter(cfg.csv_path)
+                if cfg.template_mode == "chat"
+                else dialogplus_structured_iter(cfg.csv_path)
+            )
+            if cfg.mixed_training:
+                split_groups = build_mixed_split_groups(
+                    cfg.csv_path, cfg.mixed_text_column,
+                )
+                return interleave_examples(
+                    remap_structured_split_keys(chat_examples, split_groups),
+                    mixed_text_iter(
+                        cfg.csv_path, cfg.mixed_text_column, split_groups,
+                    ),
+                )
+            return chat_examples
         return column_iter(cfg.csv_path, cfg.column_name)
     return column_iter(cfg.csv_path, cfg.column_name)
 
@@ -782,15 +930,21 @@ def pack_dialog_from_blocks_strict(
 
 
 def tokenize_example(
-    item: StructuredChatSample | str,
+    item: StructuredChatSample | PlainTextSample | str,
     tokenizer,
     max_seq_length: int,
     template_mode: str,
     max_history_turns: Optional[int],
     include_prompt_loss: bool = False,
 ) -> Optional[Dict[str, Any]]:
-    if isinstance(item, str):
-        ids = tokenizer(item, add_special_tokens=False)["input_ids"]
+    if isinstance(item, (str, PlainTextSample)):
+        text = item if isinstance(item, str) else item.text
+        split_key = (
+            "text:" + hashlib.sha256(text.strip().encode("utf-8")).hexdigest()
+            if isinstance(item, str)
+            else item.split_key
+        )
+        ids = tokenizer(text, add_special_tokens=False)["input_ids"]
         if len(ids) > max_seq_length:
             return None
         labels = ids.copy()
@@ -803,7 +957,7 @@ def tokenize_example(
             "attention_mask": [1] * len(ids),
             "labels": labels,
             "seq_len": len(ids),
-            "split_key": "text:" + hashlib.sha256(item.strip().encode("utf-8")).hexdigest(),
+            "split_key": split_key,
         }
 
     prompt_blocks: List[List[int]] = []
@@ -872,6 +1026,8 @@ def count_examples_fast(cfg: TrainConfig) -> int:
                 asst = (row.get("Assistentin") or "").strip()
                 if rid and asst:
                     count += 1
+                if cfg.mixed_training and (row.get(cfg.mixed_text_column) or "").strip():
+                    count += 1
         else:
             for row in reader:
                 txt = (row.get(cfg.column_name) or "").strip()
@@ -884,6 +1040,8 @@ def audit_dataset(cfg: TrainConfig, outdir: Path, is_main: bool) -> Dict[str, An
     report: Dict[str, Any] = {
         "csv_path": str(Path(cfg.csv_path).expanduser().resolve()),
         "template_mode": cfg.template_mode,
+        "mixed_training": bool(cfg.mixed_training),
+        "mixed_text_column": cfg.mixed_text_column,
         "errors": [],
         "warnings": [],
     }
@@ -895,36 +1053,70 @@ def audit_dataset(cfg: TrainConfig, outdir: Path, is_main: bool) -> Dict[str, An
             cfg.template_mode in {"chat", "dialogplus"}
             and {"id", "Assistentin"}.issubset(fieldnames)
         )
+        mixed_column_present = cfg.mixed_text_column in fieldnames
+        missing_mixed_columns = [
+            name
+            for name in (*STRUCTURED_CSV_COLUMNS, cfg.mixed_text_column)
+            if name not in fieldnames
+        ]
+        mixed_training_ready = bool(
+            cfg.mixed_training and not missing_mixed_columns
+        )
+        report["mixed_text_column_present"] = mixed_column_present
+        report["mixed_training_ready"] = mixed_training_ready
+        if cfg.mixed_training and missing_mixed_columns:
+            report["errors"].append(
+                "CSV-Spalten für gemischtes Training fehlen: "
+                + ", ".join(missing_mixed_columns)
+            )
         row_count = 0
 
-        if is_threaded:
+        if is_threaded or cfg.mixed_training:
             seen_ids: set[str] = set()
             seen_pairs: set[str] = set()
             parent_by_id: Dict[str, str] = {}
             duplicate_ids = duplicate_pairs = 0
             missing_id = missing_user = missing_answer = 0
+            usable_assistant_samples = 0
+            mixed_text_samples = mixed_text_duplicates = 0
+            seen_mixed_texts: set[str] = set()
             for row in reader:
                 row_count += 1
                 rid = normalize_id(row.get("id"))
                 parent = normalize_id(row.get("parent_id"))
                 user = (row.get("Benutzer") or "").strip()
                 answer = (row.get("Assistentin") or "").strip()
-                if not rid:
+                mixed_text = (
+                    (row.get(cfg.mixed_text_column) or "").strip()
+                    if cfg.mixed_training and mixed_column_present
+                    else ""
+                )
+                text_only_row = bool(mixed_text and not answer)
+                if not rid and not text_only_row:
                     missing_id += 1
                 else:
-                    if rid in seen_ids:
-                        duplicate_ids += 1
-                    seen_ids.add(rid)
-                    parent_by_id[rid] = parent
-                if not user:
+                    if rid:
+                        if rid in seen_ids:
+                            duplicate_ids += 1
+                        seen_ids.add(rid)
+                        parent_by_id[rid] = parent
+                if not user and not text_only_row:
                     missing_user += 1
-                if not answer:
+                if not answer and not mixed_text:
                     missing_answer += 1
+                if rid and answer:
+                    usable_assistant_samples += 1
                 if user and answer:
                     pair_hash = hashlib.sha256(f"{user}\0{answer}".encode("utf-8")).hexdigest()
                     if pair_hash in seen_pairs:
                         duplicate_pairs += 1
                     seen_pairs.add(pair_hash)
+                if mixed_text:
+                    mixed_text_samples += 1
+                    text_hash = hashlib.sha256(mixed_text.encode("utf-8")).hexdigest()
+                    if text_hash in seen_mixed_texts:
+                        mixed_text_duplicates += 1
+                    seen_mixed_texts.add(text_hash)
 
             cycles = 0
             visit_state: Dict[str, int] = {}
@@ -943,13 +1135,15 @@ def audit_dataset(cfg: TrainConfig, outdir: Path, is_main: bool) -> Dict[str, An
                     visit_state[node] = 2
 
             report.update({
-                "usable_assistant_samples": row_count - missing_answer,
+                "usable_assistant_samples": usable_assistant_samples,
                 "missing_id": missing_id,
                 "missing_user": missing_user,
                 "missing_answer": missing_answer,
                 "duplicate_ids": duplicate_ids,
                 "duplicate_prompt_answer_pairs": duplicate_pairs,
                 "thread_cycles": cycles,
+                "usable_mixed_text_samples": mixed_text_samples,
+                "duplicate_mixed_text_samples": mixed_text_duplicates,
             })
             if duplicate_ids:
                 report["errors"].append(f"{duplicate_ids} doppelte IDs")
@@ -963,6 +1157,15 @@ def audit_dataset(cfg: TrainConfig, outdir: Path, is_main: bool) -> Dict[str, An
                 report["warnings"].append(f"{missing_answer} Zeilen ohne Assistentinnen-Antwort")
             if duplicate_pairs:
                 report["warnings"].append(f"{duplicate_pairs} exakte Prompt-Antwort-Duplikate")
+            if mixed_text_duplicates:
+                report["warnings"].append(
+                    f"{mixed_text_duplicates} exakte Duplikate in {cfg.mixed_text_column}"
+                )
+            if cfg.mixed_training and mixed_text_samples == 0:
+                report["mixed_training_ready"] = False
+                report["errors"].append(
+                    f"Keine nutzbaren Texte in {cfg.mixed_text_column}"
+                )
         else:
             if cfg.column_name not in fieldnames:
                 report["errors"].append(f"Textspalte fehlt: {cfg.column_name}")
@@ -1017,6 +1220,8 @@ def get_first_raw_example_preview(cfg: TrainConfig) -> Tuple[str, str]:
                 parts.append(f"[{t.role.upper()}]\n{t.content}")
             parts.append(f"[TARGET_ASSISTANT]\n{first_item.target_answer}")
             preview = "\n\n".join(parts)
+        elif isinstance(first_item, PlainTextSample):
+            preview = first_item.text
         else:
             preview = str(first_item)
     except Exception:
@@ -1037,6 +1242,8 @@ def compute_shard_cache_dir(cfg: TrainConfig) -> Path:
         "model_dir": str(Path(cfg.model_dir).expanduser().resolve()),
         "template_mode": cfg.template_mode,
         "column_name": cfg.column_name,
+        "mixed_training": bool(cfg.mixed_training),
+        "mixed_text_column": cfg.mixed_text_column,
         "max_seq_length": int(cfg.max_seq_length),
         "sort_by_length": bool(cfg.sort_by_length),
         "max_history_turns": cfg.max_history_turns,
@@ -1200,6 +1407,8 @@ def shard_producer_process_main(cfg_dict: Dict[str, Any], cache_dir_str: str) ->
             ngram_max_tokens_per_text=cfg.ngram_max_tokens_per_text,
             template_mode=cfg.template_mode,
             column_name=cfg.column_name,
+            mixed_training=cfg.mixed_training,
+            mixed_text_column=cfg.mixed_text_column,
             csv_path=cfg.csv_path,
         )
 
@@ -1898,6 +2107,8 @@ def build_model_and_tokenizer(cfg: TrainConfig, ctx: DistContext):
         ngram_max_tokens_per_text=cfg.ngram_max_tokens_per_text,
         template_mode=cfg.template_mode,
         column_name=cfg.column_name,
+        mixed_training=cfg.mixed_training,
+        mixed_text_column=cfg.mixed_text_column,
         csv_path=cfg.csv_path,
     )
 
@@ -2944,6 +3155,8 @@ def save_model_artifacts(
 
     template_info = {
         "template_mode": cfg.template_mode,
+        "mixed_training": bool(cfg.mixed_training),
+        "mixed_text_column": cfg.mixed_text_column,
         "force_template": cfg.force_template,
         "chat_template": getattr(tokenizer, "chat_template", "") or "",
         "special_tokens": {
@@ -3232,11 +3445,27 @@ def main() -> int:
                 dataset_audit_report = json.loads(
                     (outdir / "dataset_audit.json").read_text(encoding="utf-8")
                 )
+            if cfg.mixed_training and not dataset_audit_report.get("mixed_training_ready"):
+                raise RuntimeError(
+                    "Gemischtes Training kann nicht gestartet werden: "
+                    + "; ".join(dataset_audit_report.get("errors") or ["Dataset nicht kompatibel"])
+                )
             if cfg.dataset_audit_strict and dataset_audit_report.get("errors"):
                 raise RuntimeError(
                     "Dataset-Audit fehlgeschlagen: " + "; ".join(dataset_audit_report["errors"])
                 )
         else:
+            if cfg.mixed_training:
+                errors = _mixed_dataset_errors(
+                    cfg.csv_path,
+                    cfg.mixed_text_column,
+                    require_text_sample=True,
+                )
+                if errors:
+                    raise RuntimeError(
+                        "Gemischtes Training kann nicht gestartet werden: "
+                        + "; ".join(errors)
+                    )
             dataset_audit_report = {"enabled": False, "ok": True}
 
         model, tokenizer, fp16, bf16, ngram_state = build_model_and_tokenizer(cfg, ctx)
