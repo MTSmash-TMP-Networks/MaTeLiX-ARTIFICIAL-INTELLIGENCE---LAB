@@ -17,7 +17,7 @@ Local **LLM training and inference lab** with **FastAPI**, **Web UI**, **DDP / M
 
 ## Aktuelle Version
 
-**Stand: Version 8.1**
+**Stand: Version 8.2**
 
 Enthalten sind unter anderem:
 
@@ -29,6 +29,12 @@ Enthalten sind unter anderem:
 - deterministischer Train/Validation-Split ohne Datenüberschneidung
 - DDP-synchronisierte Validation Loss und Perplexity
 - Early Stopping und automatische Speicherung von `best_model`
+- dynamische Batches mit festem Tokenbudget statt starrer Samplezahl
+- DDP-ausgerichteter Batchplan ohne verworfene Accumulation-Reste
+- global tokennormalisierte Gradient Accumulation
+- automatische DataLoader-Worker und Prefetching
+- optionales NEFTune und Dataset-Audit vor dem Modellstart
+- Hardware-Profilierung mit V100-/Volta-Erkennung
 - OpenAI-kompatible `/v1/*` API und Web-UI
 
 ---
@@ -45,6 +51,7 @@ Enthalten sind unter anderem:
 - [Dataset Formats](#dataset-formats)
 - [Strict Whole-Turn Packing](#strict-whole-turn-packing)
 - [Training](#training)
+- [Profil für 4× NVIDIA V100 32 GB](#profil-für-4-nvidia-v100-32-gb)
 - [Inference](#inference)
 - [OpenAI-compatible API](#openai-compatible-api)
 - [Important Parameters](#important-parameters)
@@ -361,12 +368,15 @@ curl -X POST http://127.0.0.1:8002/start \
     "template_mode": "chat",
     "learning_rate": 0.0002,
     "lr_schedule": "cosine",
-    "per_device_train_batch_size": 1,
-    "gradient_accumulation_steps": 8,
+    "per_device_train_batch_size": 2,
+    "gradient_accumulation_steps": 4,
     "num_train_epochs": 3,
     "max_seq_length": 1024,
     "max_history_turns": null,
     "sort_by_length": true,
+    "dynamic_token_batching": true,
+    "max_tokens_per_batch": 0,
+    "token_normalized_loss": true,
     "rebuild_dataset_cache": true,
     "device": "auto",
     "train_mode": "lora",
@@ -423,6 +433,44 @@ auch bei DDP und nach einem Resume identisch.
 Nach jeder Epoche werden die global über alle Ranks gewichtete Validation Loss
 und Perplexity berechnet. Das beste Modell liegt anschließend in `best_model/`.
 `early_stopping_patience: 0` deaktiviert Early Stopping.
+
+### Profil für 4× NVIDIA V100 32 GB
+
+Bei vier sichtbaren CUDA-GPUs aktiviert der Server DDP automatisch. V100/Volta
+verwendet FP16-Tensor-Cores, aber weder natives BF16 noch TF32. Der Worker erkennt
+dies automatisch und deaktiviert den wirkungslosen TF32-Pfad. Ein robuster
+Ausgangspunkt für LoRA-SFT ist:
+
+```json
+{
+  "device": "auto",
+  "ddp_enabled": true,
+  "nproc_per_node": 4,
+  "precision_mode": "fp16",
+  "max_seq_length": 4096,
+  "per_device_train_batch_size": 2,
+  "gradient_accumulation_steps": 4,
+  "dynamic_token_batching": true,
+  "max_tokens_per_batch": 0,
+  "max_samples_per_batch": 0,
+  "sort_by_length": true,
+  "token_normalized_loss": true,
+  "dataloader_num_workers": -1,
+  "prefetch_factor": 4,
+  "gradient_checkpointing": false,
+  "cuda_empty_cache_interval_steps": 0,
+  "neftune_noise_alpha": 0.0
+}
+```
+
+`max_tokens_per_batch: 0` berechnet das Budget pro GPU als
+`max_seq_length × per_device_train_batch_size`. Der Batchplan gruppiert ähnlich
+lange Samples, richtet die Zahl der Batches an vier Ranks und der Gradient
+Accumulation aus und zeigt die gemessene Padding-Effizienz im Dashboard. Bei OOM
+zuerst das Tokenbudget senken oder Gradient Checkpointing aktivieren. Wenn noch
+viel VRAM frei ist, das Tokenbudget schrittweise erhöhen. NEFTune ist bewusst
+standardmäßig aus und sollte nur als validiertes Experiment, zum Beispiel mit
+`neftune_noise_alpha: 5`, gegen denselben Validation-Split getestet werden.
 
 ### Status / Logs / Preview
 
@@ -566,6 +614,14 @@ curl -N -X POST http://127.0.0.1:8002/v1/chat/completions \
 | `early_stopping_min_delta` | minimale relevante Loss-Verbesserung   |
 | `precision_mode`         | `auto`, `fp32`, `fp16`, `bf16`           |
 | `gradient_checkpointing` | reduces VRAM usage, slower               |
+| `dynamic_token_batching` | Batchgröße an ein Tokenbudget anpassen   |
+| `max_tokens_per_batch`   | maximales gepaddetes Tokenbudget pro GPU; `0` = auto |
+| `max_samples_per_batch`  | zusätzliche Sample-Obergrenze; `0` = auto |
+| `token_normalized_loss`  | Loss über alle Ziel-Tokens und Ranks korrekt gewichten |
+| `dataloader_num_workers` | Worker je Rank; `-1` = automatisch       |
+| `prefetch_factor`        | vorgeladene Batches je DataLoader-Worker |
+| `neftune_noise_alpha`    | optionales NEFTune; `0` = deaktiviert    |
+| `dataset_audit_strict`   | bei strukturellen Dataset-Fehlern abbrechen |
 
 ---
 
@@ -576,7 +632,7 @@ Example:
 ```json
 {
   "ddp_enabled": true,
-  "nproc_per_node": 2,
+  "nproc_per_node": 4,
   "master_addr": "127.0.0.1",
   "master_port": 29500
 }
@@ -651,16 +707,26 @@ See `LICENSE`.
 
 ---
 
-## Recommended Defaults
+## Recommended Defaults (4× V100 32 GB)
 
 ```json
 {
   "template_mode": "chat",
-  "max_seq_length": 1024,
+  "max_seq_length": 4096,
   "max_history_turns": null,
   "rebuild_dataset_cache": true,
   "train_mode": "lora",
   "lora_r": 8,
-  "lora_alpha": 16
+  "lora_alpha": 16,
+  "precision_mode": "fp16",
+  "per_device_train_batch_size": 2,
+  "gradient_accumulation_steps": 4,
+  "dynamic_token_batching": true,
+  "max_tokens_per_batch": 0,
+  "dataloader_num_workers": -1,
+  "prefetch_factor": 4,
+  "gradient_checkpointing": false,
+  "val_split": 0.05,
+  "early_stopping_patience": 3
 }
 ```

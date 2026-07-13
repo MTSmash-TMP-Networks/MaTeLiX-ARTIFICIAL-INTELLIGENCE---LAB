@@ -99,23 +99,29 @@ class TrainConfig:
     lr_adjust_interval_steps: int = 25
     lr_adjust_min_change: float = 0.05
 
-    adaptive_scheduler: bool = True
+    adaptive_scheduler: bool = False
     adaptive_scheduler_freeze_on_producer_done: bool = True
     adaptive_scheduler_never_increase_lr: bool = True
     adaptive_scheduler_only_extend_steps: bool = True
 
-    per_device_train_batch_size: int = 1
-    gradient_accumulation_steps: int = 8
+    per_device_train_batch_size: int = 2
+    gradient_accumulation_steps: int = 4
     num_train_epochs: float = 3.0
     max_steps: Optional[int] = None
-    max_seq_length: int = 1024
+    max_seq_length: int = 4096
     chunk_size: Optional[int] = None
     max_history_turns: Optional[int] = None
 
     sort_by_length: bool = True
     sort_by_similarity: bool = False
     fixed_padding: bool = False
-    dataloader_num_workers: int = 0
+    dynamic_token_batching: bool = True
+    max_tokens_per_batch: int = 0
+    max_samples_per_batch: int = 0
+    shuffle_batches: bool = True
+    pad_batches_for_ddp: bool = True
+    token_normalized_loss: bool = True
+    dataloader_num_workers: int = -1
     max_grad_norm: float = 1.0
     weight_decay: float = 0.01
 
@@ -137,6 +143,10 @@ class TrainConfig:
     lora_dropout: float = 0.05
     lora_target_modules: Optional[List[str]] = None
     merge_lora_on_save: bool = True
+    neftune_noise_alpha: float = 0.0
+
+    dataset_audit: bool = True
+    dataset_audit_strict: bool = False
 
     log_every_steps: int = 10
     save_every_epoch: bool = True
@@ -148,7 +158,7 @@ class TrainConfig:
     early_stopping_patience: int = 3
     early_stopping_min_delta: float = 0.0
 
-    ddp_find_unused_parameters: bool = True
+    ddp_find_unused_parameters: bool = False
     ddp_static_graph: bool = False
     ddp_broadcast_buffers: bool = False
     ddp_timeout_minutes: int = 30
@@ -158,7 +168,7 @@ class TrainConfig:
     allow_tf32: bool = True
     use_ngrams: bool = False
     force_template: bool = True
-    prefetch_factor: int = 2
+    prefetch_factor: int = 4
     persistent_workers: bool = True
 
     use_dataset_cache: bool = True
@@ -205,6 +215,12 @@ class TrainConfig:
         self.adaptive_scheduler_never_increase_lr = bool(self.adaptive_scheduler_never_increase_lr)
         self.adaptive_scheduler_only_extend_steps = bool(self.adaptive_scheduler_only_extend_steps)
         self.seed = int(self.seed)
+        self.dynamic_token_batching = bool(self.dynamic_token_batching)
+        self.max_tokens_per_batch = max(0, int(self.max_tokens_per_batch))
+        self.max_samples_per_batch = max(0, int(self.max_samples_per_batch))
+        self.shuffle_batches = bool(self.shuffle_batches)
+        self.pad_batches_for_ddp = bool(self.pad_batches_for_ddp)
+        self.token_normalized_loss = bool(self.token_normalized_loss)
         self.dataloader_num_workers = int(self.dataloader_num_workers)
         self.fixed_padding = bool(self.fixed_padding)
         self.ddp_timeout_minutes = int(self.ddp_timeout_minutes)
@@ -223,6 +239,9 @@ class TrainConfig:
         self.save_every_epoch = bool(self.save_every_epoch)
         self.keep_last_k_checkpoints = max(1, int(self.keep_last_k_checkpoints))
         self.resume = str(self.resume).strip() if self.resume else None
+        self.neftune_noise_alpha = max(0.0, float(self.neftune_noise_alpha))
+        self.dataset_audit = bool(self.dataset_audit)
+        self.dataset_audit_strict = bool(self.dataset_audit_strict)
         self.val_split = min(0.5, max(0.0, float(self.val_split)))
         self.split_seed = int(self.split_seed)
         self.validate_every_epoch = bool(self.validate_every_epoch)
@@ -861,6 +880,125 @@ def count_examples_fast(cfg: TrainConfig) -> int:
     return count
 
 
+def audit_dataset(cfg: TrainConfig, outdir: Path, is_main: bool) -> Dict[str, Any]:
+    report: Dict[str, Any] = {
+        "csv_path": str(Path(cfg.csv_path).expanduser().resolve()),
+        "template_mode": cfg.template_mode,
+        "errors": [],
+        "warnings": [],
+    }
+    with open(cfg.csv_path, "r", encoding="utf-8") as handle:
+        reader = csv.DictReader(handle)
+        fieldnames = reader.fieldnames or []
+        report["columns"] = fieldnames
+        is_threaded = (
+            cfg.template_mode in {"chat", "dialogplus"}
+            and {"id", "Assistentin"}.issubset(fieldnames)
+        )
+        row_count = 0
+
+        if is_threaded:
+            seen_ids: set[str] = set()
+            seen_pairs: set[str] = set()
+            parent_by_id: Dict[str, str] = {}
+            duplicate_ids = duplicate_pairs = 0
+            missing_id = missing_user = missing_answer = 0
+            for row in reader:
+                row_count += 1
+                rid = normalize_id(row.get("id"))
+                parent = normalize_id(row.get("parent_id"))
+                user = (row.get("Benutzer") or "").strip()
+                answer = (row.get("Assistentin") or "").strip()
+                if not rid:
+                    missing_id += 1
+                else:
+                    if rid in seen_ids:
+                        duplicate_ids += 1
+                    seen_ids.add(rid)
+                    parent_by_id[rid] = parent
+                if not user:
+                    missing_user += 1
+                if not answer:
+                    missing_answer += 1
+                if user and answer:
+                    pair_hash = hashlib.sha256(f"{user}\0{answer}".encode("utf-8")).hexdigest()
+                    if pair_hash in seen_pairs:
+                        duplicate_pairs += 1
+                    seen_pairs.add(pair_hash)
+
+            cycles = 0
+            visit_state: Dict[str, int] = {}
+            for rid in parent_by_id:
+                if visit_state.get(rid, 0) == 2:
+                    continue
+                path: List[str] = []
+                cur = rid
+                while cur and cur in parent_by_id and visit_state.get(cur, 0) == 0:
+                    visit_state[cur] = 1
+                    path.append(cur)
+                    cur = parent_by_id.get(cur, "")
+                if cur and visit_state.get(cur, 0) == 1:
+                    cycles += 1
+                for node in path:
+                    visit_state[node] = 2
+
+            report.update({
+                "usable_assistant_samples": row_count - missing_answer,
+                "missing_id": missing_id,
+                "missing_user": missing_user,
+                "missing_answer": missing_answer,
+                "duplicate_ids": duplicate_ids,
+                "duplicate_prompt_answer_pairs": duplicate_pairs,
+                "thread_cycles": cycles,
+            })
+            if duplicate_ids:
+                report["errors"].append(f"{duplicate_ids} doppelte IDs")
+            if cycles:
+                report["errors"].append(f"{cycles} zyklische Parent-Ketten")
+            if missing_id:
+                report["warnings"].append(f"{missing_id} Zeilen ohne ID")
+            if missing_user:
+                report["warnings"].append(f"{missing_user} Zeilen ohne Benutzertext")
+            if missing_answer:
+                report["warnings"].append(f"{missing_answer} Zeilen ohne Assistentinnen-Antwort")
+            if duplicate_pairs:
+                report["warnings"].append(f"{duplicate_pairs} exakte Prompt-Antwort-Duplikate")
+        else:
+            if cfg.column_name not in fieldnames:
+                report["errors"].append(f"Textspalte fehlt: {cfg.column_name}")
+            seen_values: set[str] = set()
+            usable_count = empty_count = duplicate_count = 0
+            for row in reader:
+                row_count += 1
+                value = (row.get(cfg.column_name) or "").strip()
+                if not value:
+                    empty_count += 1
+                    continue
+                usable_count += 1
+                if value in seen_values:
+                    duplicate_count += 1
+                seen_values.add(value)
+            report.update({
+                "usable_text_samples": usable_count,
+                "empty_text_samples": empty_count,
+                "duplicate_text_samples": duplicate_count,
+            })
+            if not usable_count:
+                report["errors"].append("Keine nutzbaren Textsamples")
+            if duplicate_count:
+                report["warnings"].append(f"{duplicate_count} exakte Textduplikate")
+
+    report["rows"] = row_count
+
+    report["ok"] = not report["errors"]
+    if is_main:
+        (outdir / "dataset_audit.json").write_text(
+            json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+        LOGGER.info("Dataset-Audit: %s", json.dumps(report, ensure_ascii=False))
+    return report
+
+
 def get_first_raw_example_preview(cfg: TrainConfig) -> Tuple[str, str]:
     try:
         examples_iter = build_examples_stream(cfg)
@@ -1261,6 +1399,18 @@ def wait_for_first_shard(cache_dir: Path, poll_sec: float = 1.0) -> None:
         time.sleep(poll_sec)
 
 
+def wait_for_producer_complete(cache_dir: Path, poll_sec: float = 0.5) -> None:
+    while True:
+        error_file = producer_error_path(cache_dir)
+        if error_file.exists():
+            raise RuntimeError(error_file.read_text(encoding="utf-8"))
+        if producer_done_path(cache_dir).exists():
+            return
+        if SHUTDOWN.stop:
+            raise RuntimeError("Tokenisierung durch Stop-Signal abgebrochen.")
+        time.sleep(poll_sec)
+
+
 def read_json_if_exists(path: Path) -> Optional[Dict[str, Any]]:
     try:
         if path.exists():
@@ -1284,6 +1434,31 @@ def cuda_memory_snapshot(device: torch.device) -> Optional[Dict[str, Any]]:
         }
     except Exception:
         return None
+
+
+def hardware_training_profile(cfg: TrainConfig, ctx: DistContext) -> Dict[str, Any]:
+    _, uses_fp16, uses_bf16 = pick_precision(cfg, ctx.device)
+    profile: Dict[str, Any] = {
+        "device": str(ctx.device),
+        "world_size": ctx.world_size,
+        "precision_requested": cfg.precision_mode,
+        "precision_effective": "fp16" if uses_fp16 else ("bf16" if uses_bf16 else "fp32"),
+        "tf32_enabled": bool(cfg.allow_tf32),
+    }
+    if ctx.device.type == "cuda":
+        props = torch.cuda.get_device_properties(ctx.device)
+        profile.update({
+            "gpu_name": props.name,
+            "compute_capability": f"{props.major}.{props.minor}",
+            "memory_gb": round(props.total_memory / (1024 ** 3), 2),
+            "tensor_core_fp16": props.major >= 7,
+            "native_bf16": props.major >= 8,
+            "native_tf32": props.major >= 8,
+        })
+        if props.major == 7 and props.minor == 0:
+            profile["hardware_family"] = "NVIDIA Volta/V100"
+            profile["recommended_precision"] = "fp16"
+    return profile
 
 
 def maybe_log_cuda_memory(
@@ -1334,6 +1509,21 @@ def maybe_empty_cuda_cache(cfg: TrainConfig, ctx: DistContext, global_step: int)
             LOGGER.warning("empty_cache fehlgeschlagen bei step=%s: %s", global_step, exc)
 
 
+def belongs_to_dataset_split(
+    *, split: str, val_split: float, split_seed: int,
+    global_idx: int, split_key: Optional[str] = None,
+) -> bool:
+    split = str(split).lower().strip()
+    val_split = min(0.5, max(0.0, float(val_split)))
+    if val_split <= 0.0:
+        return split != "validation"
+    stable_key = split_key or f"sample:{int(global_idx)}"
+    payload = f"{int(split_seed)}:{stable_key}".encode("utf-8")
+    bucket = int.from_bytes(hashlib.blake2b(payload, digest_size=8).digest(), "big") / float(2**64)
+    is_validation = bucket < val_split
+    return is_validation if split == "validation" else not is_validation
+
+
 class TokenizedShardIterableDataset(IterableDataset):
     def __init__(
         self,
@@ -1357,13 +1547,13 @@ class TokenizedShardIterableDataset(IterableDataset):
         self.split_seed = int(split_seed)
 
     def _belongs_to_split(self, global_idx: int, split_key: Optional[str] = None) -> bool:
-        if self.val_split <= 0.0:
-            return self.split != "validation"
-        stable_key = split_key or f"sample:{int(global_idx)}"
-        payload = f"{self.split_seed}:{stable_key}".encode("utf-8")
-        bucket = int.from_bytes(hashlib.blake2b(payload, digest_size=8).digest(), "big") / float(2**64)
-        is_validation = bucket < self.val_split
-        return is_validation if self.split == "validation" else not is_validation
+        return belongs_to_dataset_split(
+            split=self.split,
+            val_split=self.val_split,
+            split_seed=self.split_seed,
+            global_idx=global_idx,
+            split_key=split_key,
+        )
 
     def set_epoch(self, epoch: int) -> None:
         self.epoch = int(epoch)
@@ -1410,6 +1600,179 @@ class TokenizedShardIterableDataset(IterableDataset):
                 }
 
             shard_idx += 1
+
+
+@dataclass(frozen=True)
+class SampleRef:
+    shard_idx: int
+    local_idx: int
+    global_idx: int
+    seq_len: int
+
+
+def build_token_batch_plan(
+    cache_dir: Path, cfg: TrainConfig, ctx: DistContext,
+) -> Tuple[List[List[SampleRef]], Dict[str, Any]]:
+    refs: List[SampleRef] = []
+    for path in sorted(cache_dir.glob("shard_*.pkl")):
+        with open(path, "rb") as handle:
+            payload = pickle.load(handle)
+        shard_idx = int(payload.get("shard_idx", int(path.stem.split("_")[-1])))
+        global_start = int(payload["global_start"])
+        for local_idx, item in enumerate(payload["samples"]):
+            global_idx = global_start + local_idx
+            if not belongs_to_dataset_split(
+                split="train",
+                val_split=cfg.val_split,
+                split_seed=cfg.split_seed,
+                global_idx=global_idx,
+                split_key=item.get("split_key"),
+            ):
+                continue
+            refs.append(SampleRef(
+                shard_idx=shard_idx,
+                local_idx=local_idx,
+                global_idx=global_idx,
+                seq_len=int(item.get("seq_len") or len(item["input_ids"])),
+            ))
+
+    if not refs:
+        raise RuntimeError("Der Trainingssplit enthält keine tokenisierten Samples.")
+
+    if cfg.sort_by_length:
+        refs.sort(key=lambda ref: (ref.seq_len, ref.global_idx))
+
+    token_budget = int(cfg.max_tokens_per_batch)
+    if token_budget <= 0:
+        token_budget = int(cfg.max_seq_length * cfg.per_device_train_batch_size)
+    token_budget = max(int(math.ceil(cfg.max_seq_length / 8) * 8), token_budget)
+
+    if cfg.dynamic_token_batching:
+        max_samples = int(
+            cfg.max_samples_per_batch
+            or max(8, cfg.per_device_train_batch_size * 32)
+        )
+    else:
+        max_samples = int(cfg.per_device_train_batch_size)
+
+    batches: List[List[SampleRef]] = []
+    current: List[SampleRef] = []
+    current_max_len = 0
+    for ref in refs:
+        padded_seq_len = int(math.ceil(ref.seq_len / 8) * 8)
+        candidate_max = max(current_max_len, padded_seq_len)
+        candidate_count = len(current) + 1
+        exceeds_tokens = (
+            cfg.dynamic_token_batching
+            and candidate_max * candidate_count > token_budget
+        )
+        exceeds_samples = candidate_count > max_samples
+        if current and (exceeds_tokens or exceeds_samples):
+            batches.append(current)
+            current = []
+            current_max_len = 0
+        current.append(ref)
+        current_max_len = max(current_max_len, padded_seq_len)
+    if current:
+        batches.append(current)
+
+    original_batches = len(batches)
+    padded_batches = 0
+    dropped_batches = 0
+    alignment = max(1, ctx.world_size * cfg.gradient_accumulation_steps)
+    if ctx.is_distributed and batches and len(batches) % alignment:
+        if cfg.pad_batches_for_ddp or len(batches) < alignment:
+            target_count = int(math.ceil(len(batches) / alignment) * alignment)
+            source = list(batches)
+            while len(batches) < target_count:
+                batches.append(list(source[len(batches) % len(source)]))
+                padded_batches += 1
+        else:
+            target_count = int(len(batches) // alignment) * alignment
+            dropped_batches = len(batches) - target_count
+            batches = batches[:target_count]
+
+    efficiency_batches = batches[:min(original_batches, len(batches))]
+    actual_tokens = sum(ref.seq_len for batch in efficiency_batches for ref in batch)
+    padded_tokens = sum(
+        int(math.ceil(max(ref.seq_len for ref in batch) / 8) * 8) * len(batch)
+        for batch in efficiency_batches if batch
+    )
+    stats = {
+        "train_samples": len(refs),
+        "global_batches": len(batches),
+        "original_batches": original_batches,
+        "ddp_padding_batches": padded_batches,
+        "ddp_dropped_batches": dropped_batches,
+        "batches_per_rank": int(math.ceil(len(batches) / max(1, ctx.world_size))),
+        "max_tokens_per_batch": token_budget,
+        "max_samples_per_batch": max_samples,
+        "dynamic_token_batching": bool(cfg.dynamic_token_batching),
+        "padding_efficiency": float(actual_tokens / max(1, padded_tokens)),
+    }
+    return batches, stats
+
+
+class PlannedBatchIterableDataset(IterableDataset):
+    def __init__(
+        self, cache_dir: Path, global_batches: List[List[SampleRef]],
+        rank: int, world_size: int, seed: int, shuffle: bool,
+        original_batch_count: Optional[int] = None,
+    ) -> None:
+        super().__init__()
+        self.cache_dir = cache_dir
+        self.global_batches = global_batches
+        self.rank = int(rank)
+        self.world_size = max(1, int(world_size))
+        self.seed = int(seed)
+        self.shuffle = bool(shuffle)
+        self.original_batch_count = min(
+            len(global_batches),
+            max(1, int(original_batch_count or len(global_batches))),
+        )
+        self._epoch = mp.Value("i", 0)
+
+    def set_epoch(self, epoch: int) -> None:
+        self._epoch.value = int(epoch)
+
+    def __iter__(self):
+        epoch = int(self._epoch.value)
+        order = list(range(self.original_batch_count))
+        if self.shuffle:
+            random.Random(self.seed + epoch).shuffle(order)
+        padding_count = len(self.global_batches) - len(order)
+        if padding_count > 0:
+            padding_source = list(order)
+            offset = epoch % max(1, len(padding_source))
+            for index in range(padding_count):
+                order.append(padding_source[(offset + index) % len(padding_source)])
+        local_order = order[self.rank::self.world_size]
+
+        worker_info = get_worker_info()
+        if worker_info is not None:
+            local_order = local_order[int(worker_info.id)::int(worker_info.num_workers)]
+
+        shard_cache: Dict[int, Dict[str, Any]] = {}
+        for batch_idx in local_order:
+            features: List[Dict[str, torch.Tensor]] = []
+            batch_refs = sorted(
+                self.global_batches[batch_idx],
+                key=lambda ref: (ref.shard_idx, ref.local_idx),
+            )
+            for ref in batch_refs:
+                if ref.shard_idx not in shard_cache:
+                    with open(shard_file_path(self.cache_dir, ref.shard_idx), "rb") as handle:
+                        shard_cache[ref.shard_idx] = pickle.load(handle)
+                    while len(shard_cache) > 2:
+                        shard_cache.pop(next(iter(shard_cache)))
+                item = shard_cache[ref.shard_idx]["samples"][ref.local_idx]
+                features.append({
+                    "input_ids": torch.tensor(item["input_ids"], dtype=torch.long),
+                    "attention_mask": torch.tensor(item["attention_mask"], dtype=torch.long),
+                    "labels": torch.tensor(item["labels"], dtype=torch.long),
+                })
+            if features:
+                yield features
 
 
 
@@ -1647,6 +2010,9 @@ def build_model_and_tokenizer(cfg: TrainConfig, ctx: DistContext):
     if cfg.gradient_checkpointing:
         _enable_gradient_checkpointing(model)
 
+    if cfg.neftune_noise_alpha > 0.0:
+        _enable_neftune(model, cfg.neftune_noise_alpha)
+
     model.to(ctx.device)
     return model, tokenizer, fp16, bf16, ngram_state
 
@@ -1671,6 +2037,22 @@ def _enable_gradient_checkpointing(model: nn.Module) -> None:
             model.enable_input_require_grads()
         except Exception:
             pass
+
+
+def _enable_neftune(model: nn.Module, noise_alpha: float) -> None:
+    embeddings = model.get_input_embeddings()
+
+    def _noise_hook(module: nn.Module, _inputs: Tuple[Any, ...], output: torch.Tensor):
+        if not module.training or not torch.is_tensor(output):
+            return output
+        dims = max(1, int(output.shape[-2]) * int(output.shape[-1]))
+        magnitude = float(noise_alpha) / math.sqrt(float(dims))
+        noise = torch.empty_like(output).uniform_(-magnitude, magnitude)
+        return output + noise
+
+    handle = embeddings.register_forward_hook(_noise_hook)
+    setattr(model, "_matelix_neftune_hook", handle)
+    LOGGER.info("NEFTune aktiv | noise_alpha=%s", noise_alpha)
 
 
 def build_optimizer(model: nn.Module, cfg: TrainConfig) -> torch.optim.Optimizer:
@@ -1825,6 +2207,16 @@ def estimate_total_steps_from_samples(total_samples: int, cfg: TrainConfig, ctx:
     return max(1, int(math.ceil(cfg.num_train_epochs * updates_per_epoch)))
 
 
+def estimate_total_steps_from_batch_plan(
+    global_batches: int, cfg: TrainConfig, ctx: DistContext,
+) -> int:
+    local_batches = int(math.ceil(max(1, global_batches) / max(1, ctx.world_size)))
+    updates_per_epoch = max(1, int(math.ceil(local_batches / cfg.gradient_accumulation_steps)))
+    if cfg.max_steps is not None:
+        return max(1, int(cfg.max_steps))
+    return max(1, int(math.ceil(cfg.num_train_epochs * updates_per_epoch)))
+
+
 def maybe_adjust_scheduler_from_progress(
     scheduler: AdaptiveLRScheduler,
     cfg: TrainConfig,
@@ -1861,6 +2253,9 @@ def maybe_adjust_scheduler_from_progress(
     proposed_total_steps = estimate_total_steps_from_samples(effective_total_samples, cfg, ctx)
     current_total_steps = max(1, int(scheduler.total_steps))
     rel_change = abs(proposed_total_steps - current_total_steps) / float(max(1, current_total_steps))
+    if not cfg.adaptive_scheduler:
+        proposed_total_steps = current_total_steps
+        rel_change = 0.0
 
     info = {
         "source": ("static" if not cfg.adaptive_scheduler else source),
@@ -2009,6 +2404,48 @@ def make_scaler(fp16: bool, device: torch.device):
     return GradScaler(enabled=enabled)
 
 
+def count_causal_target_tokens(labels: torch.Tensor) -> int:
+    """Count labels that contribute after the causal language-model shift."""
+    if labels.ndim == 0 or labels.shape[-1] <= 1:
+        return 0
+    return int((labels[..., 1:] != -100).sum().item())
+
+
+def iter_accumulation_batches(
+    loader: DataLoader, cfg: TrainConfig, ctx: DistContext,
+) -> Iterator[Tuple[Dict[str, torch.Tensor], float, bool, int]]:
+    """Yield full accumulation windows with globally token-normalized weights."""
+    iterator = iter(loader)
+    while True:
+        window: List[Dict[str, torch.Tensor]] = []
+        for _ in range(cfg.gradient_accumulation_steps):
+            try:
+                window.append(next(iterator))
+            except StopIteration:
+                break
+        if not window:
+            return
+
+        local_counts = [count_causal_target_tokens(batch["labels"]) for batch in window]
+        local_total = sum(local_counts)
+        global_total = float(local_total)
+        if cfg.token_normalized_loss and ctx.is_distributed:
+            count_tensor = torch.tensor(float(local_total), device=ctx.device, dtype=torch.float64)
+            dist.all_reduce(count_tensor, op=dist.ReduceOp.SUM)
+            global_total = float(count_tensor.item())
+
+        for idx, (batch, target_tokens) in enumerate(zip(window, local_counts)):
+            is_window_end = idx == len(window) - 1
+            if cfg.token_normalized_loss:
+                if ctx.is_distributed:
+                    loss_weight = (float(target_tokens) * ctx.world_size) / max(1.0, global_total)
+                else:
+                    loss_weight = float(target_tokens) / max(1.0, float(local_total))
+            else:
+                loss_weight = 1.0 / max(1, len(window))
+            yield batch, loss_weight, is_window_end, target_tokens
+
+
 def train_epoch(
     model: nn.Module,
     loader: DataLoader,
@@ -2027,6 +2464,7 @@ def train_epoch(
     status_writer: JsonStatusWriter,
     preview_writer: Optional[JsonPreviewWriter],
     tokenizer,
+    tokens_seen_ref: Dict[str, int],
 ) -> Tuple[float, int, int, bool]:
     model.train()
 
@@ -2040,18 +2478,20 @@ def train_epoch(
 
     optimizer.zero_grad(set_to_none=True)
 
-    running_loss = 0.0
-    running_updates = 0
+    running_loss_sum = 0.0
+    running_target_tokens = 0.0
     reached_max_steps = False
     accum_counter = 0
     accum_tokens_local = 0
-    total_tokens_seen = 0
     last_micro_loss_value: Optional[float] = None
+    accum_loss_sum_local = 0.0
+    accum_target_tokens_local = 0
+    window_invalid = False
 
     join_ctx = model.join() if (ctx.is_distributed and isinstance(model, DDP)) else nullcontext()
 
     with join_ctx:
-        for batch in loader:
+        for batch, token_loss_weight, window_should_step, target_tokens in iter_accumulation_batches(loader, cfg, ctx):
             # DDP-sicherer Stop:
             # Kein sync_stop()/dist.all_reduce() im Microbatch-Loop verwenden,
             # weil das mit DDP-Gradient-Allreduces kollidieren kann.
@@ -2059,6 +2499,11 @@ def train_epoch(
             if SHUTDOWN.stop:
                 reached_max_steps = True
                 break
+
+            if window_invalid:
+                if window_should_step:
+                    window_invalid = False
+                continue
 
             batch = move_batch(batch, ctx.device)
             accum_tokens_local += int(batch["attention_mask"].sum().item())
@@ -2080,15 +2525,10 @@ def train_epoch(
                     pass
 
             try:
-                micro_step = accum_counter + 1
-                should_step = micro_step >= cfg.gradient_accumulation_steps
-                # WICHTIG (DDP + IterableDataset): Bei mehreren GPUs koennen
-                # einzelne Ranks in der Anzahl der Microbatches leicht auseinanderlaufen.
-                # no_sync() auf manchen Ranks, waehrend andere bereits synchronisieren,
-                # fuehrt dann zu Collective-Mismatch/Haengern. Deshalb synchronisieren wir
-                # im Distributed-Fall jeden Backward und nutzen Grad-Accumulation nur fuer
-                # den Optimizer-Step-Rhythmus.
-                sync_now = (accum_counter + 1) >= cfg.gradient_accumulation_steps
+                # Der geplante Batch-Sampler garantiert gleich viele vollständige
+                # Accumulation-Fenster je Rank. Deshalb kann no_sync() sicher für alle
+                # Microbatches außer dem letzten im Fenster genutzt werden.
+                sync_now = bool(window_should_step)
 
                 if ctx.is_distributed and isinstance(model, DDP) and not sync_now:
                     backward_sync_ctx = model.no_sync()
@@ -2105,7 +2545,7 @@ def train_epoch(
 
                     loss_value = float(loss.detach().item())
                     last_micro_loss_value = loss_value
-                    loss_to_backprop = loss / cfg.gradient_accumulation_steps
+                    loss_to_backprop = loss * float(token_loss_weight)
 
                     if scaler is not None and getattr(scaler, "is_enabled", lambda: False)():
                         scaler.scale(loss_to_backprop).backward()
@@ -2117,7 +2557,7 @@ def train_epoch(
                         torch.cuda.empty_cache()
                 except Exception:
                     pass
-                if cfg.skip_oom_microbatches:
+                if cfg.skip_oom_microbatches and not ctx.is_distributed:
                     LOGGER.warning(
                         "CUDA OOM im Trainingsschritt (microbatch wird uebersprungen) | "
                         "batch_size=%s max_seq_length=%s grad_accum=%s gradient_checkpointing=%s | original=%s",
@@ -2129,6 +2569,10 @@ def train_epoch(
                     )
                     optimizer.zero_grad(set_to_none=True)
                     accum_counter = 0
+                    accum_tokens_local = 0
+                    accum_loss_sum_local = 0.0
+                    accum_target_tokens_local = 0
+                    window_invalid = not window_should_step
                     continue
                 raise RuntimeError(
                     "CUDA OOM im Trainingsschritt. Empfehlung: "
@@ -2138,7 +2582,9 @@ def train_epoch(
                 )
 
             accum_counter += 1
-            should_step = accum_counter >= cfg.gradient_accumulation_steps
+            accum_loss_sum_local += loss_value * max(0, target_tokens)
+            accum_target_tokens_local += max(0, target_tokens)
+            should_step = bool(window_should_step)
 
             if should_step:
                 if scaler is not None and getattr(scaler, "is_enabled", lambda: False)():
@@ -2146,13 +2592,24 @@ def train_epoch(
 
                 torch.nn.utils.clip_grad_norm_(model.parameters(), cfg.max_grad_norm)
 
+                optimizer_step_succeeded = True
                 if scaler is not None and getattr(scaler, "is_enabled", lambda: False)():
+                    scale_before = float(scaler.get_scale())
                     scaler.step(optimizer)
                     scaler.update()
+                    optimizer_step_succeeded = float(scaler.get_scale()) >= scale_before
                 else:
                     optimizer.step()
 
                 optimizer.zero_grad(set_to_none=True)
+                if not optimizer_step_succeeded:
+                    if ctx.is_main:
+                        LOGGER.warning("FP16-Optimizer-Step wegen Gradient-Overflow übersprungen.")
+                    accum_counter = 0
+                    accum_tokens_local = 0
+                    accum_loss_sum_local = 0.0
+                    accum_target_tokens_local = 0
+                    continue
                 global_step += 1
                 accum_counter = 0
 
@@ -2189,13 +2646,24 @@ def train_epoch(
                     prefix=f"step={global_step}",
                 )
 
-                running_updates += 1
-                reduced_loss = float(loss.detach().item())
-                running_loss += reduced_loss
+                loss_stats = torch.tensor(
+                    [
+                        accum_loss_sum_local,
+                        float(accum_target_tokens_local),
+                        float(accum_tokens_local),
+                    ],
+                    device=ctx.device,
+                    dtype=torch.float64,
+                )
+                if ctx.is_distributed:
+                    dist.all_reduce(loss_stats, op=dist.ReduceOp.SUM)
+                reduced_loss = float(loss_stats[0].item() / max(1.0, loss_stats[1].item()))
+                running_loss_sum += float(loss_stats[0].item())
+                running_target_tokens += float(loss_stats[1].item())
 
                 if ctx.is_main:
-                    step_tokens = int(accum_tokens_local * max(1, ctx.world_size))
-                    total_tokens_seen += step_tokens
+                    step_tokens = int(loss_stats[2].item())
+                    tokens_seen_ref["value"] = int(tokens_seen_ref.get("value", 0)) + step_tokens
                     elapsed = max(1e-6, time.time() - train_start_time)
                     steps_done = max(1, global_step)
                     steps_left = max(0, int(total_steps_ref["value"]) - int(global_step))
@@ -2216,7 +2684,7 @@ def train_epoch(
                         "learning_rate": lr,
                         "eta": eta,
                         "tokens_per_step": step_tokens,
-                        "total_tokens": total_tokens_seen,
+                        "total_tokens": int(tokens_seen_ref["value"]),
                         "epoch": epoch,
                         "total_steps": int(total_steps_ref["value"]),
                         "scheduler_total_steps": int(total_steps_ref["value"]),
@@ -2232,6 +2700,8 @@ def train_epoch(
                     )
                     status_writer.write(payload)
                 accum_tokens_local = 0
+                accum_loss_sum_local = 0.0
+                accum_target_tokens_local = 0
 
                 if SHUTDOWN.stop:
                     reached_max_steps = True
@@ -2264,13 +2734,21 @@ def train_epoch(
 
         torch.nn.utils.clip_grad_norm_(model.parameters(), cfg.max_grad_norm)
 
+        optimizer_step_succeeded = True
         if scaler is not None and getattr(scaler, "is_enabled", lambda: False)():
+            scale_before = float(scaler.get_scale())
             scaler.step(optimizer)
             scaler.update()
+            optimizer_step_succeeded = float(scaler.get_scale()) >= scale_before
         else:
             optimizer.step()
 
         optimizer.zero_grad(set_to_none=True)
+        if not optimizer_step_succeeded:
+            if ctx.is_main:
+                LOGGER.warning("FP16-Tail-Step wegen Gradient-Overflow übersprungen.")
+            avg_loss = running_loss_sum / max(1.0, running_target_tokens)
+            return avg_loss, global_step, micro_step, reached_max_steps
         global_step += 1
 
         changed, proposed_total_steps, info = maybe_adjust_scheduler_from_progress(
@@ -2305,13 +2783,13 @@ def train_epoch(
             prefix=f"step={global_step}",
         )
 
-        running_updates += 1
         reduced_loss = float(last_micro_loss_value or 0.0)
-        running_loss += reduced_loss
+        running_loss_sum += float(accum_loss_sum_local)
+        running_target_tokens += float(accum_target_tokens_local)
 
         if ctx.is_main:
             step_tokens = int(accum_tokens_local * max(1, ctx.world_size))
-            total_tokens_seen += step_tokens
+            tokens_seen_ref["value"] = int(tokens_seen_ref.get("value", 0)) + step_tokens
             elapsed = max(1e-6, time.time() - train_start_time)
             steps_done = max(1, global_step)
             steps_left = max(0, int(total_steps_ref["value"]) - int(global_step))
@@ -2331,7 +2809,7 @@ def train_epoch(
                 "learning_rate": lr,
                 "eta": eta,
                 "tokens_per_step": step_tokens,
-                "total_tokens": total_tokens_seen,
+                "total_tokens": int(tokens_seen_ref["value"]),
                 "epoch": epoch,
                 "total_steps": int(total_steps_ref["value"]),
                 "scheduler_total_steps": int(total_steps_ref["value"]),
@@ -2347,7 +2825,7 @@ def train_epoch(
             )
             status_writer.write(payload)
 
-    avg_loss = running_loss / max(1, running_updates)
+    avg_loss = running_loss_sum / max(1.0, running_target_tokens)
     return avg_loss, global_step, micro_step, reached_max_steps
 
 
@@ -2356,7 +2834,8 @@ def evaluate_model(
     model: nn.Module, loader: DataLoader, cfg: TrainConfig, ctx: DistContext,
 ) -> Tuple[Optional[float], Optional[float], int]:
     """Return globally token-weighted validation loss and perplexity."""
-    model.eval()
+    evaluation_model = unwrap_model(model)
+    evaluation_model.eval()
     _, fp16, bf16 = pick_precision(cfg, ctx.device)
     amp_dtype = torch.float16 if fp16 else (torch.bfloat16 if bf16 else None)
     autocast_ctx = (
@@ -2371,11 +2850,11 @@ def evaluate_model(
         if SHUTDOWN.stop:
             break
         batch = move_batch(batch, ctx.device)
-        target_tokens = int((batch["labels"] != -100).sum().item())
+        target_tokens = count_causal_target_tokens(batch["labels"])
         if target_tokens <= 0:
             continue
         with autocast_ctx:
-            outputs = model(**batch)
+            outputs = evaluation_model(**batch)
         if torch.isfinite(outputs.loss):
             loss_sum += outputs.loss.detach().double() * target_tokens
             token_count += target_tokens
@@ -2493,6 +2972,7 @@ def save_training_checkpoint(
     scheduler: AdaptiveLRScheduler, scaler: Any, outdir: Path,
     epoch: int, global_step: int, cfg: TrainConfig, ctx: DistContext,
     best_val_loss: Optional[float] = None, epochs_without_improvement: int = 0,
+    total_tokens_seen: int = 0,
 ) -> Optional[Path]:
     """Save a resumable checkpoint atomically at epoch boundaries."""
     local_rng = {
@@ -2528,6 +3008,7 @@ def save_training_checkpoint(
         "config": cfg.__dict__,
         "best_val_loss": best_val_loss,
         "epochs_without_improvement": int(epochs_without_improvement),
+        "total_tokens_seen": int(total_tokens_seen),
     }
     torch.save(state, tmp_dir / "trainer_state.pt")
     tmp_dir.replace(checkpoint_dir)
@@ -2680,6 +3161,12 @@ def main() -> int:
     cfg = load_cfg(args.config)
     ctx = init_dist(cfg)
 
+    # Volta/V100 has Tensor Cores for FP16, but no native TF32 execution path.
+    if torch.cuda.is_available():
+        props = torch.cuda.get_device_properties(ctx.device)
+        if props.major < 8:
+            cfg.allow_tf32 = False
+
     if torch.cuda.is_available():
         if cfg.allow_tf32:
             if hasattr(torch.backends, "fp32_precision"):
@@ -2734,6 +3221,23 @@ def main() -> int:
         )
         LOGGER.info("Train mode: %s | train_from_scratch=%s | include_prompt_loss=%s", cfg.train_mode, cfg.train_from_scratch, cfg.include_prompt_loss)
         LOGGER.info("Config: %s", json.dumps(cfg.__dict__, ensure_ascii=False))
+        hardware_profile = hardware_training_profile(cfg, ctx)
+        LOGGER.info("Hardware-Profil: %s", json.dumps(hardware_profile, ensure_ascii=False))
+
+        if cfg.dataset_audit:
+            if ctx.is_main:
+                dataset_audit_report = audit_dataset(cfg, outdir, True)
+            barrier(ctx)
+            if not ctx.is_main:
+                dataset_audit_report = json.loads(
+                    (outdir / "dataset_audit.json").read_text(encoding="utf-8")
+                )
+            if cfg.dataset_audit_strict and dataset_audit_report.get("errors"):
+                raise RuntimeError(
+                    "Dataset-Audit fehlgeschlagen: " + "; ".join(dataset_audit_report["errors"])
+                )
+        else:
+            dataset_audit_report = {"enabled": False, "ok": True}
 
         model, tokenizer, fp16, bf16, ngram_state = build_model_and_tokenizer(cfg, ctx)
 
@@ -2753,20 +3257,49 @@ def main() -> int:
         producer_proc = start_shard_producer(cfg, cache_dir, ctx)
 
         if ctx.is_main:
-            LOGGER.info("Warte auf ersten tokenisierten Shard ...")
+            LOGGER.info("Warte auf vollständige Tokenisierung für den Batch-Plan ...")
         wait_for_first_shard(cache_dir)
+        wait_for_producer_complete(cache_dir)
 
         barrier(ctx)
 
-        dataset = TokenizedShardIterableDataset(
+        serialized_plan_path = outdir / "batch_plan_state.pkl"
+        if ctx.is_main:
+            global_batch_plan, batch_plan_stats = build_token_batch_plan(cache_dir, cfg, ctx)
+            tmp_plan_path = serialized_plan_path.with_suffix(".tmp")
+            with open(tmp_plan_path, "wb") as handle:
+                pickle.dump(
+                    {"global_batches": global_batch_plan, "stats": batch_plan_stats},
+                    handle,
+                    protocol=pickle.HIGHEST_PROTOCOL,
+                )
+            tmp_plan_path.replace(serialized_plan_path)
+        barrier(ctx)
+        if not ctx.is_main:
+            with open(serialized_plan_path, "rb") as handle:
+                serialized_plan = pickle.load(handle)
+            global_batch_plan = serialized_plan["global_batches"]
+            batch_plan_stats = serialized_plan["stats"]
+        barrier(ctx)
+        if ctx.is_main:
+            serialized_plan_path.unlink(missing_ok=True)
+        if cfg.adaptive_scheduler:
+            cfg.adaptive_scheduler = False
+            if ctx.is_main:
+                LOGGER.info("Adaptiver Scheduler deaktiviert: der vollständige Batch-Plan liefert exakte Step-Zahlen.")
+        if ctx.is_main:
+            (outdir / "batch_plan.json").write_text(
+                json.dumps(batch_plan_stats, ensure_ascii=False, indent=2), encoding="utf-8"
+            )
+            LOGGER.info("Batch-Plan: %s", json.dumps(batch_plan_stats, ensure_ascii=False))
+        dataset = PlannedBatchIterableDataset(
             cache_dir=cache_dir,
+            global_batches=global_batch_plan,
             rank=ctx.rank,
             world_size=ctx.world_size,
-            sort_by_length=bool(cfg.sort_by_length),
-            epoch=0,
-            split="train",
-            val_split=cfg.val_split,
-            split_seed=cfg.split_seed,
+            seed=cfg.seed,
+            shuffle=cfg.shuffle_batches,
+            original_batch_count=batch_plan_stats["original_batches"],
         )
         validation_dataset = None
         if cfg.val_split > 0.0 and cfg.validate_every_epoch:
@@ -2786,18 +3319,27 @@ def main() -> int:
             fixed_length=(cfg.max_seq_length if cfg.fixed_padding else None),
         )
 
-        train_samples_est = max(1, int(round(total_samples_est * (1.0 - cfg.val_split))))
-        initial_total_steps = estimate_total_steps_from_samples(train_samples_est, cfg, ctx)
+        initial_total_steps = estimate_total_steps_from_batch_plan(
+            len(global_batch_plan), cfg, ctx
+        )
 
         effective_warmup_steps = cfg.warmup_steps
         if effective_warmup_steps <= 0 and cfg.warmup_ratio > 0.0:
             effective_warmup_steps = int(math.ceil(initial_total_steps * cfg.warmup_ratio))
         effective_warmup_steps = max(0, min(effective_warmup_steps, max(0, initial_total_steps - 1)))
 
-        num_loader_workers = max(0, int(cfg.dataloader_num_workers))
+        if cfg.dataloader_num_workers < 0:
+            cpu_count = max(1, os.cpu_count() or 1)
+            available_cpus = max(1, cpu_count - 2)
+            num_loader_workers = min(
+                4,
+                max(1, available_cpus // max(1, ctx.world_size)),
+            )
+        else:
+            num_loader_workers = max(0, int(cfg.dataloader_num_workers))
         loader_kwargs: Dict[str, Any] = {
             "dataset": dataset,
-            "batch_size": cfg.per_device_train_batch_size,
+            "batch_size": None,
             "num_workers": num_loader_workers,
             "pin_memory": (ctx.device.type == "cuda"),
             "collate_fn": collator,
@@ -2809,9 +3351,16 @@ def main() -> int:
         loader = DataLoader(**loader_kwargs)
         validation_loader = None
         if validation_dataset is not None:
-            validation_loader_kwargs = dict(loader_kwargs)
-            validation_loader_kwargs["dataset"] = validation_dataset
-            validation_loader_kwargs["batch_size"] = max(1, cfg.per_device_train_batch_size)
+            validation_loader_kwargs: Dict[str, Any] = {
+                "dataset": validation_dataset,
+                "batch_size": max(1, cfg.per_device_train_batch_size),
+                "num_workers": num_loader_workers,
+                "pin_memory": (ctx.device.type == "cuda"),
+                "collate_fn": collator,
+            }
+            if num_loader_workers > 0:
+                validation_loader_kwargs["prefetch_factor"] = max(1, int(cfg.prefetch_factor))
+                validation_loader_kwargs["persistent_workers"] = bool(cfg.persistent_workers)
             validation_loader = DataLoader(**validation_loader_kwargs)
 
         optimizer = build_optimizer(model, cfg)
@@ -2846,6 +3395,9 @@ def main() -> int:
             resume_epoch, resume_global_step, resume_state = load_training_state(
                 Path(cfg.resume).expanduser().resolve(), optimizer, scheduler, scaler, ctx.device, ctx.rank
             )
+            scheduler.total_steps = max(1, initial_total_steps, resume_global_step)
+            scheduler.max_total_steps_seen = max(scheduler.max_total_steps_seen, scheduler.total_steps)
+            scheduler.adaptive_enabled = False
             total_steps_ref["value"] = scheduler.total_steps
             LOGGER.info(
                 "Training fortgesetzt | checkpoint=%s start_epoch=%s global_step=%s",
@@ -2856,6 +3408,18 @@ def main() -> int:
                 shutil.copytree(previous_best, outdir / "best_model")
                 LOGGER.info("Bisheriges best_model in den neuen Lauf übernommen: %s", previous_best)
             barrier(ctx)
+
+        tokens_seen_ref = {
+            "value": int(
+                resume_state.get(
+                    "total_tokens_seen",
+                    resume_global_step
+                    * batch_plan_stats["max_tokens_per_batch"]
+                    * cfg.gradient_accumulation_steps
+                    * max(1, ctx.world_size),
+                )
+            )
+        }
 
         if ctx.is_main:
             LOGGER.info(
@@ -2912,12 +3476,11 @@ def main() -> int:
                 "learning_rate": optimizer.param_groups[0]["lr"],
                 "eta": "",
                 "tokens_per_step": int(
-                    cfg.max_seq_length
-                    * cfg.per_device_train_batch_size
+                    batch_plan_stats["max_tokens_per_batch"]
                     * cfg.gradient_accumulation_steps
                     * max(1, ctx.world_size)
                 ),
-                "total_tokens": 0,
+                "total_tokens": int(tokens_seen_ref["value"]),
                 "epoch": resume_epoch,
                 "total_steps": int(total_steps_ref["value"]),
                 "scheduler_total_steps": int(total_steps_ref["value"]),
@@ -2931,6 +3494,10 @@ def main() -> int:
                 "adaptive_scheduler_never_increase_lr": bool(cfg.adaptive_scheduler_never_increase_lr),
                 "adaptive_scheduler_only_extend_steps": bool(cfg.adaptive_scheduler_only_extend_steps),
                 "scheduler_mode": (f"adaptive_{cfg.lr_schedule}" if cfg.adaptive_scheduler else str(cfg.lr_schedule)),
+                "batch_plan": batch_plan_stats,
+                "dataloader_num_workers_effective": num_loader_workers,
+                "dataset_audit": dataset_audit_report,
+                "hardware_profile": hardware_profile,
             }
             payload.update(
                 _build_live_runtime_fields(
@@ -2983,6 +3550,7 @@ def main() -> int:
                 status_writer=status_writer,
                 preview_writer=preview_writer,
                 tokenizer=tokenizer,
+                tokens_seen_ref=tokens_seen_ref,
             )
             last_loss = avg_loss
 
@@ -3045,6 +3613,7 @@ def main() -> int:
                     ctx=ctx,
                     best_val_loss=(best_val_loss if math.isfinite(best_val_loss) else None),
                     epochs_without_improvement=epochs_without_improvement,
+                    total_tokens_seen=int(tokens_seen_ref["value"]),
                 )
                 barrier(ctx)
 
@@ -3126,6 +3695,11 @@ def main() -> int:
                         "scheduler_mode": (
                             f"adaptive_{cfg.lr_schedule}" if cfg.adaptive_scheduler else str(cfg.lr_schedule)
                         ),
+                        "batch_plan": batch_plan_stats,
+                        "dataloader_num_workers_effective": num_loader_workers,
+                        "dataset_audit": dataset_audit_report,
+                        "hardware_profile": hardware_profile,
+                        "total_tokens": int(tokens_seen_ref["value"]),
                     }
                     status_payload.update(
                         _build_live_runtime_fields(
@@ -3231,18 +3805,11 @@ def main() -> int:
                 "learning_rate": optimizer.param_groups[0]["lr"],
                 "eta": "",
                 "tokens_per_step": int(
-                    cfg.max_seq_length
-                    * cfg.per_device_train_batch_size
+                    batch_plan_stats["max_tokens_per_batch"]
                     * cfg.gradient_accumulation_steps
                     * max(1, ctx.world_size)
                 ),
-                "total_tokens": int(
-                    global_step
-                    * cfg.max_seq_length
-                    * cfg.per_device_train_batch_size
-                    * cfg.gradient_accumulation_steps
-                    * max(1, ctx.world_size)
-                ),
+                "total_tokens": int(tokens_seen_ref["value"]),
                 "done": True,
                 "template_mode": cfg.template_mode,
                 "force_template": cfg.force_template,
@@ -3290,6 +3857,10 @@ def main() -> int:
                 "early_stopped": early_stopped,
                 "early_stopping_patience": cfg.early_stopping_patience,
                 "best_model_dir": str(outdir / "best_model") if (outdir / "best_model").exists() else None,
+                "batch_plan": batch_plan_stats,
+                "dataloader_num_workers_effective": num_loader_workers,
+                "dataset_audit": dataset_audit_report,
+                "hardware_profile": hardware_profile,
             }
             status_writer.write(final_payload)
             LOGGER.info("Training abgeschlossen. Modell gespeichert nach: %s", outdir)

@@ -115,7 +115,7 @@ TRAINING_OUT_DIR.mkdir(parents=True, exist_ok=True)
 DATASETS_DIR.mkdir(parents=True, exist_ok=True)
 STATIC_DIR.mkdir(parents=True, exist_ok=True)
 
-app = FastAPI(title="MaTeLiX AI Lab (Web DDP)", version="8.1-validation-training")
+app = FastAPI(title="MaTeLiX AI Lab (Web DDP)", version="8.2-token-optimized-training")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -292,6 +292,10 @@ class TrainingState:
         self.validation_samples: Optional[int] = None
         self.epochs_without_improvement: int = 0
         self.early_stopped: bool = False
+        self.batch_plan: Optional[Dict[str, Any]] = None
+        self.hardware_profile: Optional[Dict[str, Any]] = None
+        self.dataset_audit: Optional[Dict[str, Any]] = None
+        self.dataloader_num_workers_effective: Optional[int] = None
 
         self.log = LogStore()
 
@@ -336,6 +340,10 @@ class TrainingState:
                 "validation_samples": self.validation_samples,
                 "epochs_without_improvement": self.epochs_without_improvement,
                 "early_stopped": self.early_stopped,
+                "batch_plan": self.batch_plan,
+                "hardware_profile": self.hardware_profile,
+                "dataset_audit": self.dataset_audit,
+                "dataloader_num_workers_effective": self.dataloader_num_workers_effective,
             }
 
 
@@ -362,18 +370,24 @@ class WebTrainConfig(MatelixBaseModel):
     lr_adjust_interval_steps: int = 25
     lr_adjust_min_change: float = 0.05
 
-    adaptive_scheduler: bool = True
+    adaptive_scheduler: bool = False
     adaptive_scheduler_freeze_on_producer_done: bool = True
     adaptive_scheduler_never_increase_lr: bool = True
     adaptive_scheduler_only_extend_steps: bool = True
 
-    per_device_train_batch_size: int = 1
-    gradient_accumulation_steps: int = 8
+    per_device_train_batch_size: int = 2
+    gradient_accumulation_steps: int = 4
     num_train_epochs: float = 3.0
     max_steps: Optional[int] = None
-    max_seq_length: int = 1024
+    max_seq_length: int = 4096
     sort_by_length: bool = True
     sort_by_similarity: bool = False
+    dynamic_token_batching: bool = True
+    max_tokens_per_batch: int = 0
+    max_samples_per_batch: int = 0
+    shuffle_batches: bool = True
+    pad_batches_for_ddp: bool = True
+    token_normalized_loss: bool = True
     max_history_turns: Optional[int] = None
 
     device: str = "auto"
@@ -390,9 +404,10 @@ class WebTrainConfig(MatelixBaseModel):
     lora_alpha: int = 16
     lora_dropout: float = 0.05
     lora_target_modules: Optional[List[str]] = None
+    neftune_noise_alpha: float = 0.0
     precision_mode: str = "auto"
     gradient_checkpointing: bool = False
-    dataloader_num_workers: int = 0
+    dataloader_num_workers: int = -1
     merge_lora_on_save: bool = True
     max_grad_norm: float = 1.0
     weight_decay: float = 0.01
@@ -455,11 +470,13 @@ class WebTrainConfig(MatelixBaseModel):
     save_every_epoch: bool = True
     keep_last_k_checkpoints: int = 3
     resume: Optional[str] = None
+    dataset_audit: bool = True
+    dataset_audit_strict: bool = False
 
     allow_tf32: bool = True
     distributed_debug: bool = False
     nccl_blocking_wait: bool = False
-    prefetch_factor: int = 2
+    prefetch_factor: int = 4
     persistent_workers: bool = True
 
     use_dataset_cache: bool = True
@@ -738,6 +755,17 @@ class DDPTrainingManager:
                 self.state.epochs_without_improvement = _safe_int(payload.get("epochs_without_improvement"), 0)
             if payload.get("early_stopped") is not None:
                 self.state.early_stopped = bool(payload.get("early_stopped"))
+            if payload.get("batch_plan") is not None:
+                self.state.batch_plan = payload.get("batch_plan")
+            if payload.get("hardware_profile") is not None:
+                self.state.hardware_profile = payload.get("hardware_profile")
+            if payload.get("dataset_audit") is not None:
+                self.state.dataset_audit = payload.get("dataset_audit")
+            if payload.get("dataloader_num_workers_effective") is not None:
+                self.state.dataloader_num_workers_effective = _safe_int(
+                    payload.get("dataloader_num_workers_effective"),
+                    self.state.dataloader_num_workers_effective or 0,
+                )
 
             if self.proc is not None:
                 self.state.running = self.proc.poll() is None and bool(payload.get("running", self.state.running))
@@ -777,9 +805,6 @@ class DDPTrainingManager:
 
         if explicit is not None:
             return explicit
-
-        if ddp_enabled and nproc > 1 and device == "cuda":
-            return True
 
         return False
 
@@ -963,6 +988,10 @@ class DDPTrainingManager:
             self.state.validation_samples = None
             self.state.epochs_without_improvement = 0
             self.state.early_stopped = False
+            self.state.batch_plan = None
+            self.state.hardware_profile = None
+            self.state.dataset_audit = None
+            self.state.dataloader_num_workers_effective = None
 
             self.state.log.clear()
             self.state.log.set_file(run_dir / "training.log")
@@ -974,12 +1003,12 @@ class DDPTrainingManager:
                 f"find_unused_parameters={worker_cfg['ddp_find_unused_parameters']} "
                 f"deterministic={worker_cfg.get('deterministic', False)} "
                 f"allow_tf32={worker_cfg.get('allow_tf32', True)} "
-                f"dataloader_num_workers={worker_cfg.get('dataloader_num_workers', 4)} "
+                f"dataloader_num_workers={worker_cfg.get('dataloader_num_workers', -1)} "
                 f"max_history_turns={worker_cfg.get('max_history_turns')} "
                 f"log_cuda_memory={worker_cfg.get('log_cuda_memory', True)} "
                 f"cuda_memory_log_interval_steps={worker_cfg.get('cuda_memory_log_interval_steps', 25)} "
                 f"cuda_empty_cache_interval_steps={worker_cfg.get('cuda_empty_cache_interval_steps', 0)} "
-                f"adaptive_scheduler={worker_cfg.get('adaptive_scheduler', True)} "
+                f"adaptive_scheduler={worker_cfg.get('adaptive_scheduler', False)} "
                 f"adaptive_scheduler_freeze_on_producer_done={worker_cfg.get('adaptive_scheduler_freeze_on_producer_done', True)} "
                 f"adaptive_scheduler_never_increase_lr={worker_cfg.get('adaptive_scheduler_never_increase_lr', True)} "
                 f"adaptive_scheduler_only_extend_steps={worker_cfg.get('adaptive_scheduler_only_extend_steps', True)}"
