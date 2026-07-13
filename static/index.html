@@ -703,6 +703,23 @@ MaTeLiX AI is a trademark/brand of TMP-SYSTEM-SERVICE GmbH.
               <label for="mixed_text_column" class="mixed_text_column_row" style="display:none;">Gemischte Textspalte</label>
               <input type="text" id="mixed_text_column" value="Text" class="mixed_text_column_row" style="display:none;">
 
+              <label for="training_phase">Trainingsphase</label>
+              <select id="training_phase">
+                <option value="custom" selected>Benutzerdefiniert / bisheriges Verhalten</option>
+                <option value="pretrain">1 · Grundtraining (Text, voller Loss)</option>
+                <option value="mixed">2 · Gemischt (Text + Dialog)</option>
+                <option value="sft">3 · Instruction-SFT (nur Dialog)</option>
+              </select>
+
+              <label for="text_token_weight" class="mixture_weight_row" style="display:none;">Text-Tokengewicht</label>
+              <input type="number" id="text_token_weight" value="0.7" min="0" step="0.05" class="mixture_weight_row" style="display:none;">
+
+              <label for="dialog_token_weight" class="mixture_weight_row" style="display:none;">Dialog-Tokengewicht</label>
+              <input type="number" id="dialog_token_weight" value="0.3" min="0" step="0.05" class="mixture_weight_row" style="display:none;">
+
+              <label for="max_mixture_oversample" class="mixture_weight_row" style="display:none;">Max. Oversampling-Faktor</label>
+              <input type="number" id="max_mixture_oversample" value="4" min="1" step="0.5" class="mixture_weight_row" style="display:none;">
+
               <label for="device">Device</label>
               <select id="device"></select>
 
@@ -759,6 +776,15 @@ MaTeLiX AI is a trademark/brand of TMP-SYSTEM-SERVICE GmbH.
 
               <label class="scratch_cfg_row" for="include_prompt_loss" style="display:none;">Prompt in Loss einbeziehen</label>
               <input type="checkbox" id="include_prompt_loss" class="scratch_cfg_row" style="display:none;">
+
+              <label class="scratch_cfg_row" for="train_scratch_tokenizer" style="display:none;">Tokenizer aus Trainingsdaten neu lernen</label>
+              <input type="checkbox" id="train_scratch_tokenizer" class="scratch_cfg_row" style="display:none;">
+
+              <label class="scratch_cfg_row" for="scratch_tokenizer_vocab_size" style="display:none;">Scratch-Tokenizer Vokabular</label>
+              <input type="number" id="scratch_tokenizer_vocab_size" value="32000" min="256" class="scratch_cfg_row" style="display:none;">
+
+              <label for="tokenizer_dir">Eigener Tokenizer-Pfad (optional)</label>
+              <input type="text" id="tokenizer_dir" placeholder="leer = Base-Modell-Tokenizer">
 
               <label for="precision_mode">Precision</label>
               <select id="precision_mode" title="fp16/bf16 nur auf CUDA; MPS/CPU immer FP32">
@@ -840,6 +866,24 @@ MaTeLiX AI is a trademark/brand of TMP-SYSTEM-SERVICE GmbH.
               <label for="max_seq_length">Max Seq Length</label>
               <input type="number" id="max_seq_length" value="4096" min="64">
 
+              <label for="chunk_long_texts">Langtexte automatisch aufteilen</label>
+              <input type="checkbox" id="chunk_long_texts" checked>
+
+              <label for="text_chunk_overlap">Chunk-Überlappung (Tokens)</label>
+              <input type="number" id="text_chunk_overlap" value="128" min="0">
+
+              <label for="text_chunk_min_tokens">Min. Chunkgröße an Textgrenzen</label>
+              <input type="number" id="text_chunk_min_tokens" value="32" min="1">
+
+              <label for="append_eos_to_text">EOS an Text/Chunk anhängen</label>
+              <input type="checkbox" id="append_eos_to_text" checked>
+
+              <label for="pack_short_texts">Kurze Texte split-sicher packen</label>
+              <input type="checkbox" id="pack_short_texts">
+
+              <label for="pack_target_length">Packing-Ziellänge</label>
+              <input type="number" id="pack_target_length" value="1024" min="64">
+
               <label for="max_history_turns">Max History Turns (optional)</label>
               <input type="number" id="max_history_turns" placeholder="leer = auto" min="1">
 
@@ -866,6 +910,29 @@ MaTeLiX AI is a trademark/brand of TMP-SYSTEM-SERVICE GmbH.
 
               <label for="dataset_audit_strict">Bei Dataset-Fehlern abbrechen</label>
               <input type="checkbox" id="dataset_audit_strict">
+
+              <label for="deduplicate_exact">Normalisierte exakte Duplikate entfernen</label>
+              <input type="checkbox" id="deduplicate_exact" checked>
+
+              <label for="near_duplicate_action">Near-Duplikate</label>
+              <select id="near_duplicate_action">
+                <option value="warn" selected>Erkennen und melden</option>
+                <option value="exclude">Vom Training ausschließen</option>
+                <option value="off">Deaktiviert</option>
+              </select>
+
+              <label for="near_duplicate_threshold">Near-Duplikat Schwellwert</label>
+              <input type="number" id="near_duplicate_threshold" value="0.92" min="0.5" max="0.999" step="0.01">
+
+              <label for="quality_filter_mode">Qualitätsfilter</label>
+              <select id="quality_filter_mode">
+                <option value="warn" selected>Prüfen und melden</option>
+                <option value="exclude">Auffällige Samples ausschließen</option>
+                <option value="off">Deaktiviert</option>
+              </select>
+
+              <label for="quality_min_chars">Min. Zeichen für freie Texte</label>
+              <input type="number" id="quality_min_chars" value="24" min="1">
 
               <label for="log_cuda_memory">CUDA Memory Logging</label>
               <input type="checkbox" id="log_cuda_memory" checked>
@@ -896,12 +963,17 @@ MaTeLiX AI is a trademark/brand of TMP-SYSTEM-SERVICE GmbH.
               <div class="stat"><div class="k">Loss</div><div class="v" id="loss">-</div></div>
               <div class="stat"><div class="k">Lernrate</div><div class="v" id="learning_rate_display">-</div></div>
               <div class="stat"><div class="k">Validation Loss</div><div class="v" id="val_loss">-</div></div>
+              <div class="stat"><div class="k">Text Validation</div><div class="v" id="text_val_loss">-</div></div>
+              <div class="stat"><div class="k">Dialog Validation</div><div class="v" id="dialog_val_loss">-</div></div>
               <div class="stat"><div class="k">Perplexity</div><div class="v" id="perplexity">-</div></div>
               <div class="stat"><div class="k">Beste Validation Loss</div><div class="v" id="best_val_loss">-</div></div>
               <div class="stat"><div class="k">Early Stopping</div><div class="v" id="early_stopping_status">-</div></div>
               <div class="stat"><div class="k">Tokenbudget/Batch</div><div class="v" id="batch_token_budget">-</div></div>
               <div class="stat"><div class="k">Batches/Rank</div><div class="v" id="batches_per_rank">-</div></div>
               <div class="stat"><div class="k">Padding-Effizienz</div><div class="v" id="padding_efficiency">-</div></div>
+              <div class="stat"><div class="k">Token/Parameter geplant</div><div class="v" id="tokens_per_parameter">-</div></div>
+              <div class="stat"><div class="k">Trainingstokens/Epoche</div><div class="v" id="training_tokens_per_epoch">-</div></div>
+              <div class="stat"><div class="k">Effektiver Datenmix</div><div class="v" id="effective_data_mix">-</div></div>
               <div class="stat"><div class="k">DataLoader Worker</div><div class="v" id="loader_workers">-</div></div>
               <div class="stat"><div class="k">Training-Hardware</div><div class="v" id="training_hardware">-</div></div>
               <div class="stat"><div class="k">Effektive Precision</div><div class="v" id="training_precision">-</div></div>
@@ -916,6 +988,8 @@ MaTeLiX AI is a trademark/brand of TMP-SYSTEM-SERVICE GmbH.
 
               <div class="stat"><div class="k">Real Samples</div><div class="v" id="total_samples_real">-</div></div>
               <div class="stat"><div class="k">Skipped Samples</div><div class="v" id="skipped_samples">-</div></div>
+              <div class="stat"><div class="k">Erzeugte Text-Chunks</div><div class="v" id="chunks_created">-</div></div>
+              <div class="stat"><div class="k">Entfernte Duplikate</div><div class="v" id="duplicates_removed">-</div></div>
 
               <div class="stat"><div class="k">CUDA Allocated</div><div class="v" id="cuda_allocated_mb">-</div></div>
               <div class="stat"><div class="k">CUDA Reserved</div><div class="v" id="cuda_reserved_mb">-</div></div>
@@ -1095,7 +1169,7 @@ Hier folgt eine weitere Trainingszeile.</pre>
   </div>
 
   <footer>
-    © 2026 TMP-SYSTEM-SERVICE GmbH – Alle Rechte vorbehalten. Version 8.2
+    © 2026 TMP-SYSTEM-SERVICE GmbH – Alle Rechte vorbehalten. Version 8.3
   </footer>
 
   <!-- Loader Overlay -->
@@ -1420,6 +1494,7 @@ Hier folgt eine weitere Trainingszeile.</pre>
       document.querySelectorAll('.scratch_cfg_row').forEach(e => e.style.display = scratchEnabled ? "" : "none");
       const includePromptLoss = document.getElementById("include_prompt_loss");
       if (includePromptLoss && !scratchEnabled) includePromptLoss.checked = false;
+      applyTrainingPhaseUI();
     }
     document.getElementById("train_mode").addEventListener("change", applyTrainModeUI);
     document.getElementById("train_from_scratch").addEventListener("change", applyTrainModeUI);
@@ -1436,10 +1511,45 @@ Hier folgt eine weitere Trainingszeile.</pre>
       document.querySelectorAll('.mixed_text_column_row').forEach(e => {
         e.style.display = mixedAvailable && mixedToggle.checked ? "" : "none";
       });
+      applyTrainingPhaseUI();
     }
     document.getElementById("template_mode").addEventListener("change", applyTemplateModeUI);
     document.getElementById("mixed_training").addEventListener("change", applyTemplateModeUI);
     window.addEventListener('DOMContentLoaded', applyTemplateModeUI);
+
+    function applyTrainingPhaseUI() {
+      const phaseElement = document.getElementById("training_phase");
+      if (!phaseElement) return;
+      const phase = phaseElement.value;
+      const mixedToggle = document.getElementById("mixed_training");
+      const scratchEnabled = document.getElementById("train_from_scratch").checked;
+      const includePromptLoss = document.getElementById("include_prompt_loss");
+      const mode = document.getElementById("template_mode").value;
+      const mixedAvailable = document.getElementById("dataset_source").value !== "huggingface"
+        && (mode === "chat" || mode === "dialogplus");
+      if ((phase === "pretrain" || phase === "mixed") && mixedAvailable) {
+        mixedToggle.checked = true;
+      }
+      const showWeights = mixedAvailable && mixedToggle.checked
+        && (phase === "custom" || phase === "mixed");
+      document.querySelectorAll('.mixture_weight_row').forEach(e => {
+        e.style.display = showWeights ? "" : "none";
+      });
+      includePromptLoss.disabled = phase !== "custom";
+      if (phase === "pretrain" || (phase === "mixed" && scratchEnabled)) {
+        includePromptLoss.checked = true;
+      } else if (phase === "sft") {
+        includePromptLoss.checked = false;
+      }
+      const textColumnVisible = mixedAvailable && mixedToggle.checked && phase !== "sft";
+      document.querySelectorAll('.mixed_text_column_row').forEach(e => {
+        e.style.display = textColumnVisible ? "" : "none";
+      });
+    }
+    document.getElementById("training_phase").addEventListener("change", () => {
+      applyTrainingPhaseUI();
+      applyTemplateModeUI();
+    });
 
     // Dataset source UI
     let lastLocalTemplateMode = document.getElementById('template_mode').value;
@@ -1638,6 +1748,17 @@ Hier folgt eine weitere Trainingszeile.</pre>
       const hfDatasetSplit = document.getElementById("hf_dataset_split").value.trim() || "train";
       if (datasetSource === "local_csv" && !csvPath) { alert("Bitte csv_path angeben."); return; }
       if (datasetSource === "huggingface" && !hfDatasetId) { alert("Bitte HF Dataset ID angeben."); return; }
+      const trainingPhase = document.getElementById("training_phase").value;
+      const templateMode = document.getElementById("template_mode").value;
+      const mixedEnabled = document.getElementById("mixed_training").checked;
+      if (trainingPhase === "pretrain" && templateMode !== "plain" && !mixedEnabled) {
+        alert("Die Pretrain-Phase benötigt eine Plain-Text-CSV oder den aktivierten Mischmodus.");
+        return;
+      }
+      if (trainingPhase === "sft" && templateMode === "plain") {
+        alert("Die SFT-Phase benötigt ein strukturiertes Dialog-Dataset.");
+        return;
+      }
 
       const payload = {
         model_dir: modelDir,
@@ -1653,6 +1774,10 @@ Hier folgt eine weitere Trainingszeile.</pre>
           && datasetSource === "local_csv"
           && document.getElementById("template_mode").value !== "plain",
         mixed_text_column: document.getElementById("mixed_text_column").value.trim() || "Text",
+        training_phase: trainingPhase,
+        text_token_weight: parseFloat(document.getElementById("text_token_weight").value || "0.7"),
+        dialog_token_weight: parseFloat(document.getElementById("dialog_token_weight").value || "0.3"),
+        max_mixture_oversample: parseFloat(document.getElementById("max_mixture_oversample").value || "4"),
 
         learning_rate: parseFloat(document.getElementById("learning_rate").value),
         lr_schedule: document.getElementById("lr_schedule").value,
@@ -1687,6 +1812,12 @@ Hier folgt eine weitere Trainingszeile.</pre>
 
         max_seq_length: parseInt(document.getElementById("max_seq_length").value || "1024"),
         max_history_turns: maxHistoryTurns,
+        chunk_long_texts: document.getElementById("chunk_long_texts").checked,
+        text_chunk_overlap: parseInt(document.getElementById("text_chunk_overlap").value || "128"),
+        text_chunk_min_tokens: parseInt(document.getElementById("text_chunk_min_tokens").value || "32"),
+        append_eos_to_text: document.getElementById("append_eos_to_text").checked,
+        pack_short_texts: document.getElementById("pack_short_texts").checked,
+        pack_target_length: parseInt(document.getElementById("pack_target_length").value || "1024"),
 
         sort_by_length: document.getElementById("sort_by_length").checked,
         sort_by_similarity: document.getElementById("sort_by_similarity").checked,
@@ -1703,6 +1834,9 @@ Hier folgt eine weitere Trainingszeile.</pre>
         scratch_intermediate_size: integerOrNull(document.getElementById("scratch_intermediate_size").value),
         scratch_num_key_value_heads: integerOrNull(document.getElementById("scratch_num_key_value_heads").value),
         scratch_max_position_embeddings: integerOrNull(document.getElementById("scratch_max_position_embeddings").value),
+        tokenizer_dir: document.getElementById("tokenizer_dir").value.trim() || null,
+        train_scratch_tokenizer: document.getElementById("train_scratch_tokenizer").checked,
+        scratch_tokenizer_vocab_size: parseInt(document.getElementById("scratch_tokenizer_vocab_size").value || "32000"),
         lora_r: parseInt(document.getElementById("lora_r").value || "8"),
         lora_alpha: parseInt(document.getElementById("lora_alpha").value || "16"),
         lora_dropout: parseFloat(document.getElementById("lora_dropout").value || "0.05"),
@@ -1724,6 +1858,11 @@ Hier folgt eine weitere Trainingszeile.</pre>
         prefetch_factor: parseInt(document.getElementById("prefetch_factor").value || "4"),
         dataset_audit: true,
         dataset_audit_strict: document.getElementById("dataset_audit_strict").checked,
+        deduplicate_exact: document.getElementById("deduplicate_exact").checked,
+        near_duplicate_action: document.getElementById("near_duplicate_action").value,
+        near_duplicate_threshold: parseFloat(document.getElementById("near_duplicate_threshold").value || "0.92"),
+        quality_filter_mode: document.getElementById("quality_filter_mode").value,
+        quality_min_chars: parseInt(document.getElementById("quality_min_chars").value || "24"),
         merge_lora_on_save: document.getElementById("merge_lora_on_save")
           ? document.getElementById("merge_lora_on_save").checked
           : true,
@@ -1976,6 +2115,9 @@ Hier folgt eine weitere Trainingszeile.
         document.getElementById("loss").textContent = (typeof s.loss==="number" && Number.isFinite(s.loss)) ? s.loss.toFixed(6) : "-";
         document.getElementById("learning_rate_display").textContent = (typeof s.learning_rate==="number") ? s.learning_rate : "-";
         document.getElementById("val_loss").textContent = fmtNum(s.val_loss, 6);
+        const validationByType = s.validation_by_type || {};
+        document.getElementById("text_val_loss").textContent = fmtNum(validationByType.text?.loss, 6);
+        document.getElementById("dialog_val_loss").textContent = fmtNum(validationByType.dialog?.loss, 6);
         document.getElementById("perplexity").textContent = fmtNum(s.perplexity, 4);
         document.getElementById("best_val_loss").textContent = fmtNum(s.best_val_loss, 6);
         document.getElementById("early_stopping_status").textContent = s.early_stopped
@@ -1988,6 +2130,17 @@ Hier folgt eine weitere Trainingszeile.
           (typeof batchPlan.padding_efficiency === "number")
             ? `${(batchPlan.padding_efficiency * 100).toFixed(1)}%`
             : "-";
+        document.getElementById("tokens_per_parameter").textContent =
+          (typeof batchPlan.estimated_tokens_per_parameter === "number")
+            ? batchPlan.estimated_tokens_per_parameter.toFixed(2)
+            : "-";
+        document.getElementById("training_tokens_per_epoch").textContent =
+          fmtValue(batchPlan.training_tokens_per_epoch);
+        const mixTokens = batchPlan.mixture?.effective_tokens || {};
+        const typedMixTotal = (Number(mixTokens.text) || 0) + (Number(mixTokens.dialog) || 0);
+        document.getElementById("effective_data_mix").textContent = typedMixTotal > 0
+          ? `Text ${((Number(mixTokens.text) || 0) * 100 / typedMixTotal).toFixed(1)}% · Dialog ${((Number(mixTokens.dialog) || 0) * 100 / typedMixTotal).toFixed(1)}%`
+          : "-";
         document.getElementById("loader_workers").textContent = fmtValue(s.dataloader_num_workers_effective);
         const hardwareProfile = s.hardware_profile || {};
         document.getElementById("training_hardware").textContent =
@@ -2063,6 +2216,8 @@ Hier folgt eine weitere Trainingszeile.
 
         const producerProgress = s.producer_progress || {};
         const producerMeta = s.producer_meta || {};
+        document.getElementById("chunks_created").textContent = fmtValue(producerMeta.chunks_created);
+        document.getElementById("duplicates_removed").textContent = fmtValue(producerMeta.exact_duplicates_removed);
 
         document.getElementById("scheduler_mode").textContent = fmtValue(s.scheduler_mode);
         document.getElementById("scheduler_source").textContent = fmtValue(s.scheduler_source);

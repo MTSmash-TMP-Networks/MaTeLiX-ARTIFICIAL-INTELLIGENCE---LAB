@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 import argparse
+from collections import Counter, defaultdict
 import csv
 import gc
 import hashlib
@@ -27,11 +28,13 @@ import multiprocessing as mp
 import os
 import pickle
 import random
+import re
 import shutil
 import signal
 import sys
 import time
 import traceback
+import unicodedata
 from contextlib import nullcontext
 from dataclasses import dataclass, fields
 from pathlib import Path
@@ -91,6 +94,27 @@ class TrainConfig:
     column_name: str = "text"
     mixed_training: bool = False
     mixed_text_column: str = "Text"
+    training_phase: str = "custom"
+    text_token_weight: float = 0.7
+    dialog_token_weight: float = 0.3
+    max_mixture_oversample: float = 4.0
+
+    chunk_long_texts: bool = True
+    text_chunk_overlap: int = 128
+    text_chunk_min_tokens: int = 32
+    append_eos_to_text: bool = True
+    pack_short_texts: bool = False
+    pack_target_length: int = 1024
+
+    deduplicate_exact: bool = True
+    near_duplicate_action: str = "warn"
+    near_duplicate_threshold: float = 0.92
+    quality_filter_mode: str = "warn"
+    quality_min_chars: int = 24
+
+    tokenizer_dir: Optional[str] = None
+    train_scratch_tokenizer: bool = False
+    scratch_tokenizer_vocab_size: int = 32000
 
     learning_rate: float = 2e-4
     lr_schedule: str = "cosine"
@@ -219,6 +243,52 @@ class TrainConfig:
         self.seed = int(self.seed)
         self.mixed_training = bool(self.mixed_training)
         self.mixed_text_column = str(self.mixed_text_column or "Text").strip() or "Text"
+        self.training_phase = str(self.training_phase or "custom").strip().lower()
+        if self.training_phase not in {"custom", "pretrain", "mixed", "sft"}:
+            raise ValueError(
+                "training_phase muss custom, pretrain, mixed oder sft sein"
+            )
+        if self.training_phase == "mixed":
+            self.mixed_training = True
+        if self.training_phase == "sft":
+            self.include_prompt_loss = False
+        elif self.training_phase == "pretrain" or (
+            self.training_phase == "mixed" and self.train_from_scratch
+        ):
+            self.include_prompt_loss = True
+        self.text_token_weight = max(0.0, float(self.text_token_weight))
+        self.dialog_token_weight = max(0.0, float(self.dialog_token_weight))
+        if self.text_token_weight + self.dialog_token_weight <= 0.0:
+            raise ValueError("Mindestens ein Datengewicht muss größer als 0 sein")
+        self.max_mixture_oversample = max(1.0, float(self.max_mixture_oversample))
+        self.chunk_long_texts = bool(self.chunk_long_texts)
+        self.text_chunk_overlap = max(0, int(self.text_chunk_overlap))
+        self.text_chunk_min_tokens = max(1, int(self.text_chunk_min_tokens))
+        self.append_eos_to_text = bool(self.append_eos_to_text)
+        self.pack_short_texts = bool(self.pack_short_texts)
+        self.pack_target_length = min(
+            self.max_seq_length,
+            max(64, int(self.pack_target_length or min(1024, self.max_seq_length))),
+        )
+        self.deduplicate_exact = bool(self.deduplicate_exact)
+        self.near_duplicate_action = str(self.near_duplicate_action or "warn").strip().lower()
+        if self.near_duplicate_action not in {"off", "warn", "exclude"}:
+            raise ValueError("near_duplicate_action muss off, warn oder exclude sein")
+        self.near_duplicate_threshold = min(0.999, max(0.5, float(self.near_duplicate_threshold)))
+        self.quality_filter_mode = str(self.quality_filter_mode or "warn").strip().lower()
+        if self.quality_filter_mode not in {"off", "warn", "exclude"}:
+            raise ValueError("quality_filter_mode muss off, warn oder exclude sein")
+        self.quality_min_chars = max(1, int(self.quality_min_chars))
+        self.tokenizer_dir = str(self.tokenizer_dir).strip() if self.tokenizer_dir else None
+        self.train_scratch_tokenizer = bool(self.train_scratch_tokenizer)
+        self.scratch_tokenizer_vocab_size = max(256, int(self.scratch_tokenizer_vocab_size))
+        if (
+            self.train_from_scratch
+            and self.training_phase in {"pretrain", "mixed"}
+            and self.warmup_steps <= 0
+            and self.warmup_ratio <= 0.0
+        ):
+            self.warmup_ratio = 0.02
         self.dynamic_token_batching = bool(self.dynamic_token_batching)
         self.max_tokens_per_batch = max(0, int(self.max_tokens_per_batch))
         self.max_samples_per_batch = max(0, int(self.max_samples_per_batch))
@@ -564,6 +634,9 @@ def get_chat_template(template_mode: str) -> str:
 
 def prepare_tokenizer(tokenizer, template_mode: str = "chat", force_template: bool = True) -> bool:
     need_resize = False
+    if tokenizer.eos_token_id is None:
+        tokenizer.add_special_tokens({"eos_token": "<|eos|>"})
+        need_resize = True
     if tokenizer.pad_token_id is None:
         tokenizer.add_special_tokens({"pad_token": "<|pad|>"})
         need_resize = True
@@ -805,6 +878,109 @@ def interleave_examples(*iterables: Iterator[Any]) -> Iterator[Any]:
         active = remaining
 
 
+def normalize_for_dedup(text: str) -> str:
+    text = unicodedata.normalize("NFKC", text or "").casefold()
+    text = re.sub(r"\s+", " ", text).strip()
+    return text
+
+
+def canonical_example_text(item: StructuredChatSample | PlainTextSample | str) -> str:
+    if isinstance(item, PlainTextSample):
+        return item.text
+    if isinstance(item, str):
+        return item
+    parts = [f"system:{item.system}"] if item.system else []
+    parts.extend(f"{turn.role}:{turn.content}" for turn in item.turns)
+    parts.append(f"assistant:{item.target_answer}")
+    return "\n".join(parts)
+
+
+def quality_issues_for_example(
+    item: StructuredChatSample | PlainTextSample | str,
+    min_chars: int,
+) -> List[str]:
+    text = canonical_example_text(item)
+    issues: List[str] = []
+    if isinstance(item, (PlainTextSample, str)) and len(text.strip()) < min_chars:
+        issues.append("too_short")
+    if "\ufffd" in text:
+        issues.append("replacement_character")
+    if re.search(r"[\x00-\x08\x0b\x0c\x0e-\x1f]", text):
+        issues.append("control_characters")
+    if re.search(r"(?is)<(?:html|body|script|style|nav|footer)\b", text):
+        issues.append("html_boilerplate")
+    lines = [normalize_for_dedup(line) for line in text.splitlines() if line.strip()]
+    if len(lines) >= 6 and len(set(lines)) / float(len(lines)) < 0.55:
+        issues.append("repetitive_lines")
+    return issues
+
+
+def _simhash64(text: str) -> int:
+    words = re.findall(r"\w+", normalize_for_dedup(text), flags=re.UNICODE)
+    if not words:
+        return 0
+    width = 5 if len(words) >= 5 else max(1, len(words))
+    shingles = (
+        [" ".join(words[index:index + width]) for index in range(len(words) - width + 1)]
+        or [" ".join(words)]
+    )
+    vector = [0] * 64
+    for shingle in shingles:
+        value = int.from_bytes(
+            hashlib.blake2b(shingle.encode("utf-8"), digest_size=8).digest(),
+            "big",
+        )
+        for bit in range(64):
+            vector[bit] += 1 if value & (1 << bit) else -1
+    result = 0
+    for bit, score in enumerate(vector):
+        if score >= 0:
+            result |= 1 << bit
+    return result
+
+
+class NearDuplicateTracker:
+    """Bounded LSH tracker for approximate near-duplicate detection."""
+
+    def __init__(self, threshold: float, bucket_limit: int = 256):
+        self.max_hamming = max(1, int(round((1.0 - float(threshold)) * 64)))
+        self.bucket_limit = max(16, int(bucket_limit))
+        self.hashes: List[int] = []
+        self.group_keys: List[Optional[str]] = []
+        self.bands: Dict[Tuple[int, int], List[int]] = defaultdict(list)
+
+    def add_and_find(
+        self, text: str, group_key: Optional[str] = None,
+    ) -> Tuple[bool, Optional[str]]:
+        value = _simhash64(text)
+        candidate_ids: set[int] = set()
+        for band in range(4):
+            band_value = (value >> (band * 16)) & 0xFFFF
+            candidate_ids.update(self.bands.get((band, band_value), []))
+        matching_ids = [
+            index for index in sorted(candidate_ids)
+            if (value ^ self.hashes[index]).bit_count() <= self.max_hamming
+        ]
+        is_near = bool(matching_ids)
+        representative_key = (
+            self.group_keys[matching_ids[0]] if matching_ids else group_key
+        )
+        index = len(self.hashes)
+        self.hashes.append(value)
+        self.group_keys.append(representative_key)
+        for band in range(4):
+            key = (band, (value >> (band * 16)) & 0xFFFF)
+            bucket = self.bands[key]
+            bucket.append(index)
+            if len(bucket) > self.bucket_limit:
+                del bucket[:len(bucket) - self.bucket_limit]
+        return is_near, (representative_key if is_near else None)
+
+    def check_and_add(self, text: str) -> bool:
+        is_near, _ = self.add_and_find(text)
+        return is_near
+
+
 def _build_role_block(role: str, content: str, template_mode: str, eos_token: str) -> str:
     content = (content or "").strip()
     if role == "system":
@@ -862,7 +1038,7 @@ def _mixed_dataset_errors(
 
 def build_examples_stream(cfg: TrainConfig) -> Iterator[Any]:
     if cfg.template_mode in {"chat", "dialogplus"}:
-        if cfg.mixed_training:
+        if cfg.mixed_training and cfg.training_phase != "sft":
             errors = _mixed_dataset_errors(cfg.csv_path, cfg.mixed_text_column)
             if errors:
                 raise ValueError(
@@ -882,13 +1058,22 @@ def build_examples_stream(cfg: TrainConfig) -> Iterator[Any]:
                 split_groups = build_mixed_split_groups(
                     cfg.csv_path, cfg.mixed_text_column,
                 )
+                text_examples = mixed_text_iter(
+                    cfg.csv_path, cfg.mixed_text_column, split_groups,
+                )
+                if cfg.training_phase == "pretrain":
+                    return text_examples
+                if cfg.training_phase == "sft":
+                    return chat_examples
                 return interleave_examples(
                     remap_structured_split_keys(chat_examples, split_groups),
-                    mixed_text_iter(
-                        cfg.csv_path, cfg.mixed_text_column, split_groups,
-                    ),
+                    text_examples,
                 )
             return chat_examples
+        if cfg.training_phase == "sft":
+            raise ValueError(
+                "Die SFT-Phase benötigt ein strukturiertes Dialog-Dataset"
+            )
         return column_iter(cfg.csv_path, cfg.column_name)
     return column_iter(cfg.csv_path, cfg.column_name)
 
@@ -929,6 +1114,130 @@ def pack_dialog_from_blocks_strict(
     return input_ids, labels
 
 
+def _text_token_chunks(
+    text: str,
+    tokenizer: Any,
+    max_tokens: int,
+    overlap_tokens: int,
+    min_tokens: int,
+) -> Tuple[List[List[int]], int]:
+    """Split text on token boundaries and prefer nearby sentence/paragraph ends."""
+    max_tokens = max(1, int(max_tokens))
+    overlap_tokens = min(max(0, int(overlap_tokens)), max(0, max_tokens // 2))
+    min_tokens = min(max_tokens, max(1, int(min_tokens)))
+
+    offsets: Optional[List[Tuple[int, int]]] = None
+    try:
+        encoded = tokenizer(
+            text,
+            add_special_tokens=False,
+            return_offsets_mapping=True,
+        )
+        token_ids = list(encoded["input_ids"])
+        raw_offsets = encoded.get("offset_mapping")
+        if raw_offsets and len(raw_offsets) == len(token_ids):
+            offsets = [(int(start), int(end)) for start, end in raw_offsets]
+    except Exception:
+        token_ids = list(tokenizer(text, add_special_tokens=False)["input_ids"])
+
+    if len(token_ids) <= max_tokens:
+        return ([token_ids] if token_ids else []), len(token_ids)
+
+    boundary_chars = {
+        match.end()
+        for match in re.finditer(r"(?:\n\s*\n|[.!?](?:[\"'»”)]*)\s+|[;:]\s+)", text)
+    }
+    chunks: List[List[int]] = []
+    start = 0
+    while start < len(token_ids):
+        desired_end = min(len(token_ids), start + max_tokens)
+        end = desired_end
+        if offsets is not None and desired_end < len(token_ids):
+            earliest = min(desired_end, start + min_tokens)
+            candidates: List[int] = []
+            for token_end in range(earliest, desired_end + 1):
+                char_end = offsets[token_end - 1][1]
+                if char_end in boundary_chars:
+                    candidates.append(token_end)
+                    continue
+                following = text[char_end: min(len(text), char_end + 3)]
+                if "\n" in following:
+                    candidates.append(token_end)
+            if candidates:
+                end = candidates[-1]
+
+        if end <= start:
+            end = min(len(token_ids), start + max_tokens)
+        chunks.append(token_ids[start:end])
+        if end >= len(token_ids):
+            break
+        start = max(start + 1, end - overlap_tokens)
+
+    return chunks, len(token_ids)
+
+
+def tokenize_text_examples(
+    item: PlainTextSample | str,
+    tokenizer: Any,
+    max_seq_length: int,
+    *,
+    chunk_long_texts: bool,
+    text_chunk_overlap: int,
+    text_chunk_min_tokens: int,
+    append_eos_to_text: bool,
+) -> List[Dict[str, Any]]:
+    text = item if isinstance(item, str) else item.text
+    text = (text or "").strip()
+    if not text:
+        return []
+    split_key = (
+        "text:" + hashlib.sha256(text.encode("utf-8")).hexdigest()
+        if isinstance(item, str)
+        else item.split_key
+    )
+    eos_id = tokenizer.eos_token_id
+    if eos_id is None:
+        eos_id = tokenizer.pad_token_id
+    reserve_eos = 1 if append_eos_to_text and eos_id is not None else 0
+    content_limit = max(1, int(max_seq_length) - reserve_eos)
+
+    if chunk_long_texts:
+        chunks, original_token_count = _text_token_chunks(
+            text,
+            tokenizer,
+            content_limit,
+            text_chunk_overlap,
+            text_chunk_min_tokens,
+        )
+    else:
+        ids = list(tokenizer(text, add_special_tokens=False)["input_ids"])
+        original_token_count = len(ids)
+        chunks = [ids] if ids and len(ids) <= content_limit else []
+
+    samples: List[Dict[str, Any]] = []
+    chunk_count = len(chunks)
+    for chunk_index, content_ids in enumerate(chunks):
+        ids = list(content_ids)
+        if append_eos_to_text and eos_id is not None and (not ids or ids[-1] != eos_id):
+            ids.append(int(eos_id))
+        if len(ids) < 2:
+            ids.append(int(eos_id or tokenizer.pad_token_id or 0))
+        if len(ids) > max_seq_length:
+            continue
+        samples.append({
+            "input_ids": ids,
+            "attention_mask": [1] * len(ids),
+            "labels": ids.copy(),
+            "seq_len": len(ids),
+            "split_key": split_key,
+            "sample_type": "text",
+            "chunk_index": int(chunk_index),
+            "chunk_count": int(chunk_count),
+            "original_token_count": int(original_token_count),
+        })
+    return samples
+
+
 def tokenize_example(
     item: StructuredChatSample | PlainTextSample | str,
     tokenizer,
@@ -938,27 +1247,16 @@ def tokenize_example(
     include_prompt_loss: bool = False,
 ) -> Optional[Dict[str, Any]]:
     if isinstance(item, (str, PlainTextSample)):
-        text = item if isinstance(item, str) else item.text
-        split_key = (
-            "text:" + hashlib.sha256(text.strip().encode("utf-8")).hexdigest()
-            if isinstance(item, str)
-            else item.split_key
+        samples = tokenize_text_examples(
+            item,
+            tokenizer,
+            max_seq_length,
+            chunk_long_texts=False,
+            text_chunk_overlap=0,
+            text_chunk_min_tokens=1,
+            append_eos_to_text=True,
         )
-        ids = tokenizer(text, add_special_tokens=False)["input_ids"]
-        if len(ids) > max_seq_length:
-            return None
-        labels = ids.copy()
-        if len(ids) < 2:
-            eos_or_pad = tokenizer.eos_token_id or tokenizer.pad_token_id or 0
-            ids = ids + [eos_or_pad]
-            labels = labels + [eos_or_pad]
-        return {
-            "input_ids": ids,
-            "attention_mask": [1] * len(ids),
-            "labels": labels,
-            "seq_len": len(ids),
-            "split_key": split_key,
-        }
+        return samples[0] if samples else None
 
     prompt_blocks: List[List[int]] = []
     eos_token = tokenizer.eos_token or "</s>"
@@ -1012,7 +1310,76 @@ def tokenize_example(
         "labels": labels,
         "seq_len": len(input_ids),
         "split_key": item.split_key,
+        "sample_type": "dialog",
+        "chunk_index": 0,
+        "chunk_count": 1,
+        "original_token_count": len(input_ids),
     }
+
+
+class ShortTextPacker:
+    """Pack short text documents without crossing train/validation boundaries."""
+
+    def __init__(self, target_length: int):
+        self.target_length = max(64, int(target_length))
+        self.buffers: Dict[str, Dict[str, Any]] = {}
+        self.input_segments = 0
+        self.output_sequences = 0
+
+    def _start(self, sample: Dict[str, Any]) -> Dict[str, Any]:
+        packed = dict(sample)
+        packed["input_ids"] = list(sample["input_ids"])
+        packed["attention_mask"] = list(sample["attention_mask"])
+        packed["labels"] = list(sample["labels"])
+        packed["packed_segment_count"] = 1
+        packed["_packed_keys"] = [str(sample.get("split_key") or "")]
+        return packed
+
+    def _finish(self, sample: Dict[str, Any]) -> Dict[str, Any]:
+        keys = sample.pop("_packed_keys", [])
+        if len(keys) > 1:
+            payload = "\0".join(keys).encode("utf-8")
+            sample["split_key"] = "packed:" + hashlib.sha256(payload).hexdigest()
+        sample["seq_len"] = len(sample["input_ids"])
+        self.output_sequences += 1
+        return sample
+
+    def add(self, sample: Dict[str, Any]) -> List[Dict[str, Any]]:
+        if sample.get("sample_type") != "text" or len(sample["input_ids"]) >= self.target_length:
+            self.input_segments += 1
+            self.output_sequences += 1
+            sample["packed_segment_count"] = 1
+            return [sample]
+
+        self.input_segments += 1
+        assigned_split = str(sample.get("assigned_split") or "train")
+        current = self.buffers.get(assigned_split)
+        if current is None:
+            self.buffers[assigned_split] = self._start(sample)
+            return []
+
+        if len(current["input_ids"]) + len(sample["input_ids"]) > self.target_length:
+            finished = self._finish(current)
+            self.buffers[assigned_split] = self._start(sample)
+            return [finished]
+
+        next_labels = list(sample["labels"])
+        if next_labels:
+            next_labels[0] = -100
+        current["input_ids"].extend(sample["input_ids"])
+        current["attention_mask"].extend(sample["attention_mask"])
+        current["labels"].extend(next_labels)
+        current["packed_segment_count"] += 1
+        current["original_token_count"] = int(current.get("original_token_count", 0)) + int(
+            sample.get("original_token_count", len(sample["input_ids"]))
+        )
+        current["_packed_keys"].append(str(sample.get("split_key") or ""))
+        return []
+
+    def flush(self) -> List[Dict[str, Any]]:
+        samples = [self._finish(sample) for sample in self.buffers.values()]
+        self.buffers.clear()
+        return samples
 
 
 def count_examples_fast(cfg: TrainConfig) -> int:
@@ -1024,9 +1391,13 @@ def count_examples_fast(cfg: TrainConfig) -> int:
             for row in reader:
                 rid = normalize_id(row.get("id", ""))
                 asst = (row.get("Assistentin") or "").strip()
-                if rid and asst:
+                if rid and asst and cfg.training_phase != "pretrain":
                     count += 1
-                if cfg.mixed_training and (row.get(cfg.mixed_text_column) or "").strip():
+                if (
+                    cfg.mixed_training
+                    and cfg.training_phase != "sft"
+                    and (row.get(cfg.mixed_text_column) or "").strip()
+                ):
                     count += 1
         else:
             for row in reader:
@@ -1040,6 +1411,7 @@ def audit_dataset(cfg: TrainConfig, outdir: Path, is_main: bool) -> Dict[str, An
     report: Dict[str, Any] = {
         "csv_path": str(Path(cfg.csv_path).expanduser().resolve()),
         "template_mode": cfg.template_mode,
+        "training_phase": cfg.training_phase,
         "mixed_training": bool(cfg.mixed_training),
         "mixed_text_column": cfg.mixed_text_column,
         "errors": [],
@@ -1054,21 +1426,36 @@ def audit_dataset(cfg: TrainConfig, outdir: Path, is_main: bool) -> Dict[str, An
             and {"id", "Assistentin"}.issubset(fieldnames)
         )
         mixed_column_present = cfg.mixed_text_column in fieldnames
+        mixed_text_required = bool(
+            cfg.mixed_training and cfg.training_phase != "sft"
+        )
         missing_mixed_columns = [
             name
             for name in (*STRUCTURED_CSV_COLUMNS, cfg.mixed_text_column)
             if name not in fieldnames
         ]
         mixed_training_ready = bool(
-            cfg.mixed_training and not missing_mixed_columns
+            cfg.training_phase == "sft"
+            or (mixed_text_required and not missing_mixed_columns)
         )
         report["mixed_text_column_present"] = mixed_column_present
         report["mixed_training_ready"] = mixed_training_ready
-        if cfg.mixed_training and missing_mixed_columns:
+        if mixed_text_required and missing_mixed_columns:
             report["errors"].append(
                 "CSV-Spalten für gemischtes Training fehlen: "
                 + ", ".join(missing_mixed_columns)
             )
+        if cfg.training_phase == "pretrain" and is_threaded and not cfg.mixed_training:
+            report["errors"].append(
+                "Die Pretrain-Phase benötigt eine Plain-Text-CSV oder den aktivierten Mischmodus"
+            )
+        if cfg.training_phase == "sft" and not is_threaded:
+            report["errors"].append(
+                "Die SFT-Phase benötigt ein strukturiertes Dialog-Dataset"
+            )
+        report["training_phase_ready"] = not any(
+            "Phase benötigt" in error for error in report["errors"]
+        )
         row_count = 0
 
         if is_threaded or cfg.mixed_training:
@@ -1080,6 +1467,11 @@ def audit_dataset(cfg: TrainConfig, outdir: Path, is_main: bool) -> Dict[str, An
             usable_assistant_samples = 0
             mixed_text_samples = mixed_text_duplicates = 0
             seen_mixed_texts: set[str] = set()
+            quality_issue_counts: Counter[str] = Counter()
+            near_duplicate_samples = 0
+            potential_conflicting_answers = 0
+            near_tracker = NearDuplicateTracker(cfg.near_duplicate_threshold)
+            prompt_answers: Dict[str, set[str]] = defaultdict(set)
             for row in reader:
                 row_count += 1
                 rid = normalize_id(row.get("id"))
@@ -1111,12 +1503,30 @@ def audit_dataset(cfg: TrainConfig, outdir: Path, is_main: bool) -> Dict[str, An
                     if pair_hash in seen_pairs:
                         duplicate_pairs += 1
                     seen_pairs.add(pair_hash)
+                    prompt_key = normalize_for_dedup(
+                        "\n".join([
+                            (row.get("system") or "").strip(),
+                            (row.get("Kontext") or "").strip(),
+                            user,
+                        ])
+                    )
+                    answer_key = normalize_for_dedup(answer)
+                    known_answers = prompt_answers[prompt_key]
+                    if known_answers and answer_key not in known_answers:
+                        potential_conflicting_answers += 1
+                    known_answers.add(answer_key)
                 if mixed_text:
                     mixed_text_samples += 1
-                    text_hash = hashlib.sha256(mixed_text.encode("utf-8")).hexdigest()
+                    normalized_text = normalize_for_dedup(mixed_text)
+                    text_hash = hashlib.sha256(normalized_text.encode("utf-8")).hexdigest()
                     if text_hash in seen_mixed_texts:
                         mixed_text_duplicates += 1
                     seen_mixed_texts.add(text_hash)
+                    if cfg.near_duplicate_action != "off" and near_tracker.check_and_add(mixed_text):
+                        near_duplicate_samples += 1
+                    quality_issue_counts.update(
+                        quality_issues_for_example(mixed_text, cfg.quality_min_chars)
+                    )
 
             cycles = 0
             visit_state: Dict[str, int] = {}
@@ -1144,6 +1554,9 @@ def audit_dataset(cfg: TrainConfig, outdir: Path, is_main: bool) -> Dict[str, An
                 "thread_cycles": cycles,
                 "usable_mixed_text_samples": mixed_text_samples,
                 "duplicate_mixed_text_samples": mixed_text_duplicates,
+                "approximate_near_duplicate_samples": near_duplicate_samples,
+                "potential_conflicting_answers": potential_conflicting_answers,
+                "quality_issues": dict(sorted(quality_issue_counts.items())),
             })
             if duplicate_ids:
                 report["errors"].append(f"{duplicate_ids} doppelte IDs")
@@ -1161,7 +1574,22 @@ def audit_dataset(cfg: TrainConfig, outdir: Path, is_main: bool) -> Dict[str, An
                 report["warnings"].append(
                     f"{mixed_text_duplicates} exakte Duplikate in {cfg.mixed_text_column}"
                 )
-            if cfg.mixed_training and mixed_text_samples == 0:
+            if near_duplicate_samples:
+                report["warnings"].append(
+                    f"{near_duplicate_samples} mögliche Near-Duplikate"
+                )
+            if potential_conflicting_answers:
+                report["warnings"].append(
+                    f"{potential_conflicting_answers} möglicherweise widersprüchliche Antworten"
+                )
+            if quality_issue_counts:
+                report["warnings"].append(
+                    "Qualitätshinweise: "
+                    + ", ".join(
+                        f"{name}={count}" for name, count in sorted(quality_issue_counts.items())
+                    )
+                )
+            if mixed_text_required and mixed_text_samples == 0:
                 report["mixed_training_ready"] = False
                 report["errors"].append(
                     f"Keine nutzbaren Texte in {cfg.mixed_text_column}"
@@ -1171,6 +1599,9 @@ def audit_dataset(cfg: TrainConfig, outdir: Path, is_main: bool) -> Dict[str, An
                 report["errors"].append(f"Textspalte fehlt: {cfg.column_name}")
             seen_values: set[str] = set()
             usable_count = empty_count = duplicate_count = 0
+            near_duplicate_samples = 0
+            quality_issue_counts: Counter[str] = Counter()
+            near_tracker = NearDuplicateTracker(cfg.near_duplicate_threshold)
             for row in reader:
                 row_count += 1
                 value = (row.get(cfg.column_name) or "").strip()
@@ -1178,18 +1609,37 @@ def audit_dataset(cfg: TrainConfig, outdir: Path, is_main: bool) -> Dict[str, An
                     empty_count += 1
                     continue
                 usable_count += 1
-                if value in seen_values:
+                normalized_value = normalize_for_dedup(value)
+                if normalized_value in seen_values:
                     duplicate_count += 1
-                seen_values.add(value)
+                seen_values.add(normalized_value)
+                if cfg.near_duplicate_action != "off" and near_tracker.check_and_add(value):
+                    near_duplicate_samples += 1
+                quality_issue_counts.update(
+                    quality_issues_for_example(value, cfg.quality_min_chars)
+                )
             report.update({
                 "usable_text_samples": usable_count,
                 "empty_text_samples": empty_count,
                 "duplicate_text_samples": duplicate_count,
+                "approximate_near_duplicate_samples": near_duplicate_samples,
+                "quality_issues": dict(sorted(quality_issue_counts.items())),
             })
             if not usable_count:
                 report["errors"].append("Keine nutzbaren Textsamples")
             if duplicate_count:
                 report["warnings"].append(f"{duplicate_count} exakte Textduplikate")
+            if near_duplicate_samples:
+                report["warnings"].append(
+                    f"{near_duplicate_samples} mögliche Near-Duplikate"
+                )
+            if quality_issue_counts:
+                report["warnings"].append(
+                    "Qualitätshinweise: "
+                    + ", ".join(
+                        f"{name}={count}" for name, count in sorted(quality_issue_counts.items())
+                    )
+                )
 
     report["rows"] = row_count
 
@@ -1230,12 +1680,83 @@ def get_first_raw_example_preview(cfg: TrainConfig) -> Tuple[str, str]:
     return preview[:4000], preview[:20000]
 
 
+def iter_tokenizer_training_texts(cfg: TrainConfig) -> Iterator[str]:
+    for item in build_examples_stream(cfg):
+        text = canonical_example_text(item).strip()
+        if text:
+            yield text
+
+
+def prepare_scratch_tokenizer_if_requested(
+    cfg: TrainConfig, outdir: Path, ctx: DistContext,
+) -> None:
+    if cfg.resume:
+        cfg.tokenizer_dir = str(Path(cfg.resume).expanduser().resolve())
+        return
+    if not cfg.train_scratch_tokenizer:
+        return
+    if not cfg.train_from_scratch:
+        raise ValueError(
+            "train_scratch_tokenizer ist nur zusammen mit train_from_scratch erlaubt"
+        )
+
+    tokenizer_dir = outdir / "scratch_tokenizer"
+    error_path = outdir / "scratch_tokenizer_error.txt"
+    if ctx.is_main:
+        error_path.unlink(missing_ok=True)
+        try:
+            base_tokenizer = AutoTokenizer.from_pretrained(
+                cfg.tokenizer_dir or cfg.model_dir,
+                trust_remote_code=False,
+                use_fast=True,
+            )
+            if not hasattr(base_tokenizer, "train_new_from_iterator"):
+                raise RuntimeError("Der gewählte Tokenizer unterstützt kein Scratch-Training")
+            example_count = count_examples_fast(cfg)
+            trained_tokenizer = base_tokenizer.train_new_from_iterator(
+                iter_tokenizer_training_texts(cfg),
+                vocab_size=cfg.scratch_tokenizer_vocab_size,
+                length=max(1, example_count),
+            )
+            prepare_tokenizer(
+                trained_tokenizer,
+                template_mode=cfg.template_mode,
+                force_template=bool(cfg.force_template),
+            )
+            tokenizer_dir.mkdir(parents=True, exist_ok=True)
+            trained_tokenizer.save_pretrained(tokenizer_dir)
+            _atomic_write_json(tokenizer_dir / "training_report.json", {
+                "source": cfg.tokenizer_dir or cfg.model_dir,
+                "vocab_size_requested": int(cfg.scratch_tokenizer_vocab_size),
+                "vocab_size_effective": int(len(trained_tokenizer)),
+                "examples_seen_estimate": int(example_count),
+                "training_phase": cfg.training_phase,
+            })
+            LOGGER.info(
+                "Scratch-Tokenizer trainiert | source=%s vocab=%s path=%s",
+                cfg.tokenizer_dir or cfg.model_dir,
+                len(trained_tokenizer),
+                tokenizer_dir,
+            )
+        except Exception as exc:
+            error_path.write_text(
+                f"{exc.__class__.__name__}: {exc}\n\n{traceback.format_exc()}",
+                encoding="utf-8",
+            )
+    barrier(ctx)
+    if error_path.exists():
+        raise RuntimeError(error_path.read_text(encoding="utf-8"))
+    if not tokenizer_dir.is_dir():
+        raise RuntimeError(f"Scratch-Tokenizer wurde nicht erzeugt: {tokenizer_dir}")
+    cfg.tokenizer_dir = str(tokenizer_dir)
+
+
 def compute_shard_cache_dir(cfg: TrainConfig) -> Path:
     csv_path = Path(cfg.csv_path).expanduser().resolve()
     csv_stat = csv_path.stat()
 
     payload = {
-        "cache_schema": 2,
+        "cache_schema": 3,
         "csv_path": str(csv_path),
         "csv_mtime": int(csv_stat.st_mtime),
         "csv_size": int(csv_stat.st_size),
@@ -1244,6 +1765,21 @@ def compute_shard_cache_dir(cfg: TrainConfig) -> Path:
         "column_name": cfg.column_name,
         "mixed_training": bool(cfg.mixed_training),
         "mixed_text_column": cfg.mixed_text_column,
+        "training_phase": cfg.training_phase,
+        "chunk_long_texts": bool(cfg.chunk_long_texts),
+        "text_chunk_overlap": int(cfg.text_chunk_overlap),
+        "text_chunk_min_tokens": int(cfg.text_chunk_min_tokens),
+        "append_eos_to_text": bool(cfg.append_eos_to_text),
+        "pack_short_texts": bool(cfg.pack_short_texts),
+        "pack_target_length": int(cfg.pack_target_length),
+        "deduplicate_exact": bool(cfg.deduplicate_exact),
+        "near_duplicate_action": cfg.near_duplicate_action,
+        "near_duplicate_threshold": float(cfg.near_duplicate_threshold),
+        "quality_filter_mode": cfg.quality_filter_mode,
+        "quality_min_chars": int(cfg.quality_min_chars),
+        "tokenizer_dir": cfg.tokenizer_dir,
+        "val_split": float(cfg.val_split),
+        "split_seed": int(cfg.split_seed),
         "max_seq_length": int(cfg.max_seq_length),
         "sort_by_length": bool(cfg.sort_by_length),
         "max_history_turns": cfg.max_history_turns,
@@ -1381,6 +1917,19 @@ def _write_producer_progress(
     _atomic_write_json(producer_progress_path(cache_dir), payload)
 
 
+def _histogram_percentile(histogram: Counter[int], quantile: float) -> int:
+    total = sum(histogram.values())
+    if total <= 0:
+        return 0
+    target = max(1, int(math.ceil(total * min(1.0, max(0.0, quantile)))))
+    running = 0
+    for upper_bound, count in sorted(histogram.items()):
+        running += count
+        if running >= target:
+            return int(upper_bound)
+    return int(max(histogram))
+
+
 def shard_producer_process_main(cfg_dict: Dict[str, Any], cache_dir_str: str) -> None:
     try:
         cfg = TrainConfig(**cfg_dict)
@@ -1388,7 +1937,8 @@ def shard_producer_process_main(cfg_dict: Dict[str, Any], cache_dir_str: str) ->
         cache_dir = Path(cache_dir_str)
         cache_dir.mkdir(parents=True, exist_ok=True)
 
-        tokenizer = AutoTokenizer.from_pretrained(cfg.model_dir, trust_remote_code=False, use_fast=True)
+        tokenizer_source = cfg.tokenizer_dir or cfg.model_dir
+        tokenizer = AutoTokenizer.from_pretrained(tokenizer_source, trust_remote_code=False, use_fast=True)
         prepare_tokenizer(tokenizer, template_mode=cfg.template_mode, force_template=bool(cfg.force_template))
 
         ngram_cfg = NgramConfig(
@@ -1409,6 +1959,7 @@ def shard_producer_process_main(cfg_dict: Dict[str, Any], cache_dir_str: str) ->
             column_name=cfg.column_name,
             mixed_training=cfg.mixed_training,
             mixed_text_column=cfg.mixed_text_column,
+            training_phase=cfg.training_phase,
             csv_path=cfg.csv_path,
         )
 
@@ -1432,6 +1983,21 @@ def shard_producer_process_main(cfg_dict: Dict[str, Any], cache_dir_str: str) ->
         total_samples = 0
         skipped_samples = 0
         seen_samples = 0
+        raw_samples_by_type: Counter[str] = Counter()
+        tokenized_segments_by_type: Counter[str] = Counter()
+        output_samples_by_type: Counter[str] = Counter()
+        output_tokens_by_type: Counter[str] = Counter()
+        supervised_tokens_by_type: Counter[str] = Counter()
+        assigned_split_counts: Counter[str] = Counter()
+        skipped_reasons: Counter[str] = Counter()
+        quality_issue_counts: Counter[str] = Counter()
+        exact_duplicates_removed = 0
+        near_duplicates_found = 0
+        chunks_created = 0
+        length_histogram: Counter[int] = Counter()
+        seen_fingerprints: set[str] = set()
+        near_tracker = NearDuplicateTracker(cfg.near_duplicate_threshold)
+        packer = ShortTextPacker(cfg.pack_target_length) if cfg.pack_short_texts else None
 
         current_samples: List[Dict[str, Any]] = []
         pending_samples: List[Dict[str, Any]] = []
@@ -1443,40 +2009,17 @@ def shard_producer_process_main(cfg_dict: Dict[str, Any], cache_dir_str: str) ->
 
         examples_iter = build_examples_stream(cfg)
 
-        _write_producer_progress(
-            cache_dir,
-            seen_samples=0,
-            tokenized_samples=0,
-            skipped_samples=0,
-            shard_idx=0,
-            done=False,
-        )
-
-        for item in examples_iter:
-            seen_samples += 1
-
-            sample = tokenize_example(
-                item=item,
-                tokenizer=tokenizer,
-                max_seq_length=int(cfg.max_seq_length),
-                template_mode=cfg.template_mode,
-                max_history_turns=cfg.max_history_turns,
-                include_prompt_loss=bool(cfg.include_prompt_loss),
+        def queue_output_sample(sample: Dict[str, Any]) -> None:
+            nonlocal pending_samples, current_samples, shard_idx, global_start, total_samples
+            sample_type = str(sample.get("sample_type") or "unknown")
+            seq_len = int(sample.get("seq_len") or len(sample["input_ids"]))
+            output_samples_by_type[sample_type] += 1
+            output_tokens_by_type[sample_type] += seq_len
+            supervised_tokens_by_type[sample_type] += sum(
+                1 for label in sample.get("labels", [])[1:] if int(label) != -100
             )
-
-            if sample is None:
-                skipped_samples += 1
-                if seen_samples % 100 == 0:
-                    _write_producer_progress(
-                        cache_dir,
-                        seen_samples=seen_samples,
-                        tokenized_samples=total_samples,
-                        skipped_samples=skipped_samples,
-                        shard_idx=shard_idx,
-                        done=False,
-                    )
-                continue
-
+            assigned_split_counts[str(sample.get("assigned_split") or "train")] += 1
+            length_histogram[int(math.ceil(seq_len / 64.0) * 64)] += 1
             pending_samples.append(sample)
             total_samples += 1
 
@@ -1491,6 +2034,9 @@ def shard_producer_process_main(cfg_dict: Dict[str, Any], cache_dir_str: str) ->
                     sort_by_length=bool(cfg.sort_by_length),
                     sort_by_similarity=bool(cfg.sort_by_similarity),
                 )
+
+        def write_periodic_progress() -> None:
+            if seen_samples % 100 == 0:
                 _write_producer_progress(
                     cache_dir,
                     seen_samples=seen_samples,
@@ -1499,6 +2045,112 @@ def shard_producer_process_main(cfg_dict: Dict[str, Any], cache_dir_str: str) ->
                     shard_idx=shard_idx,
                     done=False,
                 )
+
+        _write_producer_progress(
+            cache_dir,
+            seen_samples=0,
+            tokenized_samples=0,
+            skipped_samples=0,
+            shard_idx=0,
+            done=False,
+        )
+
+        for item in examples_iter:
+            seen_samples += 1
+            sample_type = "dialog" if isinstance(item, StructuredChatSample) else "text"
+            raw_samples_by_type[sample_type] += 1
+            canonical_text = canonical_example_text(item)
+            source_split_key = (
+                item.split_key
+                if isinstance(item, (StructuredChatSample, PlainTextSample))
+                else "text:" + hashlib.sha256(canonical_text.encode("utf-8")).hexdigest()
+            )
+            normalized_text = normalize_for_dedup(canonical_text)
+            fingerprint = hashlib.sha256(normalized_text.encode("utf-8")).hexdigest()
+            issues = quality_issues_for_example(item, cfg.quality_min_chars)
+            quality_issue_counts.update(issues)
+
+            if cfg.deduplicate_exact and fingerprint in seen_fingerprints:
+                skipped_samples += 1
+                exact_duplicates_removed += 1
+                skipped_reasons["exact_duplicate"] += 1
+                write_periodic_progress()
+                continue
+            seen_fingerprints.add(fingerprint)
+
+            if issues and cfg.quality_filter_mode == "exclude":
+                skipped_samples += 1
+                skipped_reasons["quality_filter"] += 1
+                write_periodic_progress()
+                continue
+
+            is_near_duplicate = False
+            near_representative_split_key: Optional[str] = None
+            if cfg.near_duplicate_action != "off":
+                is_near_duplicate, near_representative_split_key = near_tracker.add_and_find(
+                    canonical_text,
+                    source_split_key,
+                )
+                if is_near_duplicate:
+                    near_duplicates_found += 1
+            if is_near_duplicate and cfg.near_duplicate_action == "exclude":
+                skipped_samples += 1
+                skipped_reasons["near_duplicate"] += 1
+                write_periodic_progress()
+                continue
+
+            if isinstance(item, (PlainTextSample, str)):
+                samples = tokenize_text_examples(
+                    item,
+                    tokenizer,
+                    int(cfg.max_seq_length),
+                    chunk_long_texts=bool(cfg.chunk_long_texts),
+                    text_chunk_overlap=int(cfg.text_chunk_overlap),
+                    text_chunk_min_tokens=int(cfg.text_chunk_min_tokens),
+                    append_eos_to_text=bool(cfg.append_eos_to_text),
+                )
+                chunks_created += max(0, len(samples) - 1)
+            else:
+                dialog_sample = tokenize_example(
+                    item=item,
+                    tokenizer=tokenizer,
+                    max_seq_length=int(cfg.max_seq_length),
+                    template_mode=cfg.template_mode,
+                    max_history_turns=cfg.max_history_turns,
+                    include_prompt_loss=bool(cfg.include_prompt_loss),
+                )
+                samples = [dialog_sample] if dialog_sample is not None else []
+
+            if not samples:
+                skipped_samples += 1
+                skipped_reasons[
+                    "oversize_text" if sample_type == "text" else "oversize_dialog"
+                ] += 1
+                write_periodic_progress()
+                continue
+
+            tokenized_segments_by_type[sample_type] += len(samples)
+            for sample in samples:
+                split_key_for_assignment = (
+                    near_representative_split_key or sample.get("split_key")
+                )
+                is_validation = belongs_to_dataset_split(
+                    split="validation",
+                    val_split=cfg.val_split,
+                    split_seed=cfg.split_seed,
+                    global_idx=0,
+                    split_key=split_key_for_assignment,
+                )
+                sample["assigned_split"] = "validation" if is_validation else "train"
+                output_samples = packer.add(sample) if packer is not None else [sample]
+                for output_sample in output_samples:
+                    queue_output_sample(output_sample)
+
+            write_periodic_progress()
+
+        if packer is not None:
+            for output_sample in packer.flush():
+                queue_output_sample(output_sample)
 
         if pending_samples:
             pending_samples, current_samples, shard_idx, global_start = _flush_pending_samples(
@@ -1531,6 +2183,29 @@ def shard_producer_process_main(cfg_dict: Dict[str, Any], cache_dir_str: str) ->
             "total_samples": total_samples,
             "seen_samples": seen_samples,
             "skipped_samples": skipped_samples,
+            "skipped_reasons": dict(sorted(skipped_reasons.items())),
+            "raw_samples_by_type": dict(sorted(raw_samples_by_type.items())),
+            "tokenized_segments_by_type": dict(sorted(tokenized_segments_by_type.items())),
+            "output_samples_by_type": dict(sorted(output_samples_by_type.items())),
+            "output_tokens_by_type": dict(sorted(output_tokens_by_type.items())),
+            "supervised_tokens_by_type": dict(sorted(supervised_tokens_by_type.items())),
+            "assigned_split_counts": dict(sorted(assigned_split_counts.items())),
+            "exact_duplicates_removed": exact_duplicates_removed,
+            "near_duplicates_found": near_duplicates_found,
+            "quality_issues": dict(sorted(quality_issue_counts.items())),
+            "chunks_created": chunks_created,
+            "packing": {
+                "enabled": bool(packer is not None),
+                "target_length": int(cfg.pack_target_length),
+                "input_segments": int(packer.input_segments if packer is not None else 0),
+                "output_sequences": int(packer.output_sequences if packer is not None else 0),
+            },
+            "length_percentiles_approx": {
+                "p50": _histogram_percentile(length_histogram, 0.50),
+                "p95": _histogram_percentile(length_histogram, 0.95),
+                "p99": _histogram_percentile(length_histogram, 0.99),
+            },
+            "training_phase": cfg.training_phase,
             "template_mode": cfg.template_mode,
             "max_seq_length": cfg.max_seq_length,
             "max_history_turns": cfg.max_history_turns,
@@ -1733,6 +2408,26 @@ def belongs_to_dataset_split(
     return is_validation if split == "validation" else not is_validation
 
 
+def tokenized_sample_belongs_to_split(
+    item: Dict[str, Any],
+    *,
+    split: str,
+    val_split: float,
+    split_seed: int,
+    global_idx: int,
+) -> bool:
+    assigned_split = str(item.get("assigned_split") or "").strip().lower()
+    if assigned_split in {"train", "validation"}:
+        return assigned_split == str(split).lower().strip()
+    return belongs_to_dataset_split(
+        split=split,
+        val_split=val_split,
+        split_seed=split_seed,
+        global_idx=global_idx,
+        split_key=item.get("split_key"),
+    )
+
+
 class TokenizedShardIterableDataset(IterableDataset):
     def __init__(
         self,
@@ -1744,6 +2439,7 @@ class TokenizedShardIterableDataset(IterableDataset):
         split: str = "train",
         val_split: float = 0.0,
         split_seed: int = 42,
+        sample_type_filter: Optional[str] = None,
     ):
         super().__init__()
         self.cache_dir = cache_dir
@@ -1754,6 +2450,9 @@ class TokenizedShardIterableDataset(IterableDataset):
         self.split = str(split).lower().strip()
         self.val_split = min(0.5, max(0.0, float(val_split)))
         self.split_seed = int(split_seed)
+        self.sample_type_filter = (
+            str(sample_type_filter).strip().lower() if sample_type_filter else None
+        )
 
     def _belongs_to_split(self, global_idx: int, split_key: Optional[str] = None) -> bool:
         return belongs_to_dataset_split(
@@ -1798,7 +2497,19 @@ class TokenizedShardIterableDataset(IterableDataset):
             for local_idx in order:
                 global_idx = global_start + local_idx
                 item = samples[local_idx]
-                if not self._belongs_to_split(global_idx, item.get("split_key")):
+                if not tokenized_sample_belongs_to_split(
+                    item,
+                    split=self.split,
+                    val_split=self.val_split,
+                    split_seed=self.split_seed,
+                    global_idx=global_idx,
+                ):
+                    continue
+                if (
+                    self.sample_type_filter
+                    and str(item.get("sample_type") or "unknown").lower()
+                    != self.sample_type_filter
+                ):
                     continue
                 if (global_idx % combined_world_size) != combined_rank:
                     continue
@@ -1817,6 +2528,94 @@ class SampleRef:
     local_idx: int
     global_idx: int
     seq_len: int
+    sample_type: str = "unknown"
+    repeat_index: int = 0
+
+
+def apply_token_mixture_weights(
+    refs: List[SampleRef], cfg: TrainConfig,
+) -> Tuple[List[SampleRef], Dict[str, Any]]:
+    raw_tokens: Counter[str] = Counter()
+    groups: Dict[str, List[SampleRef]] = defaultdict(list)
+    for ref in refs:
+        groups[ref.sample_type].append(ref)
+        raw_tokens[ref.sample_type] += ref.seq_len
+
+    stats: Dict[str, Any] = {
+        "enabled": False,
+        "requested_weights": {
+            "text": float(cfg.text_token_weight),
+            "dialog": float(cfg.dialog_token_weight),
+        },
+        "raw_tokens": dict(sorted(raw_tokens.items())),
+        "raw_samples": {name: len(values) for name, values in sorted(groups.items())},
+    }
+    should_mix = bool(
+        cfg.mixed_training
+        and cfg.training_phase in {"custom", "mixed"}
+        and groups.get("text")
+        and groups.get("dialog")
+    )
+    if not should_mix:
+        stats["effective_tokens"] = dict(sorted(raw_tokens.items()))
+        stats["effective_samples"] = {name: len(values) for name, values in sorted(groups.items())}
+        return refs, stats
+
+    weights = {
+        "text": max(0.0, float(cfg.text_token_weight)),
+        "dialog": max(0.0, float(cfg.dialog_token_weight)),
+    }
+    weight_sum = sum(weights.values())
+    weights = {name: value / weight_sum for name, value in weights.items()}
+    if any(value <= 0.0 for value in weights.values()):
+        filtered = [ref for ref in refs if weights.get(ref.sample_type, 1.0) > 0.0]
+        token_counts: Counter[str] = Counter()
+        for ref in filtered:
+            token_counts[ref.sample_type] += ref.seq_len
+        stats.update({
+            "enabled": True,
+            "effective_tokens": dict(sorted(token_counts.items())),
+            "effective_samples": dict(Counter(ref.sample_type for ref in filtered)),
+        })
+        return filtered, stats
+
+    target_total = max(
+        raw_tokens[name] / max(1e-12, weights[name])
+        for name in ("text", "dialog")
+    )
+    weighted_refs = list(refs)
+    effective_tokens = Counter(raw_tokens)
+    effective_samples: Counter[str] = Counter(ref.sample_type for ref in refs)
+    oversampled: Counter[str] = Counter()
+    for name in ("text", "dialog"):
+        desired_tokens = int(math.ceil(target_total * weights[name]))
+        capped_tokens = int(raw_tokens[name] * cfg.max_mixture_oversample)
+        target_tokens = min(desired_tokens, max(raw_tokens[name], capped_tokens))
+        group = groups[name]
+        index = 0
+        while effective_tokens[name] < target_tokens and group:
+            ref = group[index % len(group)]
+            weighted_refs.append(SampleRef(
+                shard_idx=ref.shard_idx,
+                local_idx=ref.local_idx,
+                global_idx=ref.global_idx,
+                seq_len=ref.seq_len,
+                sample_type=ref.sample_type,
+                repeat_index=1 + index // len(group),
+            ))
+            effective_tokens[name] += ref.seq_len
+            effective_samples[name] += 1
+            oversampled[name] += 1
+            index += 1
+
+    stats.update({
+        "enabled": True,
+        "normalized_weights": weights,
+        "effective_tokens": dict(sorted(effective_tokens.items())),
+        "effective_samples": dict(sorted(effective_samples.items())),
+        "oversampled_samples": dict(sorted(oversampled.items())),
+    })
+    return weighted_refs, stats
 
 
 def build_token_batch_plan(
@@ -1830,12 +2629,12 @@ def build_token_batch_plan(
         global_start = int(payload["global_start"])
         for local_idx, item in enumerate(payload["samples"]):
             global_idx = global_start + local_idx
-            if not belongs_to_dataset_split(
+            if not tokenized_sample_belongs_to_split(
+                item,
                 split="train",
                 val_split=cfg.val_split,
                 split_seed=cfg.split_seed,
                 global_idx=global_idx,
-                split_key=item.get("split_key"),
             ):
                 continue
             refs.append(SampleRef(
@@ -1843,13 +2642,19 @@ def build_token_batch_plan(
                 local_idx=local_idx,
                 global_idx=global_idx,
                 seq_len=int(item.get("seq_len") or len(item["input_ids"])),
+                sample_type=str(item.get("sample_type") or "unknown"),
             ))
 
     if not refs:
         raise RuntimeError("Der Trainingssplit enthält keine tokenisierten Samples.")
 
+    raw_train_samples = len(refs)
+    refs, mixture_stats = apply_token_mixture_weights(refs, cfg)
+    if not refs:
+        raise RuntimeError("Die Datengewichtung hat alle Trainingssamples ausgeschlossen.")
+
     if cfg.sort_by_length:
-        refs.sort(key=lambda ref: (ref.seq_len, ref.global_idx))
+        refs.sort(key=lambda ref: (ref.seq_len, ref.repeat_index, ref.global_idx))
 
     token_budget = int(cfg.max_tokens_per_batch)
     if token_budget <= 0:
@@ -1909,6 +2714,7 @@ def build_token_batch_plan(
     )
     stats = {
         "train_samples": len(refs),
+        "train_samples_raw": raw_train_samples,
         "global_batches": len(batches),
         "original_batches": original_batches,
         "ddp_padding_batches": padded_batches,
@@ -1918,6 +2724,8 @@ def build_token_batch_plan(
         "max_samples_per_batch": max_samples,
         "dynamic_token_batching": bool(cfg.dynamic_token_batching),
         "padding_efficiency": float(actual_tokens / max(1, padded_tokens)),
+        "training_tokens_per_epoch": int(actual_tokens),
+        "mixture": mixture_stats,
     }
     return batches, stats
 
@@ -2083,7 +2891,11 @@ def apply_training_mode(model: nn.Module, cfg: TrainConfig) -> nn.Module:
 
 def build_model_and_tokenizer(cfg: TrainConfig, ctx: DistContext):
     resume_dir = Path(cfg.resume).expanduser().resolve() if cfg.resume else None
-    tokenizer_source = str(resume_dir) if resume_dir and resume_dir.exists() else cfg.model_dir
+    tokenizer_source = (
+        str(resume_dir)
+        if resume_dir and resume_dir.exists()
+        else (cfg.tokenizer_dir or cfg.model_dir)
+    )
     tokenizer = AutoTokenizer.from_pretrained(tokenizer_source, trust_remote_code=False, use_fast=True)
     need_resize = prepare_tokenizer(
         tokenizer,
@@ -2109,6 +2921,7 @@ def build_model_and_tokenizer(cfg: TrainConfig, ctx: DistContext):
         column_name=cfg.column_name,
         mixed_training=cfg.mixed_training,
         mixed_text_column=cfg.mixed_text_column,
+        training_phase=cfg.training_phase,
         csv_path=cfg.csv_path,
     )
 
@@ -2155,6 +2968,17 @@ def build_model_and_tokenizer(cfg: TrainConfig, ctx: DistContext):
                 applied_overrides[key] = int(value)
             else:
                 LOGGER.warning("Scratch override ignoriert (Config kennt Feld nicht): %s", key)
+
+        if hasattr(model_config, "max_position_embeddings"):
+            current_positions = int(getattr(model_config, "max_position_embeddings", 0) or 0)
+            if current_positions < cfg.max_seq_length:
+                model_config.max_position_embeddings = int(cfg.max_seq_length)
+                applied_overrides["max_position_embeddings"] = int(cfg.max_seq_length)
+                LOGGER.info(
+                    "Scratch-Positions automatisch auf max_seq_length erweitert: %s -> %s",
+                    current_positions,
+                    cfg.max_seq_length,
+                )
 
         hidden_size = int(getattr(model_config, "hidden_size", 0) or 0)
         num_attention_heads = int(getattr(model_config, "num_attention_heads", 0) or 0)
@@ -3157,6 +3981,13 @@ def save_model_artifacts(
         "template_mode": cfg.template_mode,
         "mixed_training": bool(cfg.mixed_training),
         "mixed_text_column": cfg.mixed_text_column,
+        "training_phase": cfg.training_phase,
+        "text_token_weight": float(cfg.text_token_weight),
+        "dialog_token_weight": float(cfg.dialog_token_weight),
+        "chunk_long_texts": bool(cfg.chunk_long_texts),
+        "append_eos_to_text": bool(cfg.append_eos_to_text),
+        "pack_short_texts": bool(cfg.pack_short_texts),
+        "tokenizer_source": cfg.tokenizer_dir or cfg.model_dir,
         "force_template": cfg.force_template,
         "chat_template": getattr(tokenizer, "chat_template", "") or "",
         "special_tokens": {
@@ -3438,9 +4269,19 @@ def main() -> int:
         LOGGER.info("Hardware-Profil: %s", json.dumps(hardware_profile, ensure_ascii=False))
 
         if cfg.dataset_audit:
+            audit_error_path = outdir / "dataset_audit_error.txt"
             if ctx.is_main:
-                dataset_audit_report = audit_dataset(cfg, outdir, True)
+                audit_error_path.unlink(missing_ok=True)
+                try:
+                    dataset_audit_report = audit_dataset(cfg, outdir, True)
+                except Exception as exc:
+                    audit_error_path.write_text(
+                        f"{exc.__class__.__name__}: {exc}\n\n{traceback.format_exc()}",
+                        encoding="utf-8",
+                    )
             barrier(ctx)
+            if audit_error_path.exists():
+                raise RuntimeError(audit_error_path.read_text(encoding="utf-8"))
             if not ctx.is_main:
                 dataset_audit_report = json.loads(
                     (outdir / "dataset_audit.json").read_text(encoding="utf-8")
@@ -3450,12 +4291,17 @@ def main() -> int:
                     "Gemischtes Training kann nicht gestartet werden: "
                     + "; ".join(dataset_audit_report.get("errors") or ["Dataset nicht kompatibel"])
                 )
+            if cfg.training_phase != "custom" and not dataset_audit_report.get("training_phase_ready"):
+                raise RuntimeError(
+                    "Trainingsphase kann nicht gestartet werden: "
+                    + "; ".join(dataset_audit_report.get("errors") or ["Dataset nicht kompatibel"])
+                )
             if cfg.dataset_audit_strict and dataset_audit_report.get("errors"):
                 raise RuntimeError(
                     "Dataset-Audit fehlgeschlagen: " + "; ".join(dataset_audit_report["errors"])
                 )
         else:
-            if cfg.mixed_training:
+            if cfg.mixed_training and cfg.training_phase != "sft":
                 errors = _mixed_dataset_errors(
                     cfg.csv_path,
                     cfg.mixed_text_column,
@@ -3466,8 +4312,23 @@ def main() -> int:
                         "Gemischtes Training kann nicht gestartet werden: "
                         + "; ".join(errors)
                     )
+            has_structured_columns = (
+                _csv_has_column(cfg.csv_path, "id")
+                and _csv_has_column(cfg.csv_path, "Assistentin")
+            )
+            if cfg.training_phase == "sft" and not has_structured_columns:
+                raise RuntimeError("Die SFT-Phase benötigt ein strukturiertes Dialog-Dataset")
+            if (
+                cfg.training_phase == "pretrain"
+                and has_structured_columns
+                and not cfg.mixed_training
+            ):
+                raise RuntimeError(
+                    "Die Pretrain-Phase benötigt eine Plain-Text-CSV oder den Mischmodus"
+                )
             dataset_audit_report = {"enabled": False, "ok": True}
 
+        prepare_scratch_tokenizer_if_requested(cfg, outdir, ctx)
         model, tokenizer, fp16, bf16, ngram_state = build_model_and_tokenizer(cfg, ctx)
 
         total_samples_est = count_examples_fast(cfg)
@@ -3493,17 +4354,59 @@ def main() -> int:
         barrier(ctx)
 
         serialized_plan_path = outdir / "batch_plan_state.pkl"
+        plan_error_path = outdir / "batch_plan_error.txt"
         if ctx.is_main:
-            global_batch_plan, batch_plan_stats = build_token_batch_plan(cache_dir, cfg, ctx)
-            tmp_plan_path = serialized_plan_path.with_suffix(".tmp")
-            with open(tmp_plan_path, "wb") as handle:
-                pickle.dump(
-                    {"global_batches": global_batch_plan, "stats": batch_plan_stats},
-                    handle,
-                    protocol=pickle.HIGHEST_PROTOCOL,
+            plan_error_path.unlink(missing_ok=True)
+            try:
+                global_batch_plan, batch_plan_stats = build_token_batch_plan(cache_dir, cfg, ctx)
+                model_parameters = int(sum(parameter.numel() for parameter in model.parameters()))
+                if cfg.max_steps is not None:
+                    estimated_training_tokens = int(
+                        max(1, cfg.max_steps)
+                        * batch_plan_stats["max_tokens_per_batch"]
+                        * cfg.gradient_accumulation_steps
+                        * max(1, ctx.world_size)
+                    )
+                    token_estimate_source = "max_steps_token_budget_upper_bound"
+                else:
+                    estimated_training_tokens = int(
+                        batch_plan_stats["training_tokens_per_epoch"]
+                        * max(0.0, cfg.num_train_epochs)
+                    )
+                    token_estimate_source = "epochs_from_unpadded_tokens"
+                batch_plan_stats.update({
+                    "model_parameters": model_parameters,
+                    "estimated_training_tokens": estimated_training_tokens,
+                    "estimated_tokens_per_parameter": float(
+                        estimated_training_tokens / max(1, model_parameters)
+                    ),
+                    "token_estimate_source": token_estimate_source,
+                })
+                if cfg.train_from_scratch and batch_plan_stats["estimated_tokens_per_parameter"] < 10.0:
+                    LOGGER.warning(
+                        "Scratch-Tokenbudget ist klein: ca. %.2f Tokens/Parameter "
+                        "(%s Tokens, %s Parameter). Mehr hochwertige Daten, Epochen oder "
+                        "ein kleineres Modell einplanen; dies ist ein Hinweis, kein Abbruch.",
+                        batch_plan_stats["estimated_tokens_per_parameter"],
+                        estimated_training_tokens,
+                        model_parameters,
+                    )
+                tmp_plan_path = serialized_plan_path.with_suffix(".tmp")
+                with open(tmp_plan_path, "wb") as handle:
+                    pickle.dump(
+                        {"global_batches": global_batch_plan, "stats": batch_plan_stats},
+                        handle,
+                        protocol=pickle.HIGHEST_PROTOCOL,
+                    )
+                tmp_plan_path.replace(serialized_plan_path)
+            except Exception as exc:
+                plan_error_path.write_text(
+                    f"{exc.__class__.__name__}: {exc}\n\n{traceback.format_exc()}",
+                    encoding="utf-8",
                 )
-            tmp_plan_path.replace(serialized_plan_path)
         barrier(ctx)
+        if plan_error_path.exists():
+            raise RuntimeError(plan_error_path.read_text(encoding="utf-8"))
         if not ctx.is_main:
             with open(serialized_plan_path, "rb") as handle:
                 serialized_plan = pickle.load(handle)
@@ -3512,6 +4415,7 @@ def main() -> int:
         barrier(ctx)
         if ctx.is_main:
             serialized_plan_path.unlink(missing_ok=True)
+            plan_error_path.unlink(missing_ok=True)
         if cfg.adaptive_scheduler:
             cfg.adaptive_scheduler = False
             if ctx.is_main:
@@ -3531,6 +4435,7 @@ def main() -> int:
             original_batch_count=batch_plan_stats["original_batches"],
         )
         validation_dataset = None
+        validation_type_datasets: Dict[str, TokenizedShardIterableDataset] = {}
         if cfg.val_split > 0.0 and cfg.validate_every_epoch:
             validation_dataset = TokenizedShardIterableDataset(
                 cache_dir=cache_dir,
@@ -3542,6 +4447,18 @@ def main() -> int:
                 val_split=cfg.val_split,
                 split_seed=cfg.split_seed,
             )
+            for sample_type in ("text", "dialog"):
+                validation_type_datasets[sample_type] = TokenizedShardIterableDataset(
+                    cache_dir=cache_dir,
+                    rank=ctx.rank,
+                    world_size=ctx.world_size,
+                    sort_by_length=False,
+                    epoch=0,
+                    split="validation",
+                    val_split=cfg.val_split,
+                    split_seed=cfg.split_seed,
+                    sample_type_filter=sample_type,
+                )
         collator = DataCollator(
             tokenizer.pad_token_id or tokenizer.eos_token_id or 0,
             pad_to_multiple_of=8,
@@ -3579,6 +4496,7 @@ def main() -> int:
 
         loader = DataLoader(**loader_kwargs)
         validation_loader = None
+        validation_type_loaders: Dict[str, DataLoader] = {}
         if validation_dataset is not None:
             validation_loader_kwargs: Dict[str, Any] = {
                 "dataset": validation_dataset,
@@ -3591,6 +4509,14 @@ def main() -> int:
                 validation_loader_kwargs["prefetch_factor"] = max(1, int(cfg.prefetch_factor))
                 validation_loader_kwargs["persistent_workers"] = bool(cfg.persistent_workers)
             validation_loader = DataLoader(**validation_loader_kwargs)
+            for sample_type, type_dataset in validation_type_datasets.items():
+                validation_type_loaders[sample_type] = DataLoader(
+                    dataset=type_dataset,
+                    batch_size=max(1, cfg.per_device_train_batch_size),
+                    num_workers=0,
+                    pin_memory=(ctx.device.type == "cuda"),
+                    collate_fn=collator,
+                )
 
         optimizer = build_optimizer(model, cfg)
         scheduler = AdaptiveLRScheduler(
@@ -3671,8 +4597,13 @@ def main() -> int:
                 proposed_total_steps,
             )
             LOGGER.info(
-                "Strict whole-turn packing aktiv | max_history_turns=%s | no partial turns | oversize samples skipped",
+                "Datenpipeline | phase=%s max_history_turns=%s text_chunking=%s overlap=%s eos=%s packing=%s",
+                cfg.training_phase,
                 cfg.max_history_turns,
+                cfg.chunk_long_texts,
+                cfg.text_chunk_overlap,
+                cfg.append_eos_to_text,
+                cfg.pack_short_texts,
             )
             LOGGER.info(
                 "sort_by_length=%s",
@@ -3746,6 +4677,7 @@ def main() -> int:
         last_loss = None
         last_val_loss: Optional[float] = None
         last_perplexity: Optional[float] = None
+        last_validation_by_type: Dict[str, Dict[str, Any]] = {}
         resume_best_val = resume_state.get("best_val_loss")
         best_val_loss = float(resume_best_val) if resume_best_val is not None else float("inf")
         epochs_without_improvement = int(resume_state.get("epochs_without_improvement", 0))
@@ -3790,6 +4722,24 @@ def main() -> int:
                 validation_dataset.set_epoch(epoch)
                 val_loss, perplexity, val_samples = evaluate_model(model, validation_loader, cfg, ctx)
                 last_val_loss, last_perplexity = val_loss, perplexity
+                validation_by_type: Dict[str, Dict[str, Any]] = {}
+                for sample_type, type_loader in validation_type_loaders.items():
+                    validation_type_datasets[sample_type].set_epoch(epoch)
+                    type_loss, type_perplexity, type_samples = evaluate_model(
+                        model, type_loader, cfg, ctx,
+                    )
+                    validation_by_type[sample_type] = {
+                        "loss": type_loss,
+                        "perplexity": type_perplexity,
+                        "samples": type_samples,
+                    }
+                last_validation_by_type = validation_by_type
+                if ctx.is_main:
+                    LOGGER.info(
+                        "Validation nach Typ | epoch=%s metrics=%s",
+                        epoch,
+                        json.dumps(validation_by_type, ensure_ascii=False, sort_keys=True),
+                    )
                 if val_loss is None:
                     if ctx.is_main:
                         LOGGER.warning("Validation-Split enthält keine nutzbaren Ziel-Tokens.")
@@ -3819,6 +4769,7 @@ def main() -> int:
                             "validation_samples": val_samples,
                             "epochs_without_improvement": epochs_without_improvement,
                             "early_stopping_patience": cfg.early_stopping_patience,
+                            "validation_by_type": validation_by_type,
                         }
                         status_payload.update(_build_live_runtime_fields(
                             scheduler=scheduler, cache_dir=cache_dir,
@@ -3914,6 +4865,7 @@ def main() -> int:
                         "ngram_summary": ngram_summary_text(ngram_state),
                         "val_loss": last_val_loss,
                         "perplexity": last_perplexity,
+                        "validation_by_type": last_validation_by_type,
                         "best_val_loss": (best_val_loss if math.isfinite(best_val_loss) else None),
                         "epochs_without_improvement": epochs_without_improvement,
                         "early_stopped": False,
@@ -4081,6 +5033,7 @@ def main() -> int:
                 "val_split": cfg.val_split,
                 "val_loss": last_val_loss,
                 "perplexity": last_perplexity,
+                "validation_by_type": last_validation_by_type,
                 "best_val_loss": (best_val_loss if math.isfinite(best_val_loss) else None),
                 "epochs_without_improvement": epochs_without_improvement,
                 "early_stopped": early_stopped,

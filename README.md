@@ -17,7 +17,7 @@ Local **LLM training and inference lab** with **FastAPI**, **Web UI**, **DDP / M
 
 ## Aktuelle Version
 
-**Stand: Version 8.2**
+**Stand: Version 8.3**
 
 Enthalten sind unter anderem:
 
@@ -341,6 +341,15 @@ gekoppelt, sodass exakte Textduplikate nicht über beide Splits verteilt werden.
 Ist der Mischmodus ausgeschaltet, wird `Text` vollständig ignoriert und das bisherige
 sechsspaltige Dialogformat verhält sich unverändert.
 
+Die aktive Trainingsphase bestimmt, welche Spalten genutzt werden:
+
+| Phase | Daten | Loss |
+| --- | --- | --- |
+| `pretrain` | freie Texte aus `Text` beziehungsweise Plain-CSV | alle Tokens |
+| `mixed` | freie Texte und strukturierte Dialoge | bei Scratch alle Tokens, sonst konfigurierbar |
+| `sft` | ausschließlich strukturierte Dialoge | nur Assistentinnen-Zielantwort |
+| `custom` | bisheriges Verhalten | über `include_prompt_loss` steuerbar |
+
 ---
 
 ## 4. `template_mode="dialogplus"`
@@ -367,6 +376,13 @@ Instead it is **token-budget driven**:
 * no cutting in the middle of a turn
 * oversized samples are skipped
 
+Freie Texte sind davon ausgenommen: Ist `chunk_long_texts=true`, werden sie
+tokenizerbasiert an bevorzugten Absatz- oder Satzgrenzen geteilt. Alle Chunks
+eines Dokuments behalten denselben Split-Schlüssel. Mit
+`text_chunk_overlap=128` wird Kontext an den Grenzen wiederholt, ohne dass ein
+Dokument gleichzeitig in Train und Validation gelangen kann. Jeder Text-Chunk
+endet standardmäßig mit dem EOS-Token.
+
 ### Recommended behavior
 
 For most chat datasets:
@@ -383,6 +399,91 @@ That means:
 * no extra artificial turn cap
 
 You can still set `max_history_turns` if you want an additional hard limit.
+
+---
+
+## Scratch-Trainingspipeline
+
+Für ein zufällig initialisiertes Modell sollten die drei Phasen nacheinander
+ausgeführt und jeweils vom letzten Checkpoint fortgesetzt werden.
+
+### Phase 1: Grundtraining
+
+```json
+{
+  "train_from_scratch": true,
+  "train_mode": "full",
+  "training_phase": "pretrain",
+  "mixed_training": true,
+  "chunk_long_texts": true,
+  "text_chunk_overlap": 128,
+  "append_eos_to_text": true,
+  "warmup_ratio": 0.02
+}
+```
+
+In dieser Phase wird der Loss über sämtliche Texttokens berechnet. Ist kein
+Warmup gesetzt, verwendet Scratch-Pretraining automatisch zwei Prozent.
+
+### Phase 2: Gemischtes Training
+
+```json
+{
+  "training_phase": "mixed",
+  "mixed_training": true,
+  "text_token_weight": 0.7,
+  "dialog_token_weight": 0.3,
+  "max_mixture_oversample": 4.0
+}
+```
+
+Die Gewichtung arbeitet nach Tokens statt nach Zeilen. Unterrepräsentierte
+Sampletypen werden deterministisch und begrenzt mehrfach eingeplant; kein Original
+wird für die Gewichtung verworfen, außer sein Zielgewicht wird ausdrücklich auf
+`0` gesetzt.
+
+### Phase 3: Instruction-SFT
+
+```json
+{
+  "training_phase": "sft",
+  "mixed_training": true,
+  "include_prompt_loss": false
+}
+```
+
+Die `Text`-Spalte wird in dieser Phase ignoriert. Trainiert wird nur die
+Assistentinnen-Antwort, während System, Benutzer und Kontext als Prompt dienen.
+
+### Optionaler Scratch-Tokenizer
+
+Mit `train_scratch_tokenizer=true` trainiert der Worker vor dem Modellstart einen
+neuen Fast-Tokenizer aus dem aktiven Korpus. Das Vokabular wird unter
+`scratch_tokenizer/` im Run-Verzeichnis gespeichert und in allen DDP-Ranks sowie
+im Shard-Producer identisch verwendet. Bei einem Resume wird immer der
+Tokenizer des Checkpoints weiterverwendet.
+
+Der Batch-Plan schreibt außerdem Modellparameter, unverfälschte Trainingstokens
+pro Epoche und das geschätzte Verhältnis `Tokens/Parameter` in
+`batch_plan.json`. Bei weniger als zehn geplanten Tokens pro Parameter warnt ein
+Scratch-Lauf sichtbar, bricht aber nicht ab. So bleibt eine bewusste Entscheidung
+zwischen mehr Daten, mehr Epochen und einem kleineren Modell möglich.
+
+### Datenqualität und Deduplizierung
+
+Der Audit meldet normalisierte exakte Duplikate, mögliche Near-Duplikate,
+potenziell widersprüchliche Antworten, kaputte Ersatzzeichen, Steuerzeichen,
+HTML-Boilerplate und stark wiederholte Zeilen. Sichere exakte Duplikate können
+automatisch entfernt werden. Near-Duplikate und Qualitätsauffälligkeiten werden
+standardmäßig nur gemeldet; ein Ausschluss muss bewusst über `exclude` aktiviert
+werden. Beibehaltene Near-Duplikate erben dennoch den Split ihres ersten
+Repräsentanten, damit ähnliche Varianten nicht über Training und Validation
+verteilt werden.
+
+Nach der Tokenisierung enthält `_producer_meta.json` unter anderem Token- und
+Samplezahlen pro Typ, Skip-Gründe, erzeugte Chunks, Packing-Statistiken und
+ungefähre Längenperzentile. Validation Loss und Perplexity werden zusätzlich
+getrennt für `text` und `dialog` ausgewiesen.
 
 ---
 
@@ -503,6 +604,32 @@ zuerst das Tokenbudget senken oder Gradient Checkpointing aktivieren. Wenn noch
 viel VRAM frei ist, das Tokenbudget schrittweise erhöhen. NEFTune ist bewusst
 standardmäßig aus und sollte nur als validiertes Experiment, zum Beispiel mit
 `neftune_noise_alpha: 5`, gegen denselben Validation-Split getestet werden.
+
+Für das erste Scratch-Grundtraining auf 4× V100 ist eine kürzere Sequenzlänge
+wirtschaftlicher. Ein robuster Startpunkt ist:
+
+```json
+{
+  "train_from_scratch": true,
+  "train_mode": "full",
+  "training_phase": "pretrain",
+  "precision_mode": "fp16",
+  "max_seq_length": 2048,
+  "per_device_train_batch_size": 2,
+  "gradient_accumulation_steps": 4,
+  "warmup_ratio": 0.02,
+  "chunk_long_texts": true,
+  "text_chunk_overlap": 128,
+  "append_eos_to_text": true,
+  "deduplicate_exact": true,
+  "near_duplicate_action": "warn",
+  "quality_filter_mode": "warn"
+}
+```
+
+Erst nach einem stabilen Grundtraining sollte die Kontextlänge in einem
+Folgelauf auf 4096 erhöht werden. Der Worker erweitert bei Scratch-Modellen die
+Positionskonfiguration automatisch, falls die Basis-Config kleiner ist.
 
 ### Status / Logs / Preview
 
@@ -631,7 +758,19 @@ curl -N -X POST http://127.0.0.1:8002/v1/chat/completions \
 | `template_mode`          | `chat`, `dialogplus`, `plain`            |
 | `mixed_training`         | Dialog- und `Text`-Samples gemeinsam trainieren |
 | `mixed_text_column`      | Name der zusätzlichen Textspalte; Standard `Text` |
+| `training_phase`         | `custom`, `pretrain`, `mixed` oder `sft`        |
+| `text_token_weight`      | Zielgewicht freier Texttokens im Mischmodus      |
+| `dialog_token_weight`    | Zielgewicht überwachter Dialogtokens              |
+| `max_mixture_oversample` | maximale Vervielfachung unterrepräsentierter Daten |
 | `max_seq_length`         | maximum token window                     |
+| `chunk_long_texts`       | überlange freie Texte automatisch aufteilen       |
+| `text_chunk_overlap`     | wiederholte Tokens zwischen benachbarten Chunks   |
+| `append_eos_to_text`     | EOS an jedes Text-/Chunk-Ende anhängen            |
+| `pack_short_texts`       | kurze Texte optional split-sicher zusammenführen  |
+| `deduplicate_exact`      | normalisierte exakte Duplikate vorab entfernen    |
+| `near_duplicate_action`  | `off`, `warn` oder `exclude`                      |
+| `quality_filter_mode`    | Qualitätsauffälligkeiten melden oder ausschließen |
+| `train_scratch_tokenizer` | neuen Tokenizer aus dem aktiven Scratch-Korpus lernen |
 | `max_history_turns`      | optional extra turn cap                  |
 | `rebuild_dataset_cache`  | rebuild tokenized cache                  |
 | `train_mode`             | `full` or `lora`                         |
@@ -699,7 +838,7 @@ Possible reasons:
 
 * CSV is empty
 * wrong column names
-* all samples are larger than `max_seq_length`
+* `chunk_long_texts=false` and all text samples are larger than `max_seq_length`
 * target answers are too long
 * individual turns are too large
 

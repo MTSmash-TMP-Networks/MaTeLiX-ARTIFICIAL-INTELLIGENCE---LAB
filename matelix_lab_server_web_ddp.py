@@ -115,7 +115,7 @@ TRAINING_OUT_DIR.mkdir(parents=True, exist_ok=True)
 DATASETS_DIR.mkdir(parents=True, exist_ok=True)
 STATIC_DIR.mkdir(parents=True, exist_ok=True)
 
-app = FastAPI(title="MaTeLiX AI Lab (Web DDP)", version="8.2-token-optimized-training")
+app = FastAPI(title="MaTeLiX AI Lab (Web DDP)", version="8.3-safe-scratch-training")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -290,6 +290,7 @@ class TrainingState:
         self.perplexity: Optional[float] = None
         self.best_val_loss: Optional[float] = None
         self.validation_samples: Optional[int] = None
+        self.validation_by_type: Optional[Dict[str, Any]] = None
         self.epochs_without_improvement: int = 0
         self.early_stopped: bool = False
         self.batch_plan: Optional[Dict[str, Any]] = None
@@ -338,6 +339,7 @@ class TrainingState:
                 "perplexity": self.perplexity,
                 "best_val_loss": self.best_val_loss,
                 "validation_samples": self.validation_samples,
+                "validation_by_type": self.validation_by_type,
                 "epochs_without_improvement": self.epochs_without_improvement,
                 "early_stopped": self.early_stopped,
                 "batch_plan": self.batch_plan,
@@ -362,6 +364,27 @@ class WebTrainConfig(MatelixBaseModel):
     column_name: str = "text"
     mixed_training: bool = False
     mixed_text_column: str = "Text"
+    training_phase: str = "custom"
+    text_token_weight: float = 0.7
+    dialog_token_weight: float = 0.3
+    max_mixture_oversample: float = 4.0
+
+    chunk_long_texts: bool = True
+    text_chunk_overlap: int = 128
+    text_chunk_min_tokens: int = 32
+    append_eos_to_text: bool = True
+    pack_short_texts: bool = False
+    pack_target_length: int = 1024
+
+    deduplicate_exact: bool = True
+    near_duplicate_action: str = "warn"
+    near_duplicate_threshold: float = 0.92
+    quality_filter_mode: str = "warn"
+    quality_min_chars: int = 24
+
+    tokenizer_dir: Optional[str] = None
+    train_scratch_tokenizer: bool = False
+    scratch_tokenizer_vocab_size: int = 32000
 
     learning_rate: float = 2e-5
     lr_schedule: str = "cosine"
@@ -753,6 +776,8 @@ class DDPTrainingManager:
                 self.state.best_val_loss = _safe_float(payload.get("best_val_loss"), self.state.best_val_loss)
             if payload.get("validation_samples") is not None:
                 self.state.validation_samples = _safe_int(payload.get("validation_samples"), self.state.validation_samples or 0)
+            if payload.get("validation_by_type") is not None:
+                self.state.validation_by_type = payload.get("validation_by_type")
             if payload.get("epochs_without_improvement") is not None:
                 self.state.epochs_without_improvement = _safe_int(payload.get("epochs_without_improvement"), 0)
             if payload.get("early_stopped") is not None:
@@ -988,6 +1013,7 @@ class DDPTrainingManager:
             self.state.perplexity = None
             self.state.best_val_loss = None
             self.state.validation_samples = None
+            self.state.validation_by_type = None
             self.state.epochs_without_improvement = 0
             self.state.early_stopped = False
             self.state.batch_plan = None

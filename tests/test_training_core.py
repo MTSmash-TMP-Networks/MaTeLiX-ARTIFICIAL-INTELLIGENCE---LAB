@@ -1,5 +1,6 @@
 import unittest
 import pickle
+import re
 import tempfile
 from pathlib import Path
 
@@ -10,16 +11,21 @@ try:
     from matelix_ddp_worker import (
         DataCollator,
         DistContext,
+        NearDuplicateTracker,
         PlainTextSample,
         PlannedBatchIterableDataset,
+        SampleRef,
+        ShortTextPacker,
         StructuredChatSample,
         TokenizedShardIterableDataset,
         TrainConfig,
         audit_dataset,
+        apply_token_mixture_weights,
         build_examples_stream,
         build_token_batch_plan,
         count_examples_fast,
         iter_accumulation_batches,
+        tokenize_text_examples,
     )
 except ModuleNotFoundError as exc:  # Allows source-only environments without PyTorch.
     TokenizedShardIterableDataset = TrainConfig = None
@@ -50,9 +56,29 @@ class NgramTrainingTextTests(unittest.TestCase):
             self.assertEqual(mixed[:2], dialog_only)
             self.assertEqual(mixed[2:], ["Freier Text 1", "Freier Text 2"])
 
+            pretrain = list(iter_training_texts(
+                str(csv_path), "dialogplus", "text", True, "Text", "pretrain",
+            ))
+            sft = list(iter_training_texts(
+                str(csv_path), "dialogplus", "text", True, "Text", "sft",
+            ))
+            self.assertEqual(pretrain, ["Freier Text 1", "Freier Text 2"])
+            self.assertEqual(sft, dialog_only)
+
 
 @unittest.skipIf(IMPORT_ERROR is not None, f"training dependencies unavailable: {IMPORT_ERROR}")
 class TrainingCoreTests(unittest.TestCase):
+    class WhitespaceTokenizer:
+        eos_token_id = 99
+        pad_token_id = 0
+
+        def __call__(self, text, add_special_tokens=False, return_offsets_mapping=False):
+            matches = list(re.finditer(r"\S+", text))
+            payload = {"input_ids": list(range(1, len(matches) + 1))}
+            if return_offsets_mapping:
+                payload["offset_mapping"] = [(match.start(), match.end()) for match in matches]
+            return payload
+
     def test_split_is_stable_and_exclusive(self):
         train = TokenizedShardIterableDataset(".", 0, 1, split="train", val_split=0.2, split_seed=42)
         val = TokenizedShardIterableDataset(".", 0, 1, split="validation", val_split=0.2, split_seed=42)
@@ -76,6 +102,85 @@ class TrainingCoreTests(unittest.TestCase):
         self.assertEqual(cfg.early_stopping_patience, 0)
         self.assertEqual(cfg.lora_dropout, 0.95)
         self.assertEqual(cfg.lora_target_modules, ["q_proj", "v_proj"])
+
+        scratch_cfg = TrainConfig(
+            model_dir="model", csv_path="data.csv", train_from_scratch=True,
+            training_phase="pretrain", warmup_steps=0, warmup_ratio=0,
+        )
+        scratch_cfg.normalize()
+        self.assertTrue(scratch_cfg.include_prompt_loss)
+        self.assertEqual(scratch_cfg.warmup_ratio, 0.02)
+
+    def test_long_text_is_chunked_with_overlap_and_eos(self):
+        tokenizer = self.WhitespaceTokenizer()
+        item = PlainTextSample(
+            text="Eins zwei drei vier. Fünf sechs sieben acht. Neun zehn elf zwölf.",
+            split_key="thread:doc",
+        )
+        samples = tokenize_text_examples(
+            item,
+            tokenizer,
+            6,
+            chunk_long_texts=True,
+            text_chunk_overlap=2,
+            text_chunk_min_tokens=2,
+            append_eos_to_text=True,
+        )
+        self.assertGreater(len(samples), 1)
+        self.assertTrue(all(len(sample["input_ids"]) <= 6 for sample in samples))
+        self.assertTrue(all(sample["input_ids"][-1] == 99 for sample in samples))
+        self.assertTrue(all(sample["split_key"] == "thread:doc" for sample in samples))
+        self.assertTrue(all(sample["chunk_count"] == len(samples) for sample in samples))
+
+    def test_short_text_packing_never_crosses_dataset_split(self):
+        def sample(split, key, token):
+            return {
+                "input_ids": [token, 99], "attention_mask": [1, 1],
+                "labels": [token, 99], "seq_len": 2,
+                "split_key": key, "assigned_split": split,
+                "sample_type": "text", "original_token_count": 1,
+            }
+
+        packer = ShortTextPacker(8)
+        outputs = []
+        outputs.extend(packer.add(sample("train", "a", 1)))
+        outputs.extend(packer.add(sample("validation", "b", 2)))
+        outputs.extend(packer.add(sample("train", "c", 3)))
+        outputs.extend(packer.flush())
+
+        self.assertEqual({item["assigned_split"] for item in outputs}, {"train", "validation"})
+        train = next(item for item in outputs if item["assigned_split"] == "train")
+        self.assertEqual(train["packed_segment_count"], 2)
+        self.assertEqual(train["labels"][2], -100)
+
+    def test_token_mixture_weights_are_based_on_tokens(self):
+        cfg = TrainConfig(
+            model_dir="model", csv_path="data.csv", mixed_training=True,
+            training_phase="mixed", text_token_weight=0.75,
+            dialog_token_weight=0.25, max_mixture_oversample=4,
+        )
+        cfg.normalize()
+        refs = [
+            SampleRef(0, 0, 0, 100, "text"),
+            SampleRef(0, 1, 1, 100, "dialog"),
+        ]
+        weighted, stats = apply_token_mixture_weights(refs, cfg)
+        self.assertTrue(stats["enabled"])
+        self.assertEqual(sum(ref.seq_len for ref in weighted if ref.sample_type == "text"), 300)
+        self.assertEqual(sum(ref.seq_len for ref in weighted if ref.sample_type == "dialog"), 100)
+
+    def test_near_duplicates_reuse_representative_split_key(self):
+        tracker = NearDuplicateTracker(0.92)
+        first_is_near, first_key = tracker.add_and_find(
+            "Ein Router verbindet mehrere Netzwerke miteinander.", "thread:first",
+        )
+        second_is_near, second_key = tracker.add_and_find(
+            "Ein Router verbindet mehrere Netzwerke miteinander.", "thread:second",
+        )
+        self.assertFalse(first_is_near)
+        self.assertIsNone(first_key)
+        self.assertTrue(second_is_near)
+        self.assertEqual(second_key, "thread:first")
 
     def test_token_batch_plan_is_ddp_aligned(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -194,7 +299,20 @@ class TrainingCoreTests(unittest.TestCase):
             self.assertTrue(all(isinstance(sample, StructuredChatSample) for sample in dialog_only))
 
             cfg.mixed_training = True
+            cfg.mixed_text_column = "Text"
+            cfg.training_phase = "pretrain"
+            pretrain_only = list(build_examples_stream(cfg))
+            self.assertEqual(len(pretrain_only), 3)
+            self.assertTrue(all(isinstance(sample, PlainTextSample) for sample in pretrain_only))
+
+            cfg.training_phase = "sft"
+            sft_only = list(build_examples_stream(cfg))
+            self.assertEqual(len(sft_only), 3)
+            self.assertTrue(all(isinstance(sample, StructuredChatSample) for sample in sft_only))
+
+            cfg.mixed_training = True
             cfg.mixed_text_column = "Fehlt"
+            cfg.training_phase = "custom"
             with self.assertRaisesRegex(ValueError, "CSV-Spalten fehlen: Fehlt"):
                 build_examples_stream(cfg)
 
