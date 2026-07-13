@@ -712,8 +712,23 @@ MaTeLiX AI is a trademark/brand of TMP-SYSTEM-SERVICE GmbH.
               <label for="lora_alpha" class="lora_row" style="display:none;">LoRA Alpha</label>
               <input type="number" id="lora_alpha" value="16" class="lora_row" style="display:none;" min="1">
 
+              <label for="lora_dropout" class="lora_row" style="display:none;">LoRA Dropout</label>
+              <input type="number" id="lora_dropout" value="0.05" class="lora_row" style="display:none;" min="0" max="0.95" step="0.01">
+
+              <label for="lora_target_modules" class="lora_row" style="display:none;">LoRA Zielmodule (optional)</label>
+              <input type="text" id="lora_target_modules" class="lora_row" style="display:none;" placeholder="z. B. q_proj,v_proj,o_proj">
+
               <label for="merge_lora_on_save" class="lora_row" style="display:none;">LoRA Merge beim Speichern</label>
               <input type="checkbox" id="merge_lora_on_save" class="lora_row" style="display:none;" checked>
+
+              <label for="resume">Checkpoint fortsetzen (optional)</label>
+              <input type="text" id="resume" placeholder=".../checkpoints/checkpoint-00001234">
+
+              <label for="save_every_epoch">Checkpoint nach jeder Epoche</label>
+              <input type="checkbox" id="save_every_epoch" checked>
+
+              <label for="keep_last_k_checkpoints">Anzahl Checkpoints behalten</label>
+              <input type="number" id="keep_last_k_checkpoints" value="3" min="1">
 
               <label for="train_from_scratch">Von Scratch trainieren</label>
               <input type="checkbox" id="train_from_scratch">
@@ -795,6 +810,15 @@ MaTeLiX AI is a trademark/brand of TMP-SYSTEM-SERVICE GmbH.
               <label for="num_train_epochs">Epochen</label>
               <input type="number" id="num_train_epochs" value="3" step="0.5" min="0.5">
 
+              <label for="val_split">Validation-Anteil</label>
+              <input type="number" id="val_split" value="0.05" step="0.01" min="0" max="0.5">
+
+              <label for="early_stopping_patience">Early-Stopping Geduld (Epochen)</label>
+              <input type="number" id="early_stopping_patience" value="3" min="0">
+
+              <label for="early_stopping_min_delta">Minimale Verbesserung</label>
+              <input type="number" id="early_stopping_min_delta" value="0" step="0.0001" min="0">
+
               <label for="max_steps">Max Steps (optional)</label>
               <input type="number" id="max_steps" placeholder="(optional)" min="1">
 
@@ -844,6 +868,10 @@ MaTeLiX AI is a trademark/brand of TMP-SYSTEM-SERVICE GmbH.
 
               <div class="stat"><div class="k">Loss</div><div class="v" id="loss">-</div></div>
               <div class="stat"><div class="k">Lernrate</div><div class="v" id="learning_rate_display">-</div></div>
+              <div class="stat"><div class="k">Validation Loss</div><div class="v" id="val_loss">-</div></div>
+              <div class="stat"><div class="k">Perplexity</div><div class="v" id="perplexity">-</div></div>
+              <div class="stat"><div class="k">Beste Validation Loss</div><div class="v" id="best_val_loss">-</div></div>
+              <div class="stat"><div class="k">Early Stopping</div><div class="v" id="early_stopping_status">-</div></div>
 
               <div class="stat"><div class="k">Tokens/Step</div><div class="v" id="tokens_per_step">-</div></div>
               <div class="stat"><div class="k">Total Tokens</div><div class="v" id="total_tokens">-</div></div>
@@ -1014,7 +1042,7 @@ Hier folgt eine weitere Trainingszeile.</pre>
   </div>
 
   <footer>
-    © 2026 TMP-SYSTEM-SERVICE GmbH – Alle Rechte vorbehalten. Version 7.0
+    © 2026 TMP-SYSTEM-SERVICE GmbH – Alle Rechte vorbehalten. Version 8.1
   </footer>
 
   <!-- Loader Overlay -->
@@ -1580,6 +1608,11 @@ Hier folgt eine weitere Trainingszeile.</pre>
         gradient_accumulation_steps: parseInt(document.getElementById("gradient_accumulation_steps").value),
 
         num_train_epochs: parseFloat(document.getElementById("num_train_epochs").value || "3"),
+        val_split: parseFloat(document.getElementById("val_split").value || "0.05"),
+        split_seed: 42,
+        validate_every_epoch: true,
+        early_stopping_patience: parseInt(document.getElementById("early_stopping_patience").value || "0"),
+        early_stopping_min_delta: parseFloat(document.getElementById("early_stopping_min_delta").value || "0"),
         max_steps: maxSteps,
 
         max_seq_length: parseInt(document.getElementById("max_seq_length").value || "1024"),
@@ -1602,6 +1635,12 @@ Hier folgt eine weitere Trainingszeile.</pre>
         scratch_max_position_embeddings: integerOrNull(document.getElementById("scratch_max_position_embeddings").value),
         lora_r: parseInt(document.getElementById("lora_r").value || "8"),
         lora_alpha: parseInt(document.getElementById("lora_alpha").value || "16"),
+        lora_dropout: parseFloat(document.getElementById("lora_dropout").value || "0.05"),
+        lora_target_modules: document.getElementById("lora_target_modules").value
+          .split(",").map(x => x.trim()).filter(Boolean) || null,
+        resume: document.getElementById("resume").value.trim() || null,
+        save_every_epoch: document.getElementById("save_every_epoch").checked,
+        keep_last_k_checkpoints: parseInt(document.getElementById("keep_last_k_checkpoints").value || "3"),
 
         precision_mode: document.getElementById("precision_mode").value,
         gradient_checkpointing: document.getElementById("gradient_checkpointing").checked,
@@ -1853,6 +1892,12 @@ Hier folgt eine weitere Trainingszeile.
         document.getElementById("step").textContent = currentStep !== null ? currentStep : "-";
         document.getElementById("loss").textContent = (typeof s.loss==="number" && Number.isFinite(s.loss)) ? s.loss.toFixed(6) : "-";
         document.getElementById("learning_rate_display").textContent = (typeof s.learning_rate==="number") ? s.learning_rate : "-";
+        document.getElementById("val_loss").textContent = fmtNum(s.val_loss, 6);
+        document.getElementById("perplexity").textContent = fmtNum(s.perplexity, 4);
+        document.getElementById("best_val_loss").textContent = fmtNum(s.best_val_loss, 6);
+        document.getElementById("early_stopping_status").textContent = s.early_stopped
+          ? "ausgelöst"
+          : `${s.epochs_without_improvement || 0} ohne Verbesserung`;
 
         if (typeof currentStep === "number" && currentStep >= 0) {
           const lrValue = (typeof s.learning_rate === "number" && Number.isFinite(s.learning_rate)) ? s.learning_rate : null;

@@ -134,7 +134,19 @@ class TrainConfig:
     scratch_max_position_embeddings: Optional[int] = None
     lora_r: int = 8
     lora_alpha: int = 16
+    lora_dropout: float = 0.05
+    lora_target_modules: Optional[List[str]] = None
     merge_lora_on_save: bool = True
+
+    log_every_steps: int = 10
+    save_every_epoch: bool = True
+    keep_last_k_checkpoints: int = 3
+    resume: Optional[str] = None
+    val_split: float = 0.05
+    split_seed: int = 42
+    validate_every_epoch: bool = True
+    early_stopping_patience: int = 3
+    early_stopping_min_delta: float = 0.0
 
     ddp_find_unused_parameters: bool = True
     ddp_static_graph: bool = False
@@ -202,6 +214,20 @@ class TrainConfig:
         self.force_template = bool(self.force_template)
         self.train_from_scratch = bool(self.train_from_scratch)
         self.include_prompt_loss = bool(self.include_prompt_loss)
+        self.lora_r = max(1, int(self.lora_r))
+        self.lora_alpha = max(1, int(self.lora_alpha))
+        self.lora_dropout = min(0.95, max(0.0, float(self.lora_dropout)))
+        if self.lora_target_modules is not None:
+            self.lora_target_modules = sorted({str(x).strip() for x in self.lora_target_modules if str(x).strip()}) or None
+        self.log_every_steps = max(1, int(self.log_every_steps))
+        self.save_every_epoch = bool(self.save_every_epoch)
+        self.keep_last_k_checkpoints = max(1, int(self.keep_last_k_checkpoints))
+        self.resume = str(self.resume).strip() if self.resume else None
+        self.val_split = min(0.5, max(0.0, float(self.val_split)))
+        self.split_seed = int(self.split_seed)
+        self.validate_every_epoch = bool(self.validate_every_epoch)
+        self.early_stopping_patience = max(0, int(self.early_stopping_patience))
+        self.early_stopping_min_delta = max(0.0, float(self.early_stopping_min_delta))
         self.skip_oom_microbatches = bool(self.skip_oom_microbatches)
         if self.scratch_hidden_size is not None:
             self.scratch_hidden_size = max(1, int(self.scratch_hidden_size))
@@ -249,11 +275,9 @@ def _coerce_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
     ignore_keys = {
         "nproc_per_node", "nnodes", "node_rank", "master_addr", "master_port",
         "world_size", "local_rank", "rank", "run_name", "experiment_name",
-        "resume", "save_every_epoch", "monitor_metric", "monitor_mode",
-        "use_tensorboard", "val_csv", "val_split", "split_seed",
-        "keep_last_k_checkpoints", "validate_every_epoch",
-        "early_stopping_patience", "early_stopping_min_delta",
-        "log_every_steps", "compile_model", "compile_mode",
+        "monitor_metric", "monitor_mode",
+        "use_tensorboard", "val_csv",
+        "compile_model", "compile_mode",
         "scheduler",
     }
     for k in list(payload.keys()):
@@ -544,6 +568,7 @@ class StructuredChatSample:
     system: str
     turns: List[StructuredTurn]
     target_answer: str
+    split_key: str
 
 
 def column_iter(csv_path: str, column_name: str) -> Iterator[str]:
@@ -569,7 +594,7 @@ def _load_thread_rows(csv_path: str) -> Tuple[List[Dict[str, Any]], Dict[str, Di
     return rows, id2row
 
 
-def _iter_candidate_chains(csv_path: str) -> Iterator[List[Dict[str, Any]]]:
+def _iter_candidate_chains(csv_path: str) -> Iterator[Tuple[str, List[Dict[str, Any]]]]:
     rows, id2row = _load_thread_rows(csv_path)
     candidates = [r for r in rows if (r.get("Assistentin") or "").strip() and r.get("id")]
     if not candidates:
@@ -613,11 +638,11 @@ def _iter_candidate_chains(csv_path: str) -> Iterator[List[Dict[str, Any]]]:
                     break
             chain.reverse()
             if chain:
-                yield chain
+                yield root_id, chain
 
 
 def chat_structured_iter(csv_path: str) -> Iterator[StructuredChatSample]:
-    for chain in _iter_candidate_chains(csv_path):
+    for root_id, chain in _iter_candidate_chains(csv_path):
         target_idx = len(chain) - 1
         answer = (chain[target_idx].get("Assistentin") or "").strip()
         if not answer:
@@ -643,7 +668,12 @@ def chat_structured_iter(csv_path: str) -> Iterator[StructuredChatSample]:
             if j < target_idx and asst:
                 turns.append(StructuredTurn(role="assistant", content=asst))
 
-        yield StructuredChatSample(system=system_text, turns=turns, target_answer=answer)
+        yield StructuredChatSample(
+            system=system_text,
+            turns=turns,
+            target_answer=answer,
+            split_key=f"thread:{root_id}",
+        )
 
 
 def dialogplus_structured_iter(csv_path: str) -> Iterator[StructuredChatSample]:
@@ -754,6 +784,7 @@ def tokenize_example(
             "attention_mask": [1] * len(ids),
             "labels": labels,
             "seq_len": len(ids),
+            "split_key": "text:" + hashlib.sha256(item.strip().encode("utf-8")).hexdigest(),
         }
 
     prompt_blocks: List[List[int]] = []
@@ -807,6 +838,7 @@ def tokenize_example(
         "attention_mask": [1] * len(input_ids),
         "labels": labels,
         "seq_len": len(input_ids),
+        "split_key": item.split_key,
     }
 
 
@@ -860,6 +892,7 @@ def compute_shard_cache_dir(cfg: TrainConfig) -> Path:
     csv_stat = csv_path.stat()
 
     payload = {
+        "cache_schema": 2,
         "csv_path": str(csv_path),
         "csv_mtime": int(csv_stat.st_mtime),
         "csv_size": int(csv_stat.st_size),
@@ -1309,6 +1342,9 @@ class TokenizedShardIterableDataset(IterableDataset):
         world_size: int,
         sort_by_length: bool = True,
         epoch: int = 0,
+        split: str = "train",
+        val_split: float = 0.0,
+        split_seed: int = 42,
     ):
         super().__init__()
         self.cache_dir = cache_dir
@@ -1316,6 +1352,18 @@ class TokenizedShardIterableDataset(IterableDataset):
         self.world_size = world_size
         self.sort_by_length = sort_by_length
         self.epoch = epoch
+        self.split = str(split).lower().strip()
+        self.val_split = min(0.5, max(0.0, float(val_split)))
+        self.split_seed = int(split_seed)
+
+    def _belongs_to_split(self, global_idx: int, split_key: Optional[str] = None) -> bool:
+        if self.val_split <= 0.0:
+            return self.split != "validation"
+        stable_key = split_key or f"sample:{int(global_idx)}"
+        payload = f"{self.split_seed}:{stable_key}".encode("utf-8")
+        bucket = int.from_bytes(hashlib.blake2b(payload, digest_size=8).digest(), "big") / float(2**64)
+        is_validation = bucket < self.val_split
+        return is_validation if self.split == "validation" else not is_validation
 
     def set_epoch(self, epoch: int) -> None:
         self.epoch = int(epoch)
@@ -1350,9 +1398,11 @@ class TokenizedShardIterableDataset(IterableDataset):
 
             for local_idx in order:
                 global_idx = global_start + local_idx
+                item = samples[local_idx]
+                if not self._belongs_to_split(global_idx, item.get("split_key")):
+                    continue
                 if (global_idx % combined_world_size) != combined_rank:
                     continue
-                item = samples[local_idx]
                 yield {
                     "input_ids": torch.tensor(item["input_ids"], dtype=torch.long),
                     "attention_mask": torch.tensor(item["attention_mask"], dtype=torch.long),
@@ -1421,24 +1471,25 @@ def apply_training_mode(model: nn.Module, cfg: TrainConfig) -> nn.Module:
     if not _PEFT_AVAILABLE:
         raise RuntimeError("LoRA angefordert, aber 'peft' ist nicht installiert.")
 
-    target_modules = []
-    for name, module in model.named_modules():
-        leaf = name.split(".")[-1].lower()
-        if isinstance(module, nn.Linear) and leaf in {
-            "q_proj", "k_proj", "v_proj", "o_proj",
-            "gate_proj", "up_proj", "down_proj",
-            "query", "key", "value", "dense",
-            "fc1", "fc2", "wq", "wk", "wv", "wo",
-        }:
-            target_modules.append(name.split(".")[-1])
-    target_modules = sorted(set(target_modules))
+    target_modules = list(cfg.lora_target_modules or [])
+    if not target_modules:
+        for name, module in model.named_modules():
+            leaf = name.split(".")[-1].lower()
+            if isinstance(module, nn.Linear) and leaf in {
+                "q_proj", "k_proj", "v_proj", "o_proj",
+                "gate_proj", "up_proj", "down_proj",
+                "query", "key", "value", "dense",
+                "fc1", "fc2", "wq", "wk", "wv", "wo",
+            }:
+                target_modules.append(name.split(".")[-1])
+        target_modules = sorted(set(target_modules))
     if not target_modules:
         target_modules = ["q_proj", "k_proj", "v_proj", "o_proj"]
 
     peft_cfg = LoraConfig(
         r=int(cfg.lora_r),
         lora_alpha=int(cfg.lora_alpha),
-        lora_dropout=0.05,
+        lora_dropout=float(cfg.lora_dropout),
         bias="none",
         task_type=TaskType.CAUSAL_LM,
         target_modules=target_modules,
@@ -1448,12 +1499,20 @@ def apply_training_mode(model: nn.Module, cfg: TrainConfig) -> nn.Module:
         model.print_trainable_parameters()
     except Exception:
         pass
-    LOGGER.info("LoRA aktiv | r=%s alpha=%s targets=%s", cfg.lora_r, cfg.lora_alpha, ",".join(target_modules))
+    trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    total = sum(p.numel() for p in model.parameters())
+    LOGGER.info(
+        "LoRA aktiv | r=%s alpha=%s dropout=%s targets=%s | trainable=%s/%s (%.4f%%)",
+        cfg.lora_r, cfg.lora_alpha, cfg.lora_dropout, ",".join(target_modules),
+        trainable, total, 100.0 * trainable / max(1, total),
+    )
     return model
 
 
 def build_model_and_tokenizer(cfg: TrainConfig, ctx: DistContext):
-    tokenizer = AutoTokenizer.from_pretrained(cfg.model_dir, trust_remote_code=False, use_fast=True)
+    resume_dir = Path(cfg.resume).expanduser().resolve() if cfg.resume else None
+    tokenizer_source = str(resume_dir) if resume_dir and resume_dir.exists() else cfg.model_dir
+    tokenizer = AutoTokenizer.from_pretrained(tokenizer_source, trust_remote_code=False, use_fast=True)
     need_resize = prepare_tokenizer(
         tokenizer,
         template_mode=cfg.template_mode,
@@ -1554,14 +1613,19 @@ def build_model_and_tokenizer(cfg: TrainConfig, ctx: DistContext):
             json.dumps(applied_overrides, ensure_ascii=False, sort_keys=True),
         )
     else:
+        model_source = cfg.model_dir
+        # Full checkpoints contain a complete model. LoRA checkpoints contain only
+        # the adapter and must still be attached to the configured base model.
+        if resume_dir and (resume_dir / "config.json").exists() and not (resume_dir / "adapter_config.json").exists():
+            model_source = str(resume_dir)
         model = AutoModelForCausalLM.from_pretrained(
-            cfg.model_dir,
+            model_source,
             trust_remote_code=False,
             torch_dtype=load_dtype,
             low_cpu_mem_usage=True,
             attn_implementation="sdpa",
         )
-        LOGGER.info("Model init: pretrained weights | source=%s", cfg.model_dir)
+        LOGGER.info("Model init: pretrained weights | source=%s", model_source)
 
     if need_resize or model.get_input_embeddings().weight.shape[0] != len(tokenizer):
         model.resize_token_embeddings(len(tokenizer))
@@ -1572,7 +1636,13 @@ def build_model_and_tokenizer(cfg: TrainConfig, ctx: DistContext):
     if hasattr(model, "config"):
         model.config.use_cache = False
 
-    model = apply_training_mode(model, cfg)
+    if resume_dir and (resume_dir / "adapter_config.json").exists():
+        if not _PEFT_AVAILABLE:
+            raise RuntimeError("LoRA-Resume angefordert, aber 'peft' ist nicht installiert.")
+        model = PeftModel.from_pretrained(model, str(resume_dir), is_trainable=True)
+        LOGGER.info("LoRA-Adapter fuer Resume geladen: %s", resume_dir)
+    else:
+        model = apply_training_mode(model, cfg)
 
     if cfg.gradient_checkpointing:
         _enable_gradient_checkpointing(model)
@@ -1728,6 +1798,20 @@ class AdaptiveLRScheduler:
             "last_effective_total_samples": self.last_effective_total_samples,
         }
 
+    def load_state_dict(self, state: Dict[str, Any]) -> None:
+        """Restore scheduler state without replacing the current optimizer."""
+        for key in (
+            "base_lr", "schedule", "total_steps", "warmup_steps", "min_lr_ratio",
+            "lr_decay_factor", "last_lr", "adaptive_enabled", "never_increase_lr",
+            "only_extend_steps", "frozen", "max_total_steps_seen",
+            "last_effective_total_samples",
+        ):
+            if key in state:
+                setattr(self, key, state[key])
+        self.total_steps = max(1, int(self.total_steps))
+        self.warmup_steps = max(0, int(self.warmup_steps))
+        self._apply_lr(float(self.last_lr), global_step=0)
+
 
 def estimate_total_steps_from_samples(total_samples: int, cfg: TrainConfig, ctx: DistContext) -> int:
     total_samples = max(1, int(total_samples))
@@ -1771,6 +1855,9 @@ def maybe_adjust_scheduler_from_progress(
                 effective_total_samples = projected
                 source = "producer_progress_projected"
 
+    if cfg.val_split > 0.0:
+        effective_total_samples = max(1, int(round(effective_total_samples * (1.0 - cfg.val_split))))
+        source += "_train_split"
     proposed_total_steps = estimate_total_steps_from_samples(effective_total_samples, cfg, ctx)
     current_total_steps = max(1, int(scheduler.total_steps))
     rel_change = abs(proposed_total_steps - current_total_steps) / float(max(1, current_total_steps))
@@ -2115,10 +2202,11 @@ def train_epoch(
                     sec_per_step = elapsed / steps_done
                     eta = format_eta(sec_per_step * steps_left)
 
-                    LOGGER.info(
-                        "Step %d | Loss: %.6f | LR: %s | total_steps=%s",
-                        global_step, reduced_loss, lr, total_steps_ref["value"]
-                    )
+                    if global_step == 1 or (global_step % cfg.log_every_steps) == 0:
+                        LOGGER.info(
+                            "Step %d | Loss: %.6f | LR: %s | total_steps=%s",
+                            global_step, reduced_loss, lr, total_steps_ref["value"]
+                        )
 
                     payload = {
                         "running": True,
@@ -2263,6 +2351,65 @@ def train_epoch(
     return avg_loss, global_step, micro_step, reached_max_steps
 
 
+@torch.no_grad()
+def evaluate_model(
+    model: nn.Module, loader: DataLoader, cfg: TrainConfig, ctx: DistContext,
+) -> Tuple[Optional[float], Optional[float], int]:
+    """Return globally token-weighted validation loss and perplexity."""
+    model.eval()
+    _, fp16, bf16 = pick_precision(cfg, ctx.device)
+    amp_dtype = torch.float16 if fp16 else (torch.bfloat16 if bf16 else None)
+    autocast_ctx = (
+        torch.autocast(device_type="cuda", dtype=amp_dtype)
+        if ctx.device.type == "cuda" and amp_dtype is not None else nullcontext()
+    )
+    loss_sum = torch.zeros(1, dtype=torch.float64, device=ctx.device)
+    token_count = torch.zeros(1, dtype=torch.float64, device=ctx.device)
+    sample_count = torch.zeros(1, dtype=torch.long, device=ctx.device)
+
+    for batch in loader:
+        if SHUTDOWN.stop:
+            break
+        batch = move_batch(batch, ctx.device)
+        target_tokens = int((batch["labels"] != -100).sum().item())
+        if target_tokens <= 0:
+            continue
+        with autocast_ctx:
+            outputs = model(**batch)
+        if torch.isfinite(outputs.loss):
+            loss_sum += outputs.loss.detach().double() * target_tokens
+            token_count += target_tokens
+            sample_count += int(batch["input_ids"].shape[0])
+
+    if ctx.is_distributed:
+        dist.all_reduce(loss_sum, op=dist.ReduceOp.SUM)
+        dist.all_reduce(token_count, op=dist.ReduceOp.SUM)
+        dist.all_reduce(sample_count, op=dist.ReduceOp.SUM)
+    model.train()
+    if token_count.item() <= 0:
+        return None, None, int(sample_count.item())
+    val_loss = float((loss_sum / token_count).item())
+    perplexity = float(math.exp(min(20.0, val_loss)))
+    return val_loss, perplexity, int(sample_count.item())
+
+
+def save_best_model(model: nn.Module, tokenizer: Any, outdir: Path, ctx: DistContext) -> Optional[Path]:
+    if not ctx.is_main:
+        return None
+    best_dir = outdir / "best_model"
+    tmp_dir = outdir / "best_model.tmp"
+    if tmp_dir.exists():
+        shutil.rmtree(tmp_dir)
+    tmp_dir.mkdir(parents=True, exist_ok=True)
+    unwrap_model(model).save_pretrained(tmp_dir)
+    tokenizer.save_pretrained(tmp_dir)
+    if best_dir.exists():
+        shutil.rmtree(best_dir)
+    tmp_dir.replace(best_dir)
+    LOGGER.info("Neues bestes Modell gespeichert: %s", best_dir)
+    return best_dir
+
+
 
 def save_model_artifacts(
     *,
@@ -2339,6 +2486,86 @@ def save_model_artifacts(
         json.dumps(template_info, ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
+
+
+def save_training_checkpoint(
+    *, model: nn.Module, tokenizer: Any, optimizer: torch.optim.Optimizer,
+    scheduler: AdaptiveLRScheduler, scaler: Any, outdir: Path,
+    epoch: int, global_step: int, cfg: TrainConfig, ctx: DistContext,
+    best_val_loss: Optional[float] = None, epochs_without_improvement: int = 0,
+) -> Optional[Path]:
+    """Save a resumable checkpoint atomically at epoch boundaries."""
+    local_rng = {
+        "python": random.getstate(),
+        "torch": torch.get_rng_state(),
+        "cuda": torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None,
+    }
+    rng_by_rank: Optional[List[Any]] = None
+    if ctx.is_distributed:
+        rng_by_rank = [None] * ctx.world_size if ctx.is_main else None
+        dist.gather_object(local_rng, rng_by_rank, dst=0)
+    else:
+        rng_by_rank = [local_rng]
+    if not ctx.is_main:
+        return None
+    checkpoint_dir = outdir / "checkpoints" / f"checkpoint-{global_step:08d}"
+    tmp_dir = checkpoint_dir.with_name(checkpoint_dir.name + ".tmp")
+    if tmp_dir.exists():
+        shutil.rmtree(tmp_dir)
+    tmp_dir.mkdir(parents=True, exist_ok=True)
+
+    target = unwrap_model(model)
+    target.save_pretrained(tmp_dir)
+    tokenizer.save_pretrained(tmp_dir)
+    state = {
+        "version": 1,
+        "epoch": int(epoch),
+        "global_step": int(global_step),
+        "optimizer": optimizer.state_dict(),
+        "scheduler": scheduler.state_dict(),
+        "scaler": scaler.state_dict() if scaler is not None and hasattr(scaler, "state_dict") else None,
+        "rng_by_rank": rng_by_rank,
+        "config": cfg.__dict__,
+        "best_val_loss": best_val_loss,
+        "epochs_without_improvement": int(epochs_without_improvement),
+    }
+    torch.save(state, tmp_dir / "trainer_state.pt")
+    tmp_dir.replace(checkpoint_dir)
+
+    checkpoints = sorted(
+        (p for p in checkpoint_dir.parent.glob("checkpoint-*") if p.is_dir()),
+        key=lambda p: p.name,
+    )
+    for old in checkpoints[:-cfg.keep_last_k_checkpoints]:
+        shutil.rmtree(old, ignore_errors=True)
+    LOGGER.info("Checkpoint gespeichert: %s", checkpoint_dir)
+    return checkpoint_dir
+
+
+def load_training_state(
+    resume_dir: Path, optimizer: torch.optim.Optimizer,
+    scheduler: AdaptiveLRScheduler, scaler: Any, device: torch.device, rank: int = 0,
+) -> Tuple[int, int, Dict[str, Any]]:
+    state_path = resume_dir / "trainer_state.pt"
+    if not state_path.exists():
+        raise FileNotFoundError(f"Resume-State fehlt: {state_path}")
+    state = torch.load(state_path, map_location="cpu", weights_only=False)
+    optimizer.load_state_dict(state["optimizer"])
+    for optimizer_state in optimizer.state.values():
+        for key, value in optimizer_state.items():
+            if torch.is_tensor(value):
+                optimizer_state[key] = value.to(device)
+    scheduler.load_state_dict(state.get("scheduler") or {})
+    if scaler is not None and state.get("scaler") and hasattr(scaler, "load_state_dict"):
+        scaler.load_state_dict(state["scaler"])
+    rank_states = state.get("rng_by_rank") or []
+    rank_state = rank_states[min(max(0, rank), len(rank_states) - 1)] if rank_states else None
+    if rank_state:
+        random.setstate(rank_state["python"])
+        torch.set_rng_state(rank_state["torch"])
+        if torch.cuda.is_available() and rank_state.get("cuda") is not None:
+            torch.cuda.set_rng_state_all(rank_state["cuda"])
+    return int(state.get("epoch", -1)) + 1, int(state.get("global_step", 0)), state
 
 
 def release_training_memory(
@@ -2537,14 +2764,30 @@ def main() -> int:
             world_size=ctx.world_size,
             sort_by_length=bool(cfg.sort_by_length),
             epoch=0,
+            split="train",
+            val_split=cfg.val_split,
+            split_seed=cfg.split_seed,
         )
+        validation_dataset = None
+        if cfg.val_split > 0.0 and cfg.validate_every_epoch:
+            validation_dataset = TokenizedShardIterableDataset(
+                cache_dir=cache_dir,
+                rank=ctx.rank,
+                world_size=ctx.world_size,
+                sort_by_length=False,
+                epoch=0,
+                split="validation",
+                val_split=cfg.val_split,
+                split_seed=cfg.split_seed,
+            )
         collator = DataCollator(
             tokenizer.pad_token_id or tokenizer.eos_token_id or 0,
             pad_to_multiple_of=8,
             fixed_length=(cfg.max_seq_length if cfg.fixed_padding else None),
         )
 
-        initial_total_steps = estimate_total_steps_from_samples(total_samples_est, cfg, ctx)
+        train_samples_est = max(1, int(round(total_samples_est * (1.0 - cfg.val_split))))
+        initial_total_steps = estimate_total_steps_from_samples(train_samples_est, cfg, ctx)
 
         effective_warmup_steps = cfg.warmup_steps
         if effective_warmup_steps <= 0 and cfg.warmup_ratio > 0.0:
@@ -2564,6 +2807,12 @@ def main() -> int:
             loader_kwargs["persistent_workers"] = bool(cfg.persistent_workers)
 
         loader = DataLoader(**loader_kwargs)
+        validation_loader = None
+        if validation_dataset is not None:
+            validation_loader_kwargs = dict(loader_kwargs)
+            validation_loader_kwargs["dataset"] = validation_dataset
+            validation_loader_kwargs["batch_size"] = max(1, cfg.per_device_train_batch_size)
+            validation_loader = DataLoader(**validation_loader_kwargs)
 
         optimizer = build_optimizer(model, cfg)
         scheduler = AdaptiveLRScheduler(
@@ -2590,6 +2839,23 @@ def main() -> int:
             force=True,
         )
         total_steps_ref = {"value": scheduler.total_steps}
+        resume_epoch = 0
+        resume_global_step = 0
+        resume_state: Dict[str, Any] = {}
+        if cfg.resume:
+            resume_epoch, resume_global_step, resume_state = load_training_state(
+                Path(cfg.resume).expanduser().resolve(), optimizer, scheduler, scaler, ctx.device, ctx.rank
+            )
+            total_steps_ref["value"] = scheduler.total_steps
+            LOGGER.info(
+                "Training fortgesetzt | checkpoint=%s start_epoch=%s global_step=%s",
+                cfg.resume, resume_epoch, resume_global_step,
+            )
+            previous_best = Path(cfg.resume).expanduser().resolve().parent.parent / "best_model"
+            if ctx.is_main and previous_best.is_dir() and not (outdir / "best_model").exists():
+                shutil.copytree(previous_best, outdir / "best_model")
+                LOGGER.info("Bisheriges best_model in den neuen Lauf übernommen: %s", previous_best)
+            barrier(ctx)
 
         if ctx.is_main:
             LOGGER.info(
@@ -2640,7 +2906,7 @@ def main() -> int:
 
             payload = {
                 "running": True,
-                "step": 0,
+                "step": resume_global_step,
                 "micro_step": 0,
                 "loss": None,
                 "learning_rate": optimizer.param_groups[0]["lr"],
@@ -2652,7 +2918,7 @@ def main() -> int:
                     * max(1, ctx.world_size)
                 ),
                 "total_tokens": 0,
-                "epoch": 0,
+                "epoch": resume_epoch,
                 "total_steps": int(total_steps_ref["value"]),
                 "scheduler_total_steps": int(total_steps_ref["value"]),
                 "warmup_steps": int(effective_warmup_steps),
@@ -2679,13 +2945,19 @@ def main() -> int:
         model = wrap_ddp(model, cfg, ctx)
         barrier(ctx)
 
-        global_step = 0
+        global_step = resume_global_step
         micro_step = 0
         last_loss = None
+        last_val_loss: Optional[float] = None
+        last_perplexity: Optional[float] = None
+        resume_best_val = resume_state.get("best_val_loss")
+        best_val_loss = float(resume_best_val) if resume_best_val is not None else float("inf")
+        epochs_without_improvement = int(resume_state.get("epochs_without_improvement", 0))
+        early_stopped = False
         train_start_time = time.time()
 
         epochs = max(1, int(math.ceil(cfg.num_train_epochs)))
-        for epoch in range(epochs):
+        for epoch in range(resume_epoch, epochs):
             if cfg.max_steps is not None and global_step >= int(cfg.max_steps):
                 break
             if global_step >= int(total_steps_ref["value"]):
@@ -2717,6 +2989,69 @@ def main() -> int:
             if ctx.is_main:
                 LOGGER.info("Epoche %d abgeschlossen | avg_loss=%.6f", epoch, avg_loss)
 
+            if validation_loader is not None:
+                validation_dataset.set_epoch(epoch)
+                val_loss, perplexity, val_samples = evaluate_model(model, validation_loader, cfg, ctx)
+                last_val_loss, last_perplexity = val_loss, perplexity
+                if val_loss is None:
+                    if ctx.is_main:
+                        LOGGER.warning("Validation-Split enthält keine nutzbaren Ziel-Tokens.")
+                else:
+                    improved = val_loss < (best_val_loss - cfg.early_stopping_min_delta)
+                    if improved:
+                        best_val_loss = val_loss
+                        epochs_without_improvement = 0
+                        save_best_model(model, tokenizer, outdir, ctx)
+                    else:
+                        epochs_without_improvement += 1
+                    if ctx.is_main:
+                        LOGGER.info(
+                            "Validation | epoch=%s loss=%.6f perplexity=%.4f samples=%s "
+                            "best=%.6f no_improvement=%s/%s",
+                            epoch, val_loss, perplexity, val_samples, best_val_loss,
+                            epochs_without_improvement, cfg.early_stopping_patience,
+                        )
+                        status_payload = {
+                            "running": True,
+                            "step": global_step,
+                            "epoch": epoch,
+                            "loss": avg_loss,
+                            "val_loss": val_loss,
+                            "perplexity": perplexity,
+                            "best_val_loss": best_val_loss,
+                            "validation_samples": val_samples,
+                            "epochs_without_improvement": epochs_without_improvement,
+                            "early_stopping_patience": cfg.early_stopping_patience,
+                        }
+                        status_payload.update(_build_live_runtime_fields(
+                            scheduler=scheduler, cache_dir=cache_dir,
+                            csv_total_samples_est=total_samples_est, cfg=cfg,
+                        ))
+                        status_writer.write(status_payload)
+                    if cfg.early_stopping_patience > 0 and epochs_without_improvement >= cfg.early_stopping_patience:
+                        early_stopped = True
+
+            if cfg.save_every_epoch and not SHUTDOWN.stop:
+                save_training_checkpoint(
+                    model=model,
+                    tokenizer=tokenizer,
+                    optimizer=optimizer,
+                    scheduler=scheduler,
+                    scaler=scaler,
+                    outdir=outdir,
+                    epoch=epoch,
+                    global_step=global_step,
+                    cfg=cfg,
+                    ctx=ctx,
+                    best_val_loss=(best_val_loss if math.isfinite(best_val_loss) else None),
+                    epochs_without_improvement=epochs_without_improvement,
+                )
+                barrier(ctx)
+
+            if early_stopped:
+                if ctx.is_main:
+                    LOGGER.info("Early Stopping nach Epoche %s aktiviert.", epoch)
+                break
             if reached_max_steps or SHUTDOWN.stop:
                 break
 
@@ -2779,6 +3114,11 @@ def main() -> int:
                         "sort_by_length": bool(cfg.sort_by_length),
                         "use_ngrams": bool(cfg.use_ngrams),
                         "ngram_summary": ngram_summary_text(ngram_state),
+                        "val_loss": last_val_loss,
+                        "perplexity": last_perplexity,
+                        "best_val_loss": (best_val_loss if math.isfinite(best_val_loss) else None),
+                        "epochs_without_improvement": epochs_without_improvement,
+                        "early_stopped": False,
                         "adaptive_scheduler": bool(cfg.adaptive_scheduler),
                         "adaptive_scheduler_frozen": bool(scheduler.frozen),
                         "adaptive_scheduler_never_increase_lr": bool(cfg.adaptive_scheduler_never_increase_lr),
@@ -2942,6 +3282,14 @@ def main() -> int:
                 "adaptive_scheduler_never_increase_lr": bool(cfg.adaptive_scheduler_never_increase_lr),
                 "adaptive_scheduler_only_extend_steps": bool(cfg.adaptive_scheduler_only_extend_steps),
                 "scheduler_mode": (f"adaptive_{cfg.lr_schedule}" if cfg.adaptive_scheduler else str(cfg.lr_schedule)),
+                "val_split": cfg.val_split,
+                "val_loss": last_val_loss,
+                "perplexity": last_perplexity,
+                "best_val_loss": (best_val_loss if math.isfinite(best_val_loss) else None),
+                "epochs_without_improvement": epochs_without_improvement,
+                "early_stopped": early_stopped,
+                "early_stopping_patience": cfg.early_stopping_patience,
+                "best_model_dir": str(outdir / "best_model") if (outdir / "best_model").exists() else None,
             }
             status_writer.write(final_payload)
             LOGGER.info("Training abgeschlossen. Modell gespeichert nach: %s", outdir)

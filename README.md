@@ -17,13 +17,18 @@ Local **LLM training and inference lab** with **FastAPI**, **Web UI**, **DDP / M
 
 ## Aktuelle Version
 
-**Stand: Version 7.0**
+**Stand: Version 8.1**
 
 Enthalten sind unter anderem:
 
 - token-budget-gesteuertes Whole-Turn-Packing
 - DDP / Multi-GPU-Training
 - LoRA-Training mit optionalem Merge
+- resumierbare Epoch-Checkpoints inklusive Optimizer, Scheduler, AMP-Scaler und RNG-Zuständen
+- konfigurierbare LoRA-Zielmodule und LoRA-Dropout
+- deterministischer Train/Validation-Split ohne Datenüberschneidung
+- DDP-synchronisierte Validation Loss und Perplexity
+- Early Stopping und automatische Speicherung von `best_model`
 - OpenAI-kompatible `/v1/*` API und Web-UI
 
 ---
@@ -141,6 +146,12 @@ It is designed for practical local experiments with reproducible outputs, cached
 .
 ├─ matelix_lab_server_web_ddp.py
 ├─ matelix_ddp_worker.py
+├─ matelix_ngram_pipeline.py
+├─ requirements.txt
+├─ tests/
+│  └─ test_training_core.py
+├─ .github/workflows/
+│  └─ ci.yml
 ├─ datasets/
 │  └─ *.csv
 ├─ static/
@@ -198,8 +209,9 @@ Install dependencies:
 
 ```bash
 pip install -U pip
-pip install fastapi uvicorn pydantic psutil torch transformers tokenizers
-pip install peft
+# Zuerst den zu CUDA/ROCm/CPU passenden PyTorch-Build installieren:
+# https://pytorch.org/get-started/locally/
+pip install -r requirements.txt
 ```
 
 > For CUDA, install the matching PyTorch build for your system.
@@ -373,6 +385,45 @@ curl -X POST http://127.0.0.1:8002/start \
 curl -X POST http://127.0.0.1:8002/stop
 ```
 
+### Training fortsetzen
+
+Jede abgeschlossene Epoche erzeugt standardmäßig einen vollständig fortsetzbaren
+Checkpoint unter `checkpoints/checkpoint-XXXXXXXX`. Neben den Modellgewichten werden
+Optimizer, Scheduler, AMP-Scaler, Epoche, globaler Schritt und Zufallszustände gesichert.
+
+```json
+{
+  "resume": "./training_outputs/DEIN_LAUF/checkpoints/checkpoint-00001234",
+  "save_every_epoch": true,
+  "keep_last_k_checkpoints": 3
+}
+```
+
+Das Fortsetzen funktioniert für vollständiges Finetuning und für LoRA-Adapter.
+
+### Validation und Early Stopping
+
+Mit `val_split` wird ein stabiler Teil der tokenisierten Samples ausschließlich
+für die Validierung reserviert. Chat-Datensätze werden dabei nach vollständigen
+Konversationsthreads gruppiert; identische Plain-Text-Samples erhalten ebenfalls
+dieselbe Gruppe. So gelangen weder frühere Turns desselben Threads noch identische
+Texte in beide Splits. Die Zuordnung basiert auf `split_seed` und bleibt dadurch
+auch bei DDP und nach einem Resume identisch.
+
+```json
+{
+  "val_split": 0.05,
+  "split_seed": 42,
+  "validate_every_epoch": true,
+  "early_stopping_patience": 3,
+  "early_stopping_min_delta": 0.001
+}
+```
+
+Nach jeder Epoche werden die global über alle Ranks gewichtete Validation Loss
+und Perplexity berechnet. Das beste Modell liegt anschließend in `best_model/`.
+`early_stopping_patience: 0` deaktiviert Early Stopping.
+
 ### Status / Logs / Preview
 
 ```bash
@@ -504,6 +555,15 @@ curl -N -X POST http://127.0.0.1:8002/v1/chat/completions \
 | `train_mode`             | `full` or `lora`                         |
 | `lora_r`                 | LoRA rank                                |
 | `lora_alpha`             | LoRA alpha                               |
+| `lora_dropout`           | Dropout innerhalb der LoRA-Adapter       |
+| `lora_target_modules`    | optionale explizite Modulliste           |
+| `resume`                 | Verzeichnis eines Epoch-Checkpoints      |
+| `save_every_epoch`       | resumierbaren Checkpoint je Epoche sichern |
+| `keep_last_k_checkpoints` | Anzahl aufzubewahrender Checkpoints     |
+| `val_split`              | Anteil exklusiver Validation-Samples     |
+| `split_seed`             | reproduzierbare Split-Zuordnung           |
+| `early_stopping_patience` | Epochen ohne Verbesserung vor Abbruch   |
+| `early_stopping_min_delta` | minimale relevante Loss-Verbesserung   |
 | `precision_mode`         | `auto`, `fp32`, `fp16`, `bf16`           |
 | `gradient_checkpointing` | reduces VRAM usage, slower               |
 

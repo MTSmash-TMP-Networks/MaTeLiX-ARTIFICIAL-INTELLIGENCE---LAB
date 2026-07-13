@@ -115,7 +115,7 @@ TRAINING_OUT_DIR.mkdir(parents=True, exist_ok=True)
 DATASETS_DIR.mkdir(parents=True, exist_ok=True)
 STATIC_DIR.mkdir(parents=True, exist_ok=True)
 
-app = FastAPI(title="MaTeLiX AI Lab (Web DDP)", version="6.1-web-ddp-adaptive-scheduler")
+app = FastAPI(title="MaTeLiX AI Lab (Web DDP)", version="8.1-validation-training")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -286,6 +286,12 @@ class TrainingState:
         self.adaptive_scheduler_only_extend_steps: Optional[bool] = None
         self.scheduler_mode: Optional[str] = None
         self.producer_done: Optional[bool] = None
+        self.val_loss: Optional[float] = None
+        self.perplexity: Optional[float] = None
+        self.best_val_loss: Optional[float] = None
+        self.validation_samples: Optional[int] = None
+        self.epochs_without_improvement: int = 0
+        self.early_stopped: bool = False
 
         self.log = LogStore()
 
@@ -324,6 +330,12 @@ class TrainingState:
                 "adaptive_scheduler_only_extend_steps": self.adaptive_scheduler_only_extend_steps,
                 "scheduler_mode": self.scheduler_mode,
                 "producer_done": self.producer_done,
+                "val_loss": self.val_loss,
+                "perplexity": self.perplexity,
+                "best_val_loss": self.best_val_loss,
+                "validation_samples": self.validation_samples,
+                "epochs_without_improvement": self.epochs_without_improvement,
+                "early_stopped": self.early_stopped,
             }
 
 
@@ -376,6 +388,8 @@ class WebTrainConfig(MatelixBaseModel):
     scratch_max_position_embeddings: Optional[int] = None
     lora_r: int = 8
     lora_alpha: int = 16
+    lora_dropout: float = 0.05
+    lora_target_modules: Optional[List[str]] = None
     precision_mode: str = "auto"
     gradient_checkpointing: bool = False
     dataloader_num_workers: int = 0
@@ -432,6 +446,8 @@ class WebTrainConfig(MatelixBaseModel):
     ddp_broadcast_buffers: bool = False
     ddp_static_graph: bool = False
     val_split: float = 0.05
+    split_seed: int = 42
+    validate_every_epoch: bool = True
     early_stopping_patience: int = 3
     early_stopping_min_delta: float = 0.0
     log_every_steps: int = 10
@@ -710,6 +726,18 @@ class DDPTrainingManager:
                 self.state.scheduler_mode = str(payload.get("scheduler_mode"))
             if payload.get("producer_done") is not None:
                 self.state.producer_done = bool(payload.get("producer_done"))
+            if payload.get("val_loss") is not None:
+                self.state.val_loss = _safe_float(payload.get("val_loss"), self.state.val_loss)
+            if payload.get("perplexity") is not None:
+                self.state.perplexity = _safe_float(payload.get("perplexity"), self.state.perplexity)
+            if payload.get("best_val_loss") is not None:
+                self.state.best_val_loss = _safe_float(payload.get("best_val_loss"), self.state.best_val_loss)
+            if payload.get("validation_samples") is not None:
+                self.state.validation_samples = _safe_int(payload.get("validation_samples"), self.state.validation_samples or 0)
+            if payload.get("epochs_without_improvement") is not None:
+                self.state.epochs_without_improvement = _safe_int(payload.get("epochs_without_improvement"), 0)
+            if payload.get("early_stopped") is not None:
+                self.state.early_stopped = bool(payload.get("early_stopped"))
 
             if self.proc is not None:
                 self.state.running = self.proc.poll() is None and bool(payload.get("running", self.state.running))
@@ -758,6 +786,14 @@ class DDPTrainingManager:
     def start(self, cfg: WebTrainConfig) -> Dict[str, Any]:
         if not WORKER_PATH.exists():
             return {"running": False, "error": f"Worker fehlt: {WORKER_PATH}"}
+
+        if cfg.resume:
+            resume_dir = Path(cfg.resume).expanduser().resolve()
+            if not resume_dir.is_dir() or not (resume_dir / "trainer_state.pt").is_file():
+                return {
+                    "running": False,
+                    "error": f"Ungültiger Resume-Checkpoint (trainer_state.pt fehlt): {resume_dir}",
+                }
 
         with self.state.lock:
             if self.proc is not None and self.proc.poll() is None:
@@ -921,6 +957,12 @@ class DDPTrainingManager:
             self.state.adaptive_scheduler_only_extend_steps = None
             self.state.scheduler_mode = None
             self.state.producer_done = None
+            self.state.val_loss = None
+            self.state.perplexity = None
+            self.state.best_val_loss = None
+            self.state.validation_samples = None
+            self.state.epochs_without_improvement = 0
+            self.state.early_stopped = False
 
             self.state.log.clear()
             self.state.log.set_file(run_dir / "training.log")
