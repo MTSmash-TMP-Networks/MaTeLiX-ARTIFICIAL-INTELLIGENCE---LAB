@@ -3,16 +3,22 @@ import pickle
 import tempfile
 from pathlib import Path
 
+from matelix_ngram_pipeline import iter_training_texts
+
 try:
     import torch
     from matelix_ddp_worker import (
         DataCollator,
         DistContext,
+        PlainTextSample,
         PlannedBatchIterableDataset,
+        StructuredChatSample,
         TokenizedShardIterableDataset,
         TrainConfig,
         audit_dataset,
+        build_examples_stream,
         build_token_batch_plan,
+        count_examples_fast,
         iter_accumulation_batches,
     )
 except ModuleNotFoundError as exc:  # Allows source-only environments without PyTorch.
@@ -20,6 +26,29 @@ except ModuleNotFoundError as exc:  # Allows source-only environments without Py
     IMPORT_ERROR = exc
 else:
     IMPORT_ERROR = None
+
+
+class NgramTrainingTextTests(unittest.TestCase):
+    def test_mixed_texts_are_included_and_cycles_terminate(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            csv_path = Path(tmp) / "mixed-cycle.csv"
+            csv_path.write_text(
+                "id,parent_id,system,Benutzer,Kontext,Assistentin,Text\n"
+                "1,2,System,Frage 1,,Antwort 1,Freier Text 1\n"
+                "2,1,,Frage 2,,Antwort 2,Freier Text 2\n",
+                encoding="utf-8",
+            )
+
+            dialog_only = list(iter_training_texts(
+                str(csv_path), "dialogplus", "text",
+            ))
+            mixed = list(iter_training_texts(
+                str(csv_path), "dialogplus", "text", True, "Text",
+            ))
+
+            self.assertEqual(len(dialog_only), 2)
+            self.assertEqual(mixed[:2], dialog_only)
+            self.assertEqual(mixed[2:], ["Freier Text 1", "Freier Text 2"])
 
 
 @unittest.skipIf(IMPORT_ERROR is not None, f"training dependencies unavailable: {IMPORT_ERROR}")
@@ -122,6 +151,52 @@ class TrainingCoreTests(unittest.TestCase):
             self.assertFalse(report["ok"])
             self.assertEqual(report["thread_cycles"], 1)
             self.assertTrue((root / "dataset_audit.json").is_file())
+
+    def test_optional_mixed_dialog_and_text_stream(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            csv_path = root / "mixed.csv"
+            csv_path.write_text(
+                "id,parent_id,system,Benutzer,Kontext,Assistentin,Text\n"
+                "1,,System,Hallo,,Antwort 1,Freier Text 1\n"
+                "2,1,,Frage,,Antwort 2,\n"
+                "3,,,,,,Nur freier Text\n"
+                "4,,System,Andere Frage,,Andere Antwort,Freier Text 1\n",
+                encoding="utf-8",
+            )
+            cfg = TrainConfig(
+                model_dir="model",
+                csv_path=str(csv_path),
+                template_mode="dialogplus",
+                mixed_training=True,
+                mixed_text_column="Text",
+            )
+            cfg.normalize()
+
+            samples = list(build_examples_stream(cfg))
+            self.assertEqual(len(samples), 6)
+            self.assertIsInstance(samples[0], StructuredChatSample)
+            self.assertIsInstance(samples[1], PlainTextSample)
+            self.assertEqual(samples[0].split_key, samples[1].split_key)
+            self.assertEqual(samples[0].split_key, samples[4].split_key)
+            self.assertEqual(samples[1].split_key, samples[5].split_key)
+            self.assertEqual(count_examples_fast(cfg), 6)
+
+            report = audit_dataset(cfg, root, is_main=True)
+            self.assertTrue(report["mixed_training_ready"])
+            self.assertEqual(report["usable_assistant_samples"], 3)
+            self.assertEqual(report["usable_mixed_text_samples"], 3)
+            self.assertEqual(report["duplicate_mixed_text_samples"], 1)
+
+            cfg.mixed_training = False
+            dialog_only = list(build_examples_stream(cfg))
+            self.assertEqual(len(dialog_only), 3)
+            self.assertTrue(all(isinstance(sample, StructuredChatSample) for sample in dialog_only))
+
+            cfg.mixed_training = True
+            cfg.mixed_text_column = "Fehlt"
+            with self.assertRaisesRegex(ValueError, "CSV-Spalten fehlen: Fehlt"):
+                build_examples_stream(cfg)
 
 
 if __name__ == "__main__":

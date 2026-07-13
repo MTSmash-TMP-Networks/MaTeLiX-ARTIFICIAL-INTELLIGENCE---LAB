@@ -697,6 +697,12 @@ MaTeLiX AI is a trademark/brand of TMP-SYSTEM-SERVICE GmbH.
               <label for="column_name" class="column_row" style="display:none;">Spaltenname</label>
               <input type="text" id="column_name" value="text" class="column_row" style="display:none;">
 
+              <label for="mixed_training" class="mixed_row">Dialog + Text gemischt trainieren</label>
+              <input type="checkbox" id="mixed_training" class="mixed_row">
+
+              <label for="mixed_text_column" class="mixed_text_column_row" style="display:none;">Gemischte Textspalte</label>
+              <input type="text" id="mixed_text_column" value="Text" class="mixed_text_column_row" style="display:none;">
+
               <label for="device">Device</label>
               <select id="device"></select>
 
@@ -971,6 +977,24 @@ MaTeLiX AI is a trademark/brand of TMP-SYSTEM-SERVICE GmbH.
 1,,Du bist ein freundlicher Chatbot.,Hallo!,,"Hallo! Wie kann ich dir helfen?"
 2,1,,Wie spät ist es?,,"Ich habe keinen Zugriff auf deine Uhr, aber du kannst oben rechts schauen."
 3,,Du bist Übersetzer.,Übersetze: "Guten Morgen",,Auf Englisch: "Good morning".</pre>
+              </div>
+            </div>
+
+            <div class="card" style="margin-bottom:12px;">
+              <div class="hd">
+                <h2>Gemischt: Dialog + Text</h2>
+                <button type="button" class="btn secondary small" onclick="downloadExample('mixed')">Beispiel-CSV</button>
+              </div>
+              <div class="bd">
+                <div style="color:var(--muted); font-size:13px; line-height:1.45; margin-bottom:10px;">
+                  Aktiviert mit <code>mixed_training=true</code>. Jede Zeile darf einen Dialog,
+                  freien Text oder beides enthalten. Die Textspalte heißt standardmäßig <code>Text</code>.
+                  Dialog und Text aus demselben Thread bleiben gemeinsam im Train- oder Validation-Split.
+                </div>
+                <pre class="logbox" style="height:auto;">id,parent_id,system,Benutzer,Kontext,Assistentin,Text
+1,,Du bist ein freundlicher Chatbot.,Hallo!,,"Hallo! Wie kann ich dir helfen?",Eine freundliche Begrüßung eröffnet ein Gespräch.
+2,1,,Was ist ein Router?,,"Ein Router verbindet unterschiedliche Netzwerke.",
+3,,,,,,Ein Router leitet Datenpakete zwischen Netzwerken weiter.</pre>
               </div>
             </div>
 
@@ -1405,9 +1429,16 @@ Hier folgt eine weitere Trainingszeile.</pre>
       const mode = document.getElementById("template_mode").value;
       const isHf = document.getElementById("dataset_source").value === "huggingface";
       const isText = mode === "plain" && !isHf;
+      const mixedAvailable = !isHf && (mode === "chat" || mode === "dialogplus");
+      const mixedToggle = document.getElementById("mixed_training");
       document.querySelectorAll('.column_row').forEach(e => e.style.display = isText ? "" : "none");
+      document.querySelectorAll('.mixed_row').forEach(e => e.style.display = mixedAvailable ? "" : "none");
+      document.querySelectorAll('.mixed_text_column_row').forEach(e => {
+        e.style.display = mixedAvailable && mixedToggle.checked ? "" : "none";
+      });
     }
     document.getElementById("template_mode").addEventListener("change", applyTemplateModeUI);
+    document.getElementById("mixed_training").addEventListener("change", applyTemplateModeUI);
     window.addEventListener('DOMContentLoaded', applyTemplateModeUI);
 
     // Dataset source UI
@@ -1618,6 +1649,10 @@ Hier folgt eine weitere Trainingszeile.</pre>
 
         template_mode: document.getElementById("template_mode").value,
         column_name: document.getElementById("column_name").value.trim() || "text",
+        mixed_training: document.getElementById("mixed_training").checked
+          && datasetSource === "local_csv"
+          && document.getElementById("template_mode").value !== "plain",
+        mixed_text_column: document.getElementById("mixed_text_column").value.trim() || "Text",
 
         learning_rate: parseFloat(document.getElementById("learning_rate").value),
         lr_schedule: document.getElementById("lr_schedule").value,
@@ -1737,6 +1772,12 @@ Hier folgt eine weitere Trainingszeile.</pre>
 Das ist ein Beispielsatz für Pretraining.
 Hier folgt eine weitere Trainingszeile.
 `;
+      } else if (mode === "mixed") {
+        csvContent = `id,parent_id,system,Benutzer,Kontext,Assistentin,Text
+1,,Du bist ein freundlicher Chatbot.,Hallo!,"","Hallo! Wie kann ich dir helfen?",Eine freundliche Begrüßung eröffnet ein Gespräch.
+2,1,,Was ist ein Router?,"","Ein Router verbindet unterschiedliche Netzwerke.",""
+3,,,,,,Ein Router leitet Datenpakete zwischen Netzwerken weiter.
+`;
       } else {
         csvContent = `id,parent_id,system,Benutzer,Kontext,Assistentin
 1,,Du bist ein freundlicher Chatbot.,Hallo!,,"Hallo! Wie kann ich dir helfen?"
@@ -1747,7 +1788,10 @@ Hier folgt eine weitere Trainingszeile.
       const blob = new Blob([csvContent], { type: "text/csv;charset=utf-8;" });
       const link = document.createElement("a");
       link.href = URL.createObjectURL(blob);
-      link.setAttribute("download", mode === "plain" ? "text_beispiel.csv" : "row_sft_dialog_beispiel.csv");
+      const filename = mode === "plain"
+        ? "text_beispiel.csv"
+        : (mode === "mixed" ? "row_sft_gemischt_beispiel.csv" : "row_sft_dialog_beispiel.csv");
+      link.setAttribute("download", filename);
       document.body.appendChild(link);
       link.click();
       document.body.removeChild(link);

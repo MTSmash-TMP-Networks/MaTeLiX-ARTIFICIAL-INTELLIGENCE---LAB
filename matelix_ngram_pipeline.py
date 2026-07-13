@@ -67,6 +67,8 @@ class NgramConfig:
     ngram_max_tokens_per_text: int = 4096
     template_mode: str = "chat"
     column_name: str = "text"
+    mixed_training: bool = False
+    mixed_text_column: str = "Text"
     csv_path: str = ""
 
     # Overlap / Konsistenz
@@ -154,10 +156,15 @@ def _iter_candidate_chains(csv_path: str) -> Iterable[List[Dict[str, Any]]]:
         cur = id2row.get(rid)
         if not cur:
             return ("", 0)
+        seen: set[str] = set()
         while True:
+            current_id = normalize_id(cur.get("id"))
+            if current_id in seen:
+                return (min(seen), depth)
+            seen.add(current_id)
             pid = cur.get("parent_id", "")
             if not pid or pid not in id2row:
-                return (cur["id"], depth)
+                return (current_id, depth)
             cur = id2row[pid]
             depth += 1
 
@@ -185,7 +192,13 @@ def _iter_candidate_chains(csv_path: str) -> Iterable[List[Dict[str, Any]]]:
                 yield chain
 
 
-def iter_training_texts(csv_path: str, template_mode: str, column_name: str) -> Iterable[str]:
+def iter_training_texts(
+    csv_path: str,
+    template_mode: str,
+    column_name: str,
+    mixed_training: bool = False,
+    mixed_text_column: str = "Text",
+) -> Iterable[str]:
     mode = (template_mode or "chat").strip().lower()
 
     if mode in {"chat", "dialogplus"}:
@@ -213,6 +226,13 @@ def iter_training_texts(csv_path: str, template_mode: str, column_name: str) -> 
             text = "\n".join(p for p in parts if p.strip()).strip()
             if text:
                 yield text
+        if mixed_training:
+            with open(csv_path, "r", encoding="utf-8") as f:
+                reader = csv.DictReader(f)
+                for row in reader:
+                    text = (row.get(mixed_text_column) or "").strip()
+                    if text:
+                        yield text
         return
 
     with open(csv_path, "r", encoding="utf-8") as f:
@@ -391,7 +411,13 @@ def collect_ngram_candidates(
     max_samples = int(cfg.ngram_max_samples)
     last_progress_reported = -1
 
-    for text in iter_training_texts(cfg.csv_path, cfg.template_mode, cfg.column_name):
+    for text in iter_training_texts(
+        cfg.csv_path,
+        cfg.template_mode,
+        cfg.column_name,
+        cfg.mixed_training,
+        cfg.mixed_text_column,
+    ):
         scanned_samples += 1
         if scanned_samples > max_samples:
             break
