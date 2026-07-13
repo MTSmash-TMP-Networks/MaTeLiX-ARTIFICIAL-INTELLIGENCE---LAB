@@ -11,6 +11,7 @@ try:
     from matelix_ddp_worker import (
         DataCollator,
         DistContext,
+        FixedLRScheduler,
         NearDuplicateTracker,
         PlainTextSample,
         PlannedBatchIterableDataset,
@@ -110,6 +111,41 @@ class TrainingCoreTests(unittest.TestCase):
         scratch_cfg.normalize()
         self.assertTrue(scratch_cfg.include_prompt_loss)
         self.assertEqual(scratch_cfg.warmup_ratio, 0.02)
+
+    def test_fixed_scheduler_uses_exact_plan_and_loads_legacy_state(self):
+        parameter = torch.nn.Parameter(torch.tensor(1.0))
+        optimizer = torch.optim.SGD([parameter], lr=0.1)
+        scheduler = FixedLRScheduler(
+            optimizer,
+            base_lr=0.1,
+            schedule="linear",
+            total_steps=10,
+            warmup_steps=2,
+            min_lr_ratio=0.1,
+        )
+
+        self.assertAlmostEqual(optimizer.param_groups[0]["lr"], 0.05)
+        self.assertAlmostEqual(scheduler.step(2), 0.1)
+        self.assertAlmostEqual(scheduler.step(10), 0.01)
+        self.assertEqual(scheduler.state_dict()["scheduler_type"], "fixed_batch_plan")
+
+        legacy_state = {
+            **scheduler.state_dict(),
+            "adaptive_enabled": True,
+            "freeze_on_done": True,
+            "never_increase_lr": True,
+            "only_extend_steps": True,
+        }
+        restored = FixedLRScheduler(
+            optimizer,
+            base_lr=0.2,
+            schedule="cosine",
+            total_steps=3,
+        )
+        restored.load_state_dict(legacy_state)
+        self.assertEqual(restored.total_steps, 10)
+        self.assertEqual(restored.schedule, "linear")
+        self.assertFalse(hasattr(restored, "adaptive_enabled"))
 
     def test_long_text_is_chunked_with_overlap_and_eos(self):
         tokenizer = self.WhitespaceTokenizer()

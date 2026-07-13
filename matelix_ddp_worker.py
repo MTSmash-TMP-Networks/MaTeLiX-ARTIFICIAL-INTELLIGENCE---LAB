@@ -122,13 +122,6 @@ class TrainConfig:
     warmup_steps: int = 0
     warmup_ratio: float = 0.0
     min_lr_ratio: float = 0.0
-    lr_adjust_interval_steps: int = 25
-    lr_adjust_min_change: float = 0.05
-
-    adaptive_scheduler: bool = False
-    adaptive_scheduler_freeze_on_producer_done: bool = True
-    adaptive_scheduler_never_increase_lr: bool = True
-    adaptive_scheduler_only_extend_steps: bool = True
 
     per_device_train_batch_size: int = 2
     gradient_accumulation_steps: int = 4
@@ -234,12 +227,6 @@ class TrainConfig:
         self.warmup_steps = max(0, int(self.warmup_steps))
         self.warmup_ratio = max(0.0, float(self.warmup_ratio))
         self.min_lr_ratio = min(1.0, max(0.0, float(self.min_lr_ratio)))
-        self.lr_adjust_interval_steps = max(1, int(self.lr_adjust_interval_steps))
-        self.lr_adjust_min_change = max(0.0, float(self.lr_adjust_min_change))
-        self.adaptive_scheduler = bool(self.adaptive_scheduler)
-        self.adaptive_scheduler_freeze_on_producer_done = bool(self.adaptive_scheduler_freeze_on_producer_done)
-        self.adaptive_scheduler_never_increase_lr = bool(self.adaptive_scheduler_never_increase_lr)
-        self.adaptive_scheduler_only_extend_steps = bool(self.adaptive_scheduler_only_extend_steps)
         self.seed = int(self.seed)
         self.mixed_training = bool(self.mixed_training)
         self.mixed_text_column = str(self.mixed_text_column or "Text").strip() or "Text"
@@ -1808,20 +1795,20 @@ def shard_file_path(cache_dir: Path, shard_idx: int) -> Path:
     return cache_dir / f"shard_{shard_idx:06d}.pkl"
 
 
-def producer_done_path(cache_dir: Path) -> Path:
-    return cache_dir / "_producer_done.json"
+def dataset_ready_path(cache_dir: Path) -> Path:
+    return cache_dir / "_dataset_ready.json"
 
 
-def producer_error_path(cache_dir: Path) -> Path:
-    return cache_dir / "_producer_error.txt"
+def dataset_error_path(cache_dir: Path) -> Path:
+    return cache_dir / "_dataset_error.txt"
 
 
-def producer_meta_path(cache_dir: Path) -> Path:
-    return cache_dir / "_producer_meta.json"
+def dataset_meta_path(cache_dir: Path) -> Path:
+    return cache_dir / "_dataset_meta.json"
 
 
-def producer_progress_path(cache_dir: Path) -> Path:
-    return cache_dir / "_producer_progress.json"
+def dataset_progress_path(cache_dir: Path) -> Path:
+    return cache_dir / "_dataset_progress.json"
 
 
 def _atomic_write_json(path: Path, payload: Dict[str, Any]) -> None:
@@ -1897,7 +1884,7 @@ def _flush_pending_samples(
     return pending_samples, current_samples, shard_idx, global_start
 
 
-def _write_producer_progress(
+def _write_dataset_progress(
     cache_dir: Path,
     *,
     seen_samples: int,
@@ -1905,6 +1892,7 @@ def _write_producer_progress(
     skipped_samples: int,
     shard_idx: int,
     done: bool,
+    status_writer: Optional[JsonStatusWriter] = None,
 ) -> None:
     payload = {
         "seen_samples": int(seen_samples),
@@ -1914,7 +1902,17 @@ def _write_producer_progress(
         "done": bool(done),
         "updated_at": time.time(),
     }
-    _atomic_write_json(producer_progress_path(cache_dir), payload)
+    _atomic_write_json(dataset_progress_path(cache_dir), payload)
+    if status_writer is not None:
+        status_writer.write({
+            "running": True,
+            "status": "dataset_ready" if done else "building_dataset",
+            "eta": "Dataset vollständig aufgebaut" if done else "Dataset wird vollständig aufgebaut",
+            "dataset_progress": payload,
+            "dataset_ready": bool(done),
+            "total_samples_real": int(tokenized_samples) if done else None,
+            "skipped_samples": int(skipped_samples),
+        })
 
 
 def _histogram_percentile(histogram: Counter[int], quantile: float) -> int:
@@ -1930,7 +1928,11 @@ def _histogram_percentile(histogram: Counter[int], quantile: float) -> int:
     return int(max(histogram))
 
 
-def shard_producer_process_main(cfg_dict: Dict[str, Any], cache_dir_str: str) -> None:
+def build_shard_dataset(
+    cfg_dict: Dict[str, Any],
+    cache_dir_str: str,
+    status_writer: Optional[JsonStatusWriter] = None,
+) -> None:
     try:
         cfg = TrainConfig(**cfg_dict)
         cfg.normalize()
@@ -2037,25 +2039,29 @@ def shard_producer_process_main(cfg_dict: Dict[str, Any], cache_dir_str: str) ->
 
         def write_periodic_progress() -> None:
             if seen_samples % 100 == 0:
-                _write_producer_progress(
+                _write_dataset_progress(
                     cache_dir,
                     seen_samples=seen_samples,
                     tokenized_samples=total_samples,
                     skipped_samples=skipped_samples,
                     shard_idx=shard_idx,
                     done=False,
+                    status_writer=status_writer,
                 )
 
-        _write_producer_progress(
+        _write_dataset_progress(
             cache_dir,
             seen_samples=0,
             tokenized_samples=0,
             skipped_samples=0,
             shard_idx=0,
             done=False,
+            status_writer=status_writer,
         )
 
         for item in examples_iter:
+            if SHUTDOWN.stop:
+                raise RuntimeError("Dataset-Aufbau durch Stop-Signal abgebrochen.")
             seen_samples += 1
             sample_type = "dialog" if isinstance(item, StructuredChatSample) else "text"
             raw_samples_by_type[sample_type] += 1
@@ -2168,13 +2174,14 @@ def shard_producer_process_main(cfg_dict: Dict[str, Any], cache_dir_str: str) ->
             _write_shard(cache_dir, shard_idx, global_start, current_samples)
             shard_idx += 1
 
-        _write_producer_progress(
+        _write_dataset_progress(
             cache_dir,
             seen_samples=seen_samples,
             tokenized_samples=total_samples,
             skipped_samples=skipped_samples,
             shard_idx=shard_idx,
             done=True,
+            status_writer=status_writer,
         )
 
         meta = {
@@ -2217,81 +2224,81 @@ def shard_producer_process_main(cfg_dict: Dict[str, Any], cache_dir_str: str) ->
             "ngram_summary": ngram_summary_text(ngram_state),
             "ngram_selected_count": int((ngram_state.stats or {}).get("selected_count", 0)) if ngram_state else 0,
         }
-        _atomic_write_json(producer_meta_path(cache_dir), meta)
-        _atomic_write_json(producer_done_path(cache_dir), {"done": True})
+        _atomic_write_json(dataset_meta_path(cache_dir), meta)
+        _atomic_write_json(dataset_ready_path(cache_dir), {"done": True})
 
     except Exception as e:
-        producer_error_path(Path(cache_dir_str)).write_text(
+        dataset_error_path(Path(cache_dir_str)).write_text(
             f"{e.__class__.__name__}: {e}\n\n{traceback.format_exc()}",
             encoding="utf-8",
         )
         raise
 
 
-def start_shard_producer(cfg: TrainConfig, cache_dir: Path, ctx: DistContext) -> Optional[mp.Process]:
+def prepare_shard_dataset(
+    cfg: TrainConfig,
+    cache_dir: Path,
+    ctx: DistContext,
+    status_writer: Optional[JsonStatusWriter] = None,
+) -> None:
     if not ctx.is_main:
-        return None
+        return
 
     if cfg.rebuild_dataset_cache and cache_dir.exists():
         shutil.rmtree(cache_dir, ignore_errors=True)
 
     cache_dir.mkdir(parents=True, exist_ok=True)
 
-    done_file = producer_done_path(cache_dir)
-    error_file = producer_error_path(cache_dir)
-    progress_file = producer_progress_path(cache_dir)
+    done_file = dataset_ready_path(cache_dir)
+    error_file = dataset_error_path(cache_dir)
+    progress_file = dataset_progress_path(cache_dir)
 
     if error_file.exists():
         error_file.unlink(missing_ok=True)
 
     if cfg.use_dataset_cache and done_file.exists() and not cfg.rebuild_dataset_cache:
-        LOGGER.info("Fertiger Shard-Cache bereits vorhanden: %s", cache_dir)
-        return None
+        LOGGER.info("Vollständig gebautes Dataset bereits vorhanden: %s", cache_dir)
+        if status_writer is not None:
+            cached_progress = read_json_if_exists(progress_file) or {}
+            cached_meta = read_json_if_exists(dataset_meta_path(cache_dir)) or {}
+            status_writer.write({
+                "running": True,
+                "status": "dataset_ready",
+                "eta": "Dataset-Cache vollständig geladen",
+                "dataset_progress": cached_progress,
+                "dataset_meta": cached_meta,
+                "dataset_ready": True,
+                "total_samples_real": cached_meta.get("total_samples"),
+                "skipped_samples": cached_meta.get("skipped_samples"),
+            })
+        return
 
     for p in cache_dir.glob("shard_*.pkl"):
         p.unlink(missing_ok=True)
     done_file.unlink(missing_ok=True)
-    producer_meta_path(cache_dir).unlink(missing_ok=True)
+    dataset_meta_path(cache_dir).unlink(missing_ok=True)
     progress_file.unlink(missing_ok=True)
 
-    proc = mp.Process(
-        target=shard_producer_process_main,
-        args=(cfg.__dict__.copy(), str(cache_dir)),
-        daemon=True,
-    )
-    proc.start()
-    LOGGER.info("Shard-Producer gestartet (pid=%s): %s", proc.pid, cache_dir)
-    return proc
+    LOGGER.info("Baue tokenisiertes Dataset vollständig vor dem Training: %s", cache_dir)
+    build_shard_dataset(cfg.__dict__.copy(), str(cache_dir), status_writer=status_writer)
+    LOGGER.info("Dataset vollständig gebaut: %s", cache_dir)
 
 
-def wait_for_first_shard(cache_dir: Path, poll_sec: float = 1.0) -> None:
+def wait_for_dataset_ready(cache_dir: Path, poll_sec: float = 0.5) -> None:
     while True:
-        if producer_error_path(cache_dir).exists():
-            raise RuntimeError(producer_error_path(cache_dir).read_text(encoding="utf-8"))
-        if shard_file_path(cache_dir, 0).exists():
-            return
-        if producer_done_path(cache_dir).exists():
-            meta_p = producer_meta_path(cache_dir)
-            if meta_p.exists():
-                meta = json.loads(meta_p.read_text(encoding="utf-8"))
-                if int(meta.get("num_shards", 0)) == 0:
-                    raise RuntimeError(
-                        f"Shard-Producer fertig, aber kein Shard erzeugt. "
-                        f"skipped_samples={meta.get('skipped_samples', 0)}"
-                    )
-            raise RuntimeError("Shard-Producer beendet, aber erster Shard fehlt.")
-        time.sleep(poll_sec)
-
-
-def wait_for_producer_complete(cache_dir: Path, poll_sec: float = 0.5) -> None:
-    while True:
-        error_file = producer_error_path(cache_dir)
+        error_file = dataset_error_path(cache_dir)
         if error_file.exists():
             raise RuntimeError(error_file.read_text(encoding="utf-8"))
-        if producer_done_path(cache_dir).exists():
+        if dataset_ready_path(cache_dir).exists():
+            meta = read_json_if_exists(dataset_meta_path(cache_dir)) or {}
+            if int(meta.get("num_shards", 0)) <= 0 or not shard_file_path(cache_dir, 0).exists():
+                raise RuntimeError(
+                    "Dataset-Aufbau abgeschlossen, aber kein Trainings-Shard erzeugt. "
+                    f"skipped_samples={meta.get('skipped_samples', 0)}"
+                )
             return
         if SHUTDOWN.stop:
-            raise RuntimeError("Tokenisierung durch Stop-Signal abgebrochen.")
+            raise RuntimeError("Dataset-Aufbau durch Stop-Signal abgebrochen.")
         time.sleep(poll_sec)
 
 
@@ -2473,19 +2480,12 @@ class TokenizedShardIterableDataset(IterableDataset):
         combined_world_size = max(1, int(self.world_size) * max(1, num_workers))
         combined_rank = int(self.rank) + worker_id * max(1, int(self.world_size))
 
-        shard_idx = 0
-        while True:
-            path = shard_file_path(self.cache_dir, shard_idx)
+        if dataset_error_path(self.cache_dir).exists():
+            raise RuntimeError(dataset_error_path(self.cache_dir).read_text(encoding="utf-8"))
+        if not dataset_ready_path(self.cache_dir).exists():
+            raise RuntimeError("Tokenisiertes Dataset ist noch nicht vollständig gebaut.")
 
-            while True:
-                if producer_error_path(self.cache_dir).exists():
-                    raise RuntimeError(producer_error_path(self.cache_dir).read_text(encoding="utf-8"))
-                if path.exists():
-                    break
-                if producer_done_path(self.cache_dir).exists():
-                    return
-                time.sleep(0.5)
-
+        for path in sorted(self.cache_dir.glob("shard_*.pkl")):
             with open(path, "rb") as f:
                 payload = pickle.load(f)
 
@@ -2519,7 +2519,6 @@ class TokenizedShardIterableDataset(IterableDataset):
                     "labels": torch.tensor(item["labels"], dtype=torch.long),
                 }
 
-            shard_idx += 1
 
 
 @dataclass(frozen=True)
@@ -3116,7 +3115,7 @@ def build_optimizer(model: nn.Module, cfg: TrainConfig) -> torch.optim.Optimizer
         )
 
 
-class AdaptiveLRScheduler:
+class FixedLRScheduler:
     def __init__(
         self,
         optimizer: torch.optim.Optimizer,
@@ -3127,9 +3126,6 @@ class AdaptiveLRScheduler:
         warmup_steps: int = 0,
         min_lr_ratio: float = 0.0,
         lr_decay_factor: float = 1.0,
-        adaptive_enabled: bool = True,
-        never_increase_lr: bool = True,
-        only_extend_steps: bool = True,
     ) -> None:
         self.optimizer = optimizer
         self.base_lr = float(base_lr)
@@ -3138,36 +3134,15 @@ class AdaptiveLRScheduler:
         self.warmup_steps = max(0, int(warmup_steps))
         self.min_lr_ratio = min(1.0, max(0.0, float(min_lr_ratio)))
         self.lr_decay_factor = max(0.01, float(lr_decay_factor))
-        self.adaptive_enabled = bool(adaptive_enabled)
-        self.never_increase_lr = bool(never_increase_lr)
-        self.only_extend_steps = bool(only_extend_steps)
-        self.frozen = False
         self.last_lr = self.base_lr
-        self.max_total_steps_seen = self.total_steps
-        self.last_effective_total_samples = None
-        self._apply_lr(self.get_lr_for_step(0), global_step=0)
+        self._apply_lr(self.get_lr_for_step(0))
 
-    def _apply_lr(self, lr: float, global_step: int) -> float:
+    def _apply_lr(self, lr: float) -> float:
         lr = float(max(0.0, lr))
-        warmup_active = self.warmup_steps > 0 and global_step < self.warmup_steps
-        if self.never_increase_lr and global_step > 0 and not warmup_active:
-            lr = min(lr, float(self.last_lr))
         for group in self.optimizer.param_groups:
             group["lr"] = lr
         self.last_lr = lr
         return lr
-
-    def freeze(self) -> None:
-        self.frozen = True
-
-    def update_total_steps(self, total_steps: int) -> bool:
-        total_steps = max(1, int(total_steps))
-        if self.only_extend_steps:
-            total_steps = max(self.total_steps, total_steps)
-        changed = total_steps != self.total_steps
-        self.total_steps = total_steps
-        self.max_total_steps_seen = max(self.max_total_steps_seen, self.total_steps)
-        return changed
 
     def get_lr_scale(self, step: int) -> float:
         step = max(0, int(step))
@@ -3196,7 +3171,7 @@ class AdaptiveLRScheduler:
         return self.base_lr * self.get_lr_scale(step)
 
     def step(self, global_step: int) -> float:
-        return self._apply_lr(self.get_lr_for_step(global_step), global_step=global_step)
+        return self._apply_lr(self.get_lr_for_step(global_step))
 
     def state_dict(self) -> Dict[str, Any]:
         return {
@@ -3207,39 +3182,20 @@ class AdaptiveLRScheduler:
             "min_lr_ratio": self.min_lr_ratio,
             "lr_decay_factor": self.lr_decay_factor,
             "last_lr": self.last_lr,
-            "adaptive_enabled": self.adaptive_enabled,
-            "never_increase_lr": self.never_increase_lr,
-            "only_extend_steps": self.only_extend_steps,
-            "frozen": self.frozen,
-            "max_total_steps_seen": self.max_total_steps_seen,
-            "last_effective_total_samples": self.last_effective_total_samples,
+            "scheduler_type": "fixed_batch_plan",
         }
 
     def load_state_dict(self, state: Dict[str, Any]) -> None:
         """Restore scheduler state without replacing the current optimizer."""
         for key in (
             "base_lr", "schedule", "total_steps", "warmup_steps", "min_lr_ratio",
-            "lr_decay_factor", "last_lr", "adaptive_enabled", "never_increase_lr",
-            "only_extend_steps", "frozen", "max_total_steps_seen",
-            "last_effective_total_samples",
+            "lr_decay_factor", "last_lr",
         ):
             if key in state:
                 setattr(self, key, state[key])
         self.total_steps = max(1, int(self.total_steps))
         self.warmup_steps = max(0, int(self.warmup_steps))
-        self._apply_lr(float(self.last_lr), global_step=0)
-
-
-def estimate_total_steps_from_samples(total_samples: int, cfg: TrainConfig, ctx: DistContext) -> int:
-    total_samples = max(1, int(total_samples))
-    local_samples = int(math.ceil(total_samples / max(1, ctx.world_size)))
-    batches_per_epoch = max(1, int(math.ceil(local_samples / max(1, cfg.per_device_train_batch_size))))
-    updates_per_epoch = max(1, int(math.ceil(batches_per_epoch / max(1, cfg.gradient_accumulation_steps))))
-
-    if cfg.max_steps is not None:
-        return max(1, int(cfg.max_steps))
-
-    return max(1, int(math.ceil(cfg.num_train_epochs * updates_per_epoch)))
+        self._apply_lr(float(self.last_lr))
 
 
 def estimate_total_steps_from_batch_plan(
@@ -3252,141 +3208,26 @@ def estimate_total_steps_from_batch_plan(
     return max(1, int(math.ceil(cfg.num_train_epochs * updates_per_epoch)))
 
 
-def maybe_adjust_scheduler_from_progress(
-    scheduler: AdaptiveLRScheduler,
-    cfg: TrainConfig,
-    ctx: DistContext,
-    cache_dir: Path,
-    csv_total_samples_est: int,
-    global_step: int,
-    force: bool = False,
-) -> Tuple[bool, int, Dict[str, Any]]:
-    progress = read_json_if_exists(producer_progress_path(cache_dir)) or {}
-    meta = read_json_if_exists(producer_meta_path(cache_dir)) or {}
-    producer_done = bool(progress.get("done") or meta.get("done"))
-
-    effective_total_samples = max(1, int(csv_total_samples_est))
-    source = "csv_estimate"
-
-    if meta:
-        total_samples_real = int(meta.get("total_samples", 0))
-        if total_samples_real > 0:
-            effective_total_samples = total_samples_real
-            source = "producer_meta_final"
-    elif progress:
-        seen_samples = int(progress.get("seen_samples", 0))
-        tokenized_samples = int(progress.get("tokenized_samples", 0))
-        if seen_samples > 0 and tokenized_samples > 0 and csv_total_samples_est > 0:
-            projected = int(round(csv_total_samples_est * (tokenized_samples / float(seen_samples))))
-            if projected > 0:
-                effective_total_samples = projected
-                source = "producer_progress_projected"
-
-    if cfg.val_split > 0.0:
-        effective_total_samples = max(1, int(round(effective_total_samples * (1.0 - cfg.val_split))))
-        source += "_train_split"
-    proposed_total_steps = estimate_total_steps_from_samples(effective_total_samples, cfg, ctx)
-    current_total_steps = max(1, int(scheduler.total_steps))
-    rel_change = abs(proposed_total_steps - current_total_steps) / float(max(1, current_total_steps))
-    if not cfg.adaptive_scheduler:
-        proposed_total_steps = current_total_steps
-        rel_change = 0.0
-
-    info = {
-        "source": ("static" if not cfg.adaptive_scheduler else source),
-        "effective_total_samples": int(effective_total_samples),
-        "proposed_total_steps": int(proposed_total_steps),
-        "current_total_steps": int(current_total_steps),
-        "relative_change": float(rel_change),
-        "progress": progress,
-        "meta": meta,
-        "producer_done": producer_done,
-        "adaptive_active": bool(cfg.adaptive_scheduler and not scheduler.frozen),
-    }
-
-    if not cfg.adaptive_scheduler:
-        scheduler.last_effective_total_samples = int(effective_total_samples)
-        return False, current_total_steps, info
-
-    if scheduler.frozen and not force:
-        scheduler.last_effective_total_samples = int(effective_total_samples)
-        return False, current_total_steps, info
-
-    should_update = force or (proposed_total_steps != current_total_steps and rel_change >= cfg.lr_adjust_min_change)
-    changed = False
-
-    if should_update:
-        changed = scheduler.update_total_steps(proposed_total_steps)
-        scheduler.last_effective_total_samples = int(effective_total_samples)
-        if changed:
-            scheduler.step(global_step)
-
-    if producer_done and cfg.adaptive_scheduler_freeze_on_producer_done:
-        scheduler.freeze()
-
-    return changed, scheduler.total_steps, info
-
-
-def _build_live_runtime_fields(
+def _build_dataset_runtime_fields(
     *,
-    scheduler: AdaptiveLRScheduler,
+    scheduler: FixedLRScheduler,
     cache_dir: Path,
     csv_total_samples_est: int,
-    cfg: TrainConfig,
 ) -> Dict[str, Any]:
-    progress = read_json_if_exists(producer_progress_path(cache_dir)) or {}
-    meta = read_json_if_exists(producer_meta_path(cache_dir)) or {}
-
-    source = "csv_estimate"
-    effective_total_samples = int(max(1, csv_total_samples_est))
-
-    if meta:
-        total_samples_real = int(meta.get("total_samples", 0))
-        if total_samples_real > 0:
-            effective_total_samples = total_samples_real
-            source = "producer_meta_final"
-    elif progress:
-        seen_samples = int(progress.get("seen_samples", 0))
-        tokenized_samples = int(progress.get("tokenized_samples", 0))
-        if seen_samples > 0 and tokenized_samples > 0 and csv_total_samples_est > 0:
-            projected = int(round(csv_total_samples_est * (tokenized_samples / float(seen_samples))))
-            if projected > 0:
-                effective_total_samples = projected
-                source = "producer_progress_projected"
-
-    current_total_steps = max(1, int(scheduler.total_steps))
-    rel_change = 0.0
-
-    total_samples_real = None
-    skipped_samples = None
-
-    if meta:
-        if meta.get("total_samples") is not None:
-            total_samples_real = int(meta["total_samples"])
-        if meta.get("skipped_samples") is not None:
-            skipped_samples = int(meta["skipped_samples"])
-    elif progress:
-        if progress.get("tokenized_samples") is not None:
-            total_samples_real = int(progress["tokenized_samples"])
-        if progress.get("skipped_samples") is not None:
-            skipped_samples = int(progress["skipped_samples"])
+    progress = read_json_if_exists(dataset_progress_path(cache_dir)) or {}
+    meta = read_json_if_exists(dataset_meta_path(cache_dir)) or {}
+    total_samples_real = meta.get("total_samples", progress.get("tokenized_samples"))
+    skipped_samples = meta.get("skipped_samples", progress.get("skipped_samples"))
 
     return {
         "csv_total_samples_est": int(csv_total_samples_est),
-        "total_samples_real": total_samples_real,
-        "skipped_samples": skipped_samples,
-        "producer_progress": progress,
-        "producer_meta": meta,
+        "total_samples_real": int(total_samples_real) if total_samples_real is not None else None,
+        "skipped_samples": int(skipped_samples) if skipped_samples is not None else None,
+        "dataset_progress": progress,
+        "dataset_meta": meta,
+        "dataset_ready": bool(progress.get("done") or meta.get("done")),
         "scheduler_state": scheduler.state_dict(),
-        "scheduler_source": source,
-        "projected_samples": int(effective_total_samples),
-        "scheduler_rel_change": float(rel_change),
-        "producer_done": bool(progress.get("done") or meta.get("done")),
-        "adaptive_scheduler": bool(cfg.adaptive_scheduler),
-        "adaptive_scheduler_frozen": bool(scheduler.frozen),
-        "adaptive_scheduler_never_increase_lr": bool(cfg.adaptive_scheduler_never_increase_lr),
-        "adaptive_scheduler_only_extend_steps": bool(cfg.adaptive_scheduler_only_extend_steps),
-        "scheduler_mode": (f"adaptive_{cfg.lr_schedule}" if cfg.adaptive_scheduler else str(cfg.lr_schedule)),
+        "scheduler_mode": f"fixed_{scheduler.schedule}",
     }
 
 
@@ -3485,7 +3326,7 @@ def train_epoch(
     model: nn.Module,
     loader: DataLoader,
     optimizer: torch.optim.Optimizer,
-    scheduler: AdaptiveLRScheduler,
+    scheduler: FixedLRScheduler,
     scaler: Any,
     cfg: TrainConfig,
     ctx: DistContext,
@@ -3648,28 +3489,6 @@ def train_epoch(
                 global_step += 1
                 accum_counter = 0
 
-                if (global_step % cfg.lr_adjust_interval_steps) == 0:
-                    changed, proposed_total_steps, info = maybe_adjust_scheduler_from_progress(
-                        scheduler=scheduler,
-                        cfg=cfg,
-                        ctx=ctx,
-                        cache_dir=cache_dir,
-                        csv_total_samples_est=csv_total_samples_est,
-                        global_step=global_step,
-                        force=False,
-                    )
-                    total_steps_ref["value"] = scheduler.total_steps
-                    if ctx.is_main and changed:
-                        LOGGER.info(
-                            "Scheduler angepasst | source=%s total_steps=%s -> %s rel_change=%.4f samples=%s frozen=%s",
-                            info["source"],
-                            info["current_total_steps"],
-                            proposed_total_steps,
-                            info["relative_change"],
-                            info["effective_total_samples"],
-                            scheduler.frozen,
-                        )
-
                 lr = scheduler.step(global_step)
                 total_steps_ref["value"] = scheduler.total_steps
 
@@ -3726,11 +3545,10 @@ def train_epoch(
                         "cuda_memory": cuda_mem,
                     }
                     payload.update(
-                        _build_live_runtime_fields(
+                        _build_dataset_runtime_fields(
                             scheduler=scheduler,
                             cache_dir=cache_dir,
                             csv_total_samples_est=csv_total_samples_est,
-                            cfg=cfg,
                         )
                     )
                     status_writer.write(payload)
@@ -3786,27 +3604,6 @@ def train_epoch(
             return avg_loss, global_step, micro_step, reached_max_steps
         global_step += 1
 
-        changed, proposed_total_steps, info = maybe_adjust_scheduler_from_progress(
-            scheduler=scheduler,
-            cfg=cfg,
-            ctx=ctx,
-            cache_dir=cache_dir,
-            csv_total_samples_est=csv_total_samples_est,
-            global_step=global_step,
-            force=False,
-        )
-        total_steps_ref["value"] = scheduler.total_steps
-        if ctx.is_main and changed:
-            LOGGER.info(
-                "Scheduler angepasst | source=%s total_steps=%s -> %s rel_change=%.4f samples=%s frozen=%s",
-                info["source"],
-                info["current_total_steps"],
-                proposed_total_steps,
-                info["relative_change"],
-                info["effective_total_samples"],
-                scheduler.frozen,
-            )
-
         lr = scheduler.step(global_step)
         total_steps_ref["value"] = scheduler.total_steps
 
@@ -3851,11 +3648,10 @@ def train_epoch(
                 "cuda_memory": cuda_mem,
             }
             payload.update(
-                _build_live_runtime_fields(
+                _build_dataset_runtime_fields(
                     scheduler=scheduler,
                     cache_dir=cache_dir,
                     csv_total_samples_est=csv_total_samples_est,
-                    cfg=cfg,
                 )
             )
             status_writer.write(payload)
@@ -4013,7 +3809,7 @@ def save_model_artifacts(
 
 def save_training_checkpoint(
     *, model: nn.Module, tokenizer: Any, optimizer: torch.optim.Optimizer,
-    scheduler: AdaptiveLRScheduler, scaler: Any, outdir: Path,
+    scheduler: FixedLRScheduler, scaler: Any, outdir: Path,
     epoch: int, global_step: int, cfg: TrainConfig, ctx: DistContext,
     best_val_loss: Optional[float] = None, epochs_without_improvement: int = 0,
     total_tokens_seen: int = 0,
@@ -4069,7 +3865,7 @@ def save_training_checkpoint(
 
 def load_training_state(
     resume_dir: Path, optimizer: torch.optim.Optimizer,
-    scheduler: AdaptiveLRScheduler, scaler: Any, device: torch.device, rank: int = 0,
+    scheduler: FixedLRScheduler, scaler: Any, device: torch.device, rank: int = 0,
 ) -> Tuple[int, int, Dict[str, Any]]:
     state_path = resume_dir / "trainer_state.pt"
     if not state_path.exists():
@@ -4103,7 +3899,6 @@ def release_training_memory(
     loader: Optional[Any] = None,
     dataset: Optional[Any] = None,
     tokenizer: Optional[Any] = None,
-    producer_proc: Optional[mp.Process] = None,
 ) -> None:
     """Versucht Trainings-RAM/VRAM vor Prozessende explizit freizugeben.
 
@@ -4111,13 +3906,6 @@ def release_training_memory(
     Die aufrufende Funktion setzt danach ihre lokalen Variablen auf None, damit die
     letzten starken Referenzen verschwinden und gc/empty_cache wirklich greifen.
     """
-    try:
-        if producer_proc is not None and producer_proc.is_alive():
-            producer_proc.terminate()
-            producer_proc.join(timeout=5)
-    except Exception:
-        pass
-
     try:
         if optimizer is not None:
             optimizer.zero_grad(set_to_none=True)
@@ -4253,7 +4041,6 @@ def main() -> int:
     status_writer = JsonStatusWriter(status_path, ctx)
     preview_writer = JsonPreviewWriter(preview_path, ctx)
 
-    producer_proc: Optional[mp.Process] = None
     ngram_state = None
 
     try:
@@ -4329,7 +4116,6 @@ def main() -> int:
             dataset_audit_report = {"enabled": False, "ok": True}
 
         prepare_scratch_tokenizer_if_requested(cfg, outdir, ctx)
-        model, tokenizer, fp16, bf16, ngram_state = build_model_and_tokenizer(cfg, ctx)
 
         total_samples_est = count_examples_fast(cfg)
         if total_samples_est <= 0:
@@ -4344,14 +4130,18 @@ def main() -> int:
                 pass
 
         cache_dir = compute_shard_cache_dir(cfg)
-        producer_proc = start_shard_producer(cfg, cache_dir, ctx)
-
         if ctx.is_main:
-            LOGGER.info("Warte auf vollständige Tokenisierung für den Batch-Plan ...")
-        wait_for_first_shard(cache_dir)
-        wait_for_producer_complete(cache_dir)
+            status_writer.write({
+                "running": True,
+                "status": "building_dataset",
+                "eta": "Dataset wird vollständig aufgebaut",
+                "csv_total_samples_est": int(total_samples_est),
+            })
+            prepare_shard_dataset(cfg, cache_dir, ctx, status_writer=status_writer)
+        wait_for_dataset_ready(cache_dir)
 
         barrier(ctx)
+        model, tokenizer, fp16, bf16, ngram_state = build_model_and_tokenizer(cfg, ctx)
 
         serialized_plan_path = outdir / "batch_plan_state.pkl"
         plan_error_path = outdir / "batch_plan_error.txt"
@@ -4416,10 +4206,6 @@ def main() -> int:
         if ctx.is_main:
             serialized_plan_path.unlink(missing_ok=True)
             plan_error_path.unlink(missing_ok=True)
-        if cfg.adaptive_scheduler:
-            cfg.adaptive_scheduler = False
-            if ctx.is_main:
-                LOGGER.info("Adaptiver Scheduler deaktiviert: der vollständige Batch-Plan liefert exakte Step-Zahlen.")
         if ctx.is_main:
             (outdir / "batch_plan.json").write_text(
                 json.dumps(batch_plan_stats, ensure_ascii=False, indent=2), encoding="utf-8"
@@ -4519,7 +4305,7 @@ def main() -> int:
                 )
 
         optimizer = build_optimizer(model, cfg)
-        scheduler = AdaptiveLRScheduler(
+        scheduler = FixedLRScheduler(
             optimizer=optimizer,
             base_lr=cfg.learning_rate,
             schedule=cfg.lr_schedule,
@@ -4527,21 +4313,9 @@ def main() -> int:
             warmup_steps=effective_warmup_steps,
             min_lr_ratio=cfg.min_lr_ratio,
             lr_decay_factor=cfg.lr_decay_factor,
-            adaptive_enabled=cfg.adaptive_scheduler,
-            never_increase_lr=cfg.adaptive_scheduler_never_increase_lr,
-            only_extend_steps=cfg.adaptive_scheduler_only_extend_steps,
         )
         scaler = make_scaler(fp16=fp16, device=ctx.device)
 
-        changed, proposed_total_steps, info = maybe_adjust_scheduler_from_progress(
-            scheduler=scheduler,
-            cfg=cfg,
-            ctx=ctx,
-            cache_dir=cache_dir,
-            csv_total_samples_est=total_samples_est,
-            global_step=0,
-            force=True,
-        )
         total_steps_ref = {"value": scheduler.total_steps}
         resume_epoch = 0
         resume_global_step = 0
@@ -4550,9 +4324,9 @@ def main() -> int:
             resume_epoch, resume_global_step, resume_state = load_training_state(
                 Path(cfg.resume).expanduser().resolve(), optimizer, scheduler, scaler, ctx.device, ctx.rank
             )
-            scheduler.total_steps = max(1, initial_total_steps, resume_global_step)
-            scheduler.max_total_steps_seen = max(scheduler.max_total_steps_seen, scheduler.total_steps)
-            scheduler.adaptive_enabled = False
+            scheduler.total_steps = max(
+                1, initial_total_steps, resume_global_step,
+            )
             total_steps_ref["value"] = scheduler.total_steps
             LOGGER.info(
                 "Training fortgesetzt | checkpoint=%s start_epoch=%s global_step=%s",
@@ -4578,23 +4352,18 @@ def main() -> int:
 
         if ctx.is_main:
             LOGGER.info(
-                "Scheduler initialisiert | schedule=%s total_steps=%s warmup_steps=%s min_lr_ratio=%s lr_decay_factor=%s source=%s adaptive=%s freeze_on_done=%s never_increase_lr=%s only_extend_steps=%s",
+                "Fester Scheduler initialisiert | schedule=%s total_steps=%s warmup_steps=%s min_lr_ratio=%s lr_decay_factor=%s source=exact_batch_plan",
                 cfg.lr_schedule,
                 scheduler.total_steps,
                 effective_warmup_steps,
                 cfg.min_lr_ratio,
                 cfg.lr_decay_factor,
-                info["source"],
-                cfg.adaptive_scheduler,
-                cfg.adaptive_scheduler_freeze_on_producer_done,
-                cfg.adaptive_scheduler_never_increase_lr,
-                cfg.adaptive_scheduler_only_extend_steps,
             )
             LOGGER.info(
-                "Samples initial | csv_estimate=%s effective_samples=%s proposed_total_steps=%s",
+                "Dataset vollständig | csv_estimate=%s real_samples=%s total_steps=%s",
                 total_samples_est,
-                info["effective_total_samples"],
-                proposed_total_steps,
+                (read_json_if_exists(dataset_meta_path(cache_dir)) or {}).get("total_samples"),
+                scheduler.total_steps,
             )
             LOGGER.info(
                 "Datenpipeline | phase=%s max_history_turns=%s text_chunking=%s overlap=%s eos=%s packing=%s",
@@ -4649,22 +4418,17 @@ def main() -> int:
                 "log_cuda_memory": bool(cfg.log_cuda_memory),
                 "cuda_memory_log_interval_steps": int(cfg.cuda_memory_log_interval_steps),
                 "cuda_empty_cache_interval_steps": int(cfg.cuda_empty_cache_interval_steps),
-                "adaptive_scheduler": bool(cfg.adaptive_scheduler),
-                "adaptive_scheduler_frozen": bool(scheduler.frozen),
-                "adaptive_scheduler_never_increase_lr": bool(cfg.adaptive_scheduler_never_increase_lr),
-                "adaptive_scheduler_only_extend_steps": bool(cfg.adaptive_scheduler_only_extend_steps),
-                "scheduler_mode": (f"adaptive_{cfg.lr_schedule}" if cfg.adaptive_scheduler else str(cfg.lr_schedule)),
+                "scheduler_mode": f"fixed_{cfg.lr_schedule}",
                 "batch_plan": batch_plan_stats,
                 "dataloader_num_workers_effective": num_loader_workers,
                 "dataset_audit": dataset_audit_report,
                 "hardware_profile": hardware_profile,
             }
             payload.update(
-                _build_live_runtime_fields(
+                _build_dataset_runtime_fields(
                     scheduler=scheduler,
                     cache_dir=cache_dir,
                     csv_total_samples_est=total_samples_est,
-                    cfg=cfg,
                 )
             )
             status_writer.write(payload)
@@ -4771,9 +4535,9 @@ def main() -> int:
                             "early_stopping_patience": cfg.early_stopping_patience,
                             "validation_by_type": validation_by_type,
                         }
-                        status_payload.update(_build_live_runtime_fields(
+                        status_payload.update(_build_dataset_runtime_fields(
                             scheduler=scheduler, cache_dir=cache_dir,
-                            csv_total_samples_est=total_samples_est, cfg=cfg,
+                            csv_total_samples_est=total_samples_est,
                         ))
                         status_writer.write(status_payload)
                     if cfg.early_stopping_patience > 0 and epochs_without_improvement >= cfg.early_stopping_patience:
@@ -4805,19 +4569,12 @@ def main() -> int:
                 break
 
         if SHUTDOWN.stop:
-            if producer_proc is not None and producer_proc.is_alive():
-                try:
-                    producer_proc.terminate()
-                    producer_proc.join(timeout=5)
-                except Exception:
-                    pass
-
             # Bei Stop trotzdem einen nutzbaren Zwischenstand speichern.
             # Wichtig: Nur rank 0 schreibt Dateien; danach warten alle Ranks am Barrier.
             if ctx.is_main:
                 try:
-                    final_meta = read_json_if_exists(producer_meta_path(cache_dir)) or {}
-                    final_progress = read_json_if_exists(producer_progress_path(cache_dir)) or {}
+                    final_meta = read_json_if_exists(dataset_meta_path(cache_dir)) or {}
+                    final_progress = read_json_if_exists(dataset_progress_path(cache_dir)) or {}
                     final_skipped_samples = int(
                         final_meta.get("skipped_samples", final_progress.get("skipped_samples", 0))
                     )
@@ -4849,8 +4606,9 @@ def main() -> int:
                         "cuda_memory": final_cuda_mem,
                         "csv_total_samples_est": int(total_samples_est),
                         "skipped_samples": int(final_skipped_samples),
-                        "producer_progress": final_progress,
-                        "producer_meta": final_meta,
+                        "dataset_progress": final_progress,
+                        "dataset_meta": final_meta,
+                        "dataset_ready": True,
                         "scheduler_state": scheduler.state_dict(),
                         "scheduler_total_steps": int(total_steps_ref["value"]),
                         "total_steps": int(total_steps_ref["value"]),
@@ -4869,13 +4627,7 @@ def main() -> int:
                         "best_val_loss": (best_val_loss if math.isfinite(best_val_loss) else None),
                         "epochs_without_improvement": epochs_without_improvement,
                         "early_stopped": False,
-                        "adaptive_scheduler": bool(cfg.adaptive_scheduler),
-                        "adaptive_scheduler_frozen": bool(scheduler.frozen),
-                        "adaptive_scheduler_never_increase_lr": bool(cfg.adaptive_scheduler_never_increase_lr),
-                        "adaptive_scheduler_only_extend_steps": bool(cfg.adaptive_scheduler_only_extend_steps),
-                        "scheduler_mode": (
-                            f"adaptive_{cfg.lr_schedule}" if cfg.adaptive_scheduler else str(cfg.lr_schedule)
-                        ),
+                        "scheduler_mode": f"fixed_{cfg.lr_schedule}",
                         "batch_plan": batch_plan_stats,
                         "dataloader_num_workers_effective": num_loader_workers,
                         "dataset_audit": dataset_audit_report,
@@ -4883,11 +4635,10 @@ def main() -> int:
                         "total_tokens": int(tokens_seen_ref["value"]),
                     }
                     status_payload.update(
-                        _build_live_runtime_fields(
+                        _build_dataset_runtime_fields(
                             scheduler=scheduler,
                             cache_dir=cache_dir,
                             csv_total_samples_est=total_samples_est,
-                            cfg=cfg,
                         )
                     )
                     status_writer.write(status_payload)
@@ -4923,7 +4674,6 @@ def main() -> int:
                 loader=loader,
                 dataset=dataset,
                 tokenizer=tokenizer,
-                producer_proc=producer_proc,
             )
             model = None
             tokenizer = None
@@ -4932,7 +4682,6 @@ def main() -> int:
             scaler = None
             loader = None
             dataset = None
-            producer_proc = None
             gc.collect()
 
             barrier(ctx)
@@ -4940,29 +4689,8 @@ def main() -> int:
 
         barrier(ctx)
 
-        changed, proposed_total_steps, info = maybe_adjust_scheduler_from_progress(
-            scheduler=scheduler,
-            cfg=cfg,
-            ctx=ctx,
-            cache_dir=cache_dir,
-            csv_total_samples_est=total_samples_est,
-            global_step=global_step,
-            force=True,
-        )
-        total_steps_ref["value"] = scheduler.total_steps
-        if ctx.is_main and changed:
-            LOGGER.info(
-                "Finale Scheduler-Anpassung | source=%s total_steps=%s frozen=%s",
-                info["source"],
-                total_steps_ref["value"],
-                scheduler.frozen,
-            )
-
-        if producer_proc is not None and producer_proc.is_alive():
-            producer_proc.join(timeout=5)
-
-        final_meta = read_json_if_exists(producer_meta_path(cache_dir)) or {}
-        final_progress = read_json_if_exists(producer_progress_path(cache_dir)) or {}
+        final_meta = read_json_if_exists(dataset_meta_path(cache_dir)) or {}
+        final_progress = read_json_if_exists(dataset_progress_path(cache_dir)) or {}
         final_total_samples = int(final_meta.get("total_samples", final_progress.get("tokenized_samples", total_samples_est)))
         final_skipped_samples = int(final_meta.get("skipped_samples", final_progress.get("skipped_samples", 0)))
         final_cuda_mem = cuda_memory_snapshot(ctx.device)
@@ -5019,17 +4747,10 @@ def main() -> int:
                 "csv_total_samples_est": int(total_samples_est),
                 "total_samples_real": int(final_total_samples),
                 "skipped_samples": int(final_skipped_samples),
-                "producer_progress": final_progress,
-                "producer_meta": final_meta,
-                "scheduler_source": info["source"],
-                "projected_samples": int(info["effective_total_samples"]),
-                "scheduler_rel_change": float(info["relative_change"]),
-                "producer_done": bool(final_progress.get("done") or final_meta.get("done")),
-                "adaptive_scheduler": bool(cfg.adaptive_scheduler),
-                "adaptive_scheduler_frozen": bool(scheduler.frozen),
-                "adaptive_scheduler_never_increase_lr": bool(cfg.adaptive_scheduler_never_increase_lr),
-                "adaptive_scheduler_only_extend_steps": bool(cfg.adaptive_scheduler_only_extend_steps),
-                "scheduler_mode": (f"adaptive_{cfg.lr_schedule}" if cfg.adaptive_scheduler else str(cfg.lr_schedule)),
+                "dataset_progress": final_progress,
+                "dataset_meta": final_meta,
+                "dataset_ready": bool(final_progress.get("done") or final_meta.get("done")),
+                "scheduler_mode": f"fixed_{cfg.lr_schedule}",
                 "val_split": cfg.val_split,
                 "val_loss": last_val_loss,
                 "perplexity": last_perplexity,
@@ -5056,7 +4777,6 @@ def main() -> int:
             loader=loader,
             dataset=dataset,
             tokenizer=tokenizer,
-            producer_proc=producer_proc,
         )
         model = None
         tokenizer = None
@@ -5065,7 +4785,6 @@ def main() -> int:
         scaler = None
         loader = None
         dataset = None
-        producer_proc = None
         gc.collect()
 
         barrier(ctx)
@@ -5074,11 +4793,6 @@ def main() -> int:
     except Exception as e:
         LOGGER.error("Fataler Worker-Fehler: %s", e)
         LOGGER.error(traceback.format_exc())
-        try:
-            if producer_proc is not None and producer_proc.is_alive():
-                producer_proc.terminate()
-        except Exception:
-            pass
         try:
             if ctx.device.type == "cuda":
                 torch.cuda.empty_cache()
