@@ -25,6 +25,7 @@
 - packed samples receive a fixed train/validation assignment before packing to prevent split leakage
 - retained near-duplicate samples inherit their representative's split to prevent validation leakage
 - rank-0 setup failures are propagated to every DDP worker instead of waiting for the collective timeout
+- live loss and learning-rate charts now share one optimizer-step timeline and render side by side
 
 ## 8.2.0 - 2026-07-13
 
