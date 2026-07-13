@@ -1,5 +1,29 @@
 # Changelog
 
+## 8.2.0 - 2026-07-13
+
+### Added
+
+- dynamic token-budget batching with automatic safe defaults
+- deterministic global batch plans aligned to DDP world size and gradient accumulation
+- token-normalized loss accumulation across all ranks
+- automatic DataLoader worker selection and configurable prefetching
+- optional NEFTune embedding noise
+- pre-training CSV audit with strict mode and JSON report
+- hardware profile reporting with Volta/V100 capability detection
+- live batch-plan, padding-efficiency and worker metrics
+
+### Changed
+
+- V100-oriented UI defaults disable unnecessary checkpointing and cache clearing
+- exact batch-plan step counts replace projected adaptive scheduler counts
+- incomplete DDP accumulation tails are padded deterministically instead of discarded
+- validation and training metrics use causal-shifted target-token weighting
+- batch planning and dataset auditing run once on rank 0 to reduce startup I/O
+- token telemetry reports the exact all-rank input-token count
+- FP16 gradient overflows no longer advance optimizer or scheduler step counters
+- DDP defaults to `find_unused_parameters=false` to avoid redundant graph traversal
+
 ## 8.1.0 - 2026-07-13
 
 ### Added
