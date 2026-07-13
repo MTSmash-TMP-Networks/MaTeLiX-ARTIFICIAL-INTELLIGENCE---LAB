@@ -272,20 +272,12 @@ class TrainingState:
         self.csv_total_samples_est: Optional[int] = None
         self.total_samples_real: Optional[int] = None
         self.skipped_samples: Optional[int] = None
-        self.producer_progress: Optional[Dict[str, Any]] = None
-        self.producer_meta: Optional[Dict[str, Any]] = None
+        self.dataset_progress: Optional[Dict[str, Any]] = None
+        self.dataset_meta: Optional[Dict[str, Any]] = None
         self.scheduler_state: Optional[Dict[str, Any]] = None
-        self.scheduler_source: Optional[str] = None
-        self.projected_samples: Optional[int] = None
-        self.scheduler_rel_change: Optional[float] = None
         self.warmup_steps: Optional[int] = None
-
-        self.adaptive_scheduler: Optional[bool] = None
-        self.adaptive_scheduler_frozen: Optional[bool] = None
-        self.adaptive_scheduler_never_increase_lr: Optional[bool] = None
-        self.adaptive_scheduler_only_extend_steps: Optional[bool] = None
         self.scheduler_mode: Optional[str] = None
-        self.producer_done: Optional[bool] = None
+        self.dataset_ready: Optional[bool] = None
         self.val_loss: Optional[float] = None
         self.perplexity: Optional[float] = None
         self.best_val_loss: Optional[float] = None
@@ -322,19 +314,12 @@ class TrainingState:
                 "csv_total_samples_est": self.csv_total_samples_est,
                 "total_samples_real": self.total_samples_real,
                 "skipped_samples": self.skipped_samples,
-                "producer_progress": self.producer_progress,
-                "producer_meta": self.producer_meta,
+                "dataset_progress": self.dataset_progress,
+                "dataset_meta": self.dataset_meta,
                 "scheduler_state": self.scheduler_state,
-                "scheduler_source": self.scheduler_source,
-                "projected_samples": self.projected_samples,
-                "scheduler_rel_change": self.scheduler_rel_change,
                 "warmup_steps": self.warmup_steps,
-                "adaptive_scheduler": self.adaptive_scheduler,
-                "adaptive_scheduler_frozen": self.adaptive_scheduler_frozen,
-                "adaptive_scheduler_never_increase_lr": self.adaptive_scheduler_never_increase_lr,
-                "adaptive_scheduler_only_extend_steps": self.adaptive_scheduler_only_extend_steps,
                 "scheduler_mode": self.scheduler_mode,
-                "producer_done": self.producer_done,
+                "dataset_ready": self.dataset_ready,
                 "val_loss": self.val_loss,
                 "perplexity": self.perplexity,
                 "best_val_loss": self.best_val_loss,
@@ -392,13 +377,6 @@ class WebTrainConfig(MatelixBaseModel):
     warmup_steps: int = 0
     warmup_ratio: float = 0.03
     min_lr_ratio: float = 0.05
-    lr_adjust_interval_steps: int = 25
-    lr_adjust_min_change: float = 0.05
-
-    adaptive_scheduler: bool = False
-    adaptive_scheduler_freeze_on_producer_done: bool = True
-    adaptive_scheduler_never_increase_lr: bool = True
-    adaptive_scheduler_only_extend_steps: bool = True
 
     per_device_train_batch_size: int = 2
     gradient_accumulation_steps: int = 4
@@ -742,32 +720,18 @@ class DDPTrainingManager:
                 self.state.total_samples_real = _safe_int(payload.get("total_samples_real"), self.state.total_samples_real or 0)
             if payload.get("skipped_samples") is not None:
                 self.state.skipped_samples = _safe_int(payload.get("skipped_samples"), self.state.skipped_samples or 0)
-            if payload.get("producer_progress") is not None:
-                self.state.producer_progress = payload.get("producer_progress")
-            if payload.get("producer_meta") is not None:
-                self.state.producer_meta = payload.get("producer_meta")
+            if payload.get("dataset_progress") is not None:
+                self.state.dataset_progress = payload.get("dataset_progress")
+            if payload.get("dataset_meta") is not None:
+                self.state.dataset_meta = payload.get("dataset_meta")
             if payload.get("scheduler_state") is not None:
                 self.state.scheduler_state = payload.get("scheduler_state")
-            if payload.get("scheduler_source") is not None:
-                self.state.scheduler_source = payload.get("scheduler_source")
-            if payload.get("projected_samples") is not None:
-                self.state.projected_samples = _safe_int(payload.get("projected_samples"), self.state.projected_samples or 0)
-            if payload.get("scheduler_rel_change") is not None:
-                self.state.scheduler_rel_change = _safe_float(payload.get("scheduler_rel_change"), self.state.scheduler_rel_change)
             if payload.get("warmup_steps") is not None:
                 self.state.warmup_steps = _safe_int(payload.get("warmup_steps"), self.state.warmup_steps or 0)
-            if payload.get("adaptive_scheduler") is not None:
-                self.state.adaptive_scheduler = bool(payload.get("adaptive_scheduler"))
-            if payload.get("adaptive_scheduler_frozen") is not None:
-                self.state.adaptive_scheduler_frozen = bool(payload.get("adaptive_scheduler_frozen"))
-            if payload.get("adaptive_scheduler_never_increase_lr") is not None:
-                self.state.adaptive_scheduler_never_increase_lr = bool(payload.get("adaptive_scheduler_never_increase_lr"))
-            if payload.get("adaptive_scheduler_only_extend_steps") is not None:
-                self.state.adaptive_scheduler_only_extend_steps = bool(payload.get("adaptive_scheduler_only_extend_steps"))
             if payload.get("scheduler_mode") is not None:
                 self.state.scheduler_mode = str(payload.get("scheduler_mode"))
-            if payload.get("producer_done") is not None:
-                self.state.producer_done = bool(payload.get("producer_done"))
+            if payload.get("dataset_ready") is not None:
+                self.state.dataset_ready = bool(payload.get("dataset_ready"))
             if payload.get("val_loss") is not None:
                 self.state.val_loss = _safe_float(payload.get("val_loss"), self.state.val_loss)
             if payload.get("perplexity") is not None:
@@ -996,19 +960,12 @@ class DDPTrainingManager:
             self.state.csv_total_samples_est = None
             self.state.total_samples_real = None
             self.state.skipped_samples = None
-            self.state.producer_progress = None
-            self.state.producer_meta = None
+            self.state.dataset_progress = None
+            self.state.dataset_meta = None
             self.state.scheduler_state = None
-            self.state.scheduler_source = None
-            self.state.projected_samples = None
-            self.state.scheduler_rel_change = None
             self.state.warmup_steps = None
-            self.state.adaptive_scheduler = None
-            self.state.adaptive_scheduler_frozen = None
-            self.state.adaptive_scheduler_never_increase_lr = None
-            self.state.adaptive_scheduler_only_extend_steps = None
             self.state.scheduler_mode = None
-            self.state.producer_done = None
+            self.state.dataset_ready = None
             self.state.val_loss = None
             self.state.perplexity = None
             self.state.best_val_loss = None
@@ -1036,10 +993,8 @@ class DDPTrainingManager:
                 f"log_cuda_memory={worker_cfg.get('log_cuda_memory', True)} "
                 f"cuda_memory_log_interval_steps={worker_cfg.get('cuda_memory_log_interval_steps', 25)} "
                 f"cuda_empty_cache_interval_steps={worker_cfg.get('cuda_empty_cache_interval_steps', 0)} "
-                f"adaptive_scheduler={worker_cfg.get('adaptive_scheduler', False)} "
-                f"adaptive_scheduler_freeze_on_producer_done={worker_cfg.get('adaptive_scheduler_freeze_on_producer_done', True)} "
-                f"adaptive_scheduler_never_increase_lr={worker_cfg.get('adaptive_scheduler_never_increase_lr', True)} "
-                f"adaptive_scheduler_only_extend_steps={worker_cfg.get('adaptive_scheduler_only_extend_steps', True)}"
+                f"scheduler=fixed_{worker_cfg.get('lr_schedule', 'cosine')} "
+                f"dataset_build=complete_before_training"
             )
 
         self.stdout_thread = threading.Thread(target=self._stdout_pump, args=(proc,), daemon=True)

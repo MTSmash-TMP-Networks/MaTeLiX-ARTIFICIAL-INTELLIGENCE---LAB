@@ -26,6 +26,9 @@
 - retained near-duplicate samples inherit their representative's split to prevent validation leakage
 - rank-0 setup failures are propagated to every DDP worker instead of waiting for the collective timeout
 - live loss and learning-rate charts now share one optimizer-step timeline and render side by side
+- tokenized datasets are completed synchronously before model construction and training
+- a fixed scheduler now uses the exact completed-dataset batch plan; adaptive scheduling and the parallel producer were removed
+- the Web UI now reports dataset-build state without legacy adaptive-scheduler controls
 
 ## 8.2.0 - 2026-07-13
 

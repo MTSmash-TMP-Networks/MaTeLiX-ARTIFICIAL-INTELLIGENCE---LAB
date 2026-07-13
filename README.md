@@ -460,7 +460,7 @@ Assistentinnen-Antwort, während System, Benutzer und Kontext als Prompt dienen.
 Mit `train_scratch_tokenizer=true` trainiert der Worker vor dem Modellstart einen
 neuen Fast-Tokenizer aus dem aktiven Korpus. Das Vokabular wird unter
 `scratch_tokenizer/` im Run-Verzeichnis gespeichert und in allen DDP-Ranks sowie
-im Shard-Producer identisch verwendet. Bei einem Resume wird immer der
+im synchronen Dataset-Builder identisch verwendet. Bei einem Resume wird immer der
 Tokenizer des Checkpoints weiterverwendet.
 
 Der Batch-Plan schreibt außerdem Modellparameter, unverfälschte Trainingstokens
@@ -480,12 +480,18 @@ werden. Beibehaltene Near-Duplikate erben dennoch den Split ihres ersten
 Repräsentanten, damit ähnliche Varianten nicht über Training und Validation
 verteilt werden.
 
-Nach der Tokenisierung enthält `_producer_meta.json` unter anderem Token- und
+Nach der Tokenisierung enthält `_dataset_meta.json` unter anderem Token- und
 Samplezahlen pro Typ, Skip-Gründe, erzeugte Chunks, Packing-Statistiken und
 ungefähre Längenperzentile. Validation Loss und Perplexity werden zusätzlich
 getrennt für `text` und `dialog` ausgewiesen. Die Live-Diagramme für Loss und
 Lernrate stehen nebeneinander und verwenden denselben Optimizer-Step als
 Zeitachse; beide Werte stammen immer aus demselben Status-Snapshot.
+
+Das tokenisierte Dataset wird vollständig vor Modellaufbau und Training erzeugt.
+Erst danach entsteht der DDP-ausgerichtete Batch-Plan mit der exakten Zahl der
+Optimizer-Steps. Cosine oder Linear Scheduling läuft anschließend fest auf diesem
+Plan; ein paralleler Producer und nachträgliche adaptive LR-Änderungen sind nicht
+mehr Teil des Trainingspfads.
 
 ---
 
