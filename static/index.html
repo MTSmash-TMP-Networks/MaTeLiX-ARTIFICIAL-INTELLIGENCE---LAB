@@ -435,11 +435,40 @@ MaTeLiX AI is a trademark/brand of TMP-SYSTEM-SERVICE GmbH.
       background: rgba(6,10,20,.35);
       padding: 10px;
       overflow:hidden;
+      min-width: 0;
     }
-    #lossChart{
+    .live-chart-grid{
+      display:grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap:12px;
+      align-items:stretch;
+    }
+    .chart-title{
+      display:flex;
+      align-items:baseline;
+      justify-content:space-between;
+      gap:10px;
+      margin:0 2px 8px;
+      color:var(--muted2);
+      font-family:var(--mono);
+      font-size:12px;
+      text-transform:uppercase;
+      letter-spacing:.03em;
+    }
+    .chart-title strong{
+      color:var(--text);
+      font-size:13px;
+      text-transform:none;
+      letter-spacing:0;
+    }
+    #lossChart,
+    #lrChart{
       width:100% !important;
       height: 240px !important;
       display:block;
+    }
+    @media (max-width: 720px){
+      .live-chart-grid{ grid-template-columns: 1fr; }
     }
 
     /* Live preview */
@@ -1105,12 +1134,16 @@ Hier folgt eine weitere Trainingszeile.</pre>
           </div>
           <div class="bd">
             <div id="pane-live-loss" class="pane active">
-              <div class="chart-wrap">
-                <canvas id="lossChart"></canvas>
-              </div>
+              <div class="live-chart-grid">
+                <div class="chart-wrap">
+                  <div class="chart-title"><span>Loss</span><strong id="loss_chart_live">-</strong></div>
+                  <canvas id="lossChart"></canvas>
+                </div>
 
-              <div class="chart-wrap" style="margin-top:12px;">
-                <canvas id="lrChart"></canvas>
+                <div class="chart-wrap">
+                  <div class="chart-title"><span>Lernrate</span><strong id="lr_chart_live">-</strong></div>
+                  <canvas id="lrChart"></canvas>
+                </div>
               </div>
 
               <div style="margin-top:12px;" class="preview">
@@ -1352,10 +1385,12 @@ Hier folgt eine weitere Trainingszeile.</pre>
     setInterval(pollLivePreview, 2000);
 
     // ---------- Live charts ----------
-    window.lossData=[]; window.lossSteps=[];
-    window.lrData=[]; window.lrSteps=[];
+    window.metricSteps=[];
+    window.metricLossData=[];
+    window.metricLrData=[];
     let lossChart=null;
     let lrChart=null;
+    const MAX_LIVE_METRIC_POINTS = 2000;
 
     function buildLineChart(canvasId, label, borderColor){
       const canvas = document.getElementById(canvasId);
@@ -1377,8 +1412,13 @@ Hier folgt eine weitere Trainingszeile.</pre>
           maintainAspectRatio:false,
           animation:false,
           plugins:{ legend:{ display:false }, tooltip:{ enabled:true } },
+          interaction:{ mode:'index', intersect:false },
           scales:{
-            x:{ ticks:{ color:'rgba(159,192,239,.9)' }, grid:{ color:'rgba(255,255,255,.06)' } },
+            x:{
+              title:{ display:true, text:'Optimizer-Step', color:'rgba(159,192,239,.9)' },
+              ticks:{ color:'rgba(159,192,239,.9)', maxTicksLimit:8 },
+              grid:{ color:'rgba(255,255,255,.06)' }
+            },
             y:{ ticks:{ color:'rgba(159,192,239,.9)' }, grid:{ color:'rgba(255,255,255,.06)' } }
           }
         }
@@ -1390,15 +1430,46 @@ Hier folgt eine weitere Trainingszeile.</pre>
     }
     function updateCharts(){
       if (lossChart){
-        lossChart.data.labels = window.lossSteps;
-        lossChart.data.datasets[0].data = window.lossData;
+        lossChart.data.labels = window.metricSteps;
+        lossChart.data.datasets[0].data = window.metricLossData;
         lossChart.update('none');
       }
       if (lrChart){
-        lrChart.data.labels = window.lrSteps;
-        lrChart.data.datasets[0].data = window.lrData;
+        lrChart.data.labels = window.metricSteps;
+        lrChart.data.datasets[0].data = window.metricLrData;
         lrChart.update('none');
       }
+    }
+
+    function recordSynchronizedMetrics(step, loss, learningRate){
+      if (!Number.isFinite(step) || !Number.isFinite(loss) || !Number.isFinite(learningRate)) return;
+      const lastIdx = window.metricSteps.length - 1;
+      if (lastIdx >= 0 && window.metricSteps[lastIdx] === step) {
+        window.metricLossData[lastIdx] = loss;
+        window.metricLrData[lastIdx] = learningRate;
+      } else if (lastIdx < 0 || step > window.metricSteps[lastIdx]) {
+        window.metricSteps.push(step);
+        window.metricLossData.push(loss);
+        window.metricLrData.push(learningRate);
+        if (window.metricSteps.length > MAX_LIVE_METRIC_POINTS) {
+          const excess = window.metricSteps.length - MAX_LIVE_METRIC_POINTS;
+          window.metricSteps.splice(0, excess);
+          window.metricLossData.splice(0, excess);
+          window.metricLrData.splice(0, excess);
+        }
+      }
+      document.getElementById("loss_chart_live").textContent = loss.toFixed(6);
+      document.getElementById("lr_chart_live").textContent = learningRate.toExponential(3);
+      updateCharts();
+    }
+
+    function resetSynchronizedMetrics(){
+      window.metricSteps = [];
+      window.metricLossData = [];
+      window.metricLrData = [];
+      document.getElementById("loss_chart_live").textContent = "-";
+      document.getElementById("lr_chart_live").textContent = "-";
+      updateCharts();
     }
 
     // ---------- Logs WS ----------
@@ -1419,18 +1490,6 @@ Hier folgt eine weitere Trainingszeile.</pre>
         if (logbox.textContent.length > 200000) logbox.textContent = logbox.textContent.slice(-200000);
         logbox.scrollTop = logbox.scrollHeight;
 
-        (evt.data || "").split('\n').forEach(line=>{
-          const m = line.match(/Step (\d+)\s+\|\s+Loss:\s+([0-9\.eE\-]+)/);
-          if(m){
-            const step = Number(m[1]);
-            const loss = Number(m[2]);
-            if(!window.lossSteps.length || step>window.lossSteps[window.lossSteps.length-1]){
-              window.lossSteps.push(step);
-              window.lossData.push(loss);
-              updateCharts();
-            }
-          }
-        });
       };
 
       ws.onclose = () => setTimeout(connectLogsWS, 1200);
@@ -1725,13 +1784,7 @@ Hier folgt eine weitere Trainingszeile.</pre>
         return;
       }
 
-      if (lossChart) {
-        lossChart.data.labels = [];
-        lossChart.data.datasets[0].data = [];
-        lossChart.update('none');
-      }
-      window.lossData = [];
-      window.lossSteps = [];
+      resetSynchronizedMetrics();
 
       const maxSteps = integerOrNull(document.getElementById("max_steps").value);
       const maxHistoryTurns = integerOrNull(document.getElementById("max_history_turns").value);
@@ -2154,15 +2207,12 @@ Hier folgt eine weitere Trainingszeile.
           Array.isArray(datasetAudit.warnings) ? String(datasetAudit.warnings.length) : "-";
 
         if (typeof currentStep === "number" && currentStep >= 0) {
+          const metricStep = updateStep !== null ? updateStep : currentStep;
+          const lossValue = (typeof s.loss === "number" && Number.isFinite(s.loss)) ? s.loss : null;
           const lrValue = (typeof s.learning_rate === "number" && Number.isFinite(s.learning_rate)) ? s.learning_rate : null;
-          const lastIdx = window.lrSteps.length - 1;
-          if (lastIdx >= 0 && window.lrSteps[lastIdx] === currentStep) {
-            if (lrValue !== null) window.lrData[lastIdx] = lrValue;
-          } else if (lrValue !== null && (lastIdx < 0 || currentStep > window.lrSteps[lastIdx])) {
-            window.lrSteps.push(currentStep);
-            window.lrData.push(lrValue);
+          if (lossValue !== null && lrValue !== null) {
+            recordSynchronizedMetrics(metricStep, lossValue, lrValue);
           }
-          updateCharts();
         }
         document.getElementById("eta").textContent = s.eta || "-";
         document.getElementById("tokens_per_step").textContent = s.tokens_per_step || "-";
@@ -2245,7 +2295,7 @@ Hier folgt eine weitere Trainingszeile.
 
       } catch {}
     }
-    getStatus(); setInterval(getStatus,1500);
+    getStatus(); setInterval(getStatus,500);
   </script>
 </body>
 </html>

@@ -483,7 +483,9 @@ verteilt werden.
 Nach der Tokenisierung enthält `_producer_meta.json` unter anderem Token- und
 Samplezahlen pro Typ, Skip-Gründe, erzeugte Chunks, Packing-Statistiken und
 ungefähre Längenperzentile. Validation Loss und Perplexity werden zusätzlich
-getrennt für `text` und `dialog` ausgewiesen.
+getrennt für `text` und `dialog` ausgewiesen. Die Live-Diagramme für Loss und
+Lernrate stehen nebeneinander und verwenden denselben Optimizer-Step als
+Zeitachse; beide Werte stammen immer aus demselben Status-Snapshot.
 
 ---
 
