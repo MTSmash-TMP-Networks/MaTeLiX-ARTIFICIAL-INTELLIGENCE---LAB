@@ -905,7 +905,10 @@ MaTeLiX AI is a trademark/brand of TMP-SYSTEM-SERVICE GmbH.
               <input type="checkbox" id="sort_by_similarity">
 
               <label for="rebuild_dataset_cache">Cache neu aufbauen</label>
-              <input type="checkbox" id="rebuild_dataset_cache" checked>
+              <input type="checkbox" id="rebuild_dataset_cache">
+
+              <label for="dataset_num_workers">Dataset-Worker (-1 = auto)</label>
+              <input type="number" id="dataset_num_workers" value="-1" min="-1" max="32">
 
               <label for="gradient_checkpointing">Grad Checkpointing</label>
               <input type="checkbox" id="gradient_checkpointing">
@@ -934,6 +937,9 @@ MaTeLiX AI is a trademark/brand of TMP-SYSTEM-SERVICE GmbH.
 
               <label for="near_duplicate_threshold">Near-Duplikat Schwellwert</label>
               <input type="number" id="near_duplicate_threshold" value="0.92" min="0.5" max="0.999" step="0.01">
+
+              <label for="near_duplicate_max_shingles">Near-Duplikat Max Shingles</label>
+              <input type="number" id="near_duplicate_max_shingles" value="512" min="32">
 
               <label for="quality_filter_mode">Qualitätsfilter</label>
               <select id="quality_filter_mode">
@@ -1024,6 +1030,11 @@ MaTeLiX AI is a trademark/brand of TMP-SYSTEM-SERVICE GmbH.
                     <div class="stat"><div class="k">Gelesene Rohsamples</div><div class="v" id="dataset_seen_samples">-</div></div>
                     <div class="stat"><div class="k">Tokenisierte Samples</div><div class="v" id="dataset_tokenized_samples">-</div></div>
                     <div class="stat"><div class="k">Dataset-Shards</div><div class="v" id="dataset_num_shards">-</div></div>
+                    <div class="stat"><div class="k">Aufbauphase</div><div class="v" id="dataset_phase">-</div></div>
+                    <div class="stat"><div class="k">Dataset-Worker</div><div class="v" id="dataset_workers">-</div></div>
+                    <div class="stat"><div class="k">Samples / Sekunde</div><div class="v" id="dataset_rate">-</div></div>
+                    <div class="stat"><div class="k">Dataset-Restzeit</div><div class="v" id="dataset_eta">-</div></div>
+                    <div class="stat"><div class="k">Cache-Treffer</div><div class="v" id="dataset_cache_hit">-</div></div>
                   </div>
                 </div>
               </details>
@@ -1176,7 +1187,7 @@ Hier folgt eine weitere Trainingszeile.</pre>
   </div>
 
   <footer>
-    © 2026 TMP-SYSTEM-SERVICE GmbH – Alle Rechte vorbehalten. Version 8.3
+    © 2026 TMP-SYSTEM-SERVICE GmbH – Alle Rechte vorbehalten. Version 8.4
   </footer>
 
   <!-- Loader Overlay -->
@@ -1223,6 +1234,16 @@ Hier folgt eine weitere Trainingszeile.</pre>
     function fmtMb(v) {
       if (typeof v !== "number" || !Number.isFinite(v)) return "-";
       return `${v} MB`;
+    }
+    function fmtSeconds(v) {
+      if (typeof v !== "number" || !Number.isFinite(v) || v < 0) return "-";
+      const total = Math.round(v);
+      const hours = Math.floor(total / 3600);
+      const minutes = Math.floor((total % 3600) / 60);
+      const seconds = total % 60;
+      if (hours > 0) return `${hours}h ${minutes}m`;
+      if (minutes > 0) return `${minutes}m ${seconds}s`;
+      return `${seconds}s`;
     }
     function escapeHtml(s){
       return String(s).replace(/[&<>"']/g, c=>({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
@@ -1842,6 +1863,7 @@ Hier folgt eine weitere Trainingszeile.</pre>
         sort_by_length: document.getElementById("sort_by_length").checked,
         sort_by_similarity: document.getElementById("sort_by_similarity").checked,
         rebuild_dataset_cache: document.getElementById("rebuild_dataset_cache").checked,
+        dataset_num_workers: parseInt(document.getElementById("dataset_num_workers").value || "-1"),
 
         device: document.getElementById("device").value,
 
@@ -1881,6 +1903,7 @@ Hier folgt eine weitere Trainingszeile.</pre>
         deduplicate_exact: document.getElementById("deduplicate_exact").checked,
         near_duplicate_action: document.getElementById("near_duplicate_action").value,
         near_duplicate_threshold: parseFloat(document.getElementById("near_duplicate_threshold").value || "0.92"),
+        near_duplicate_max_shingles: parseInt(document.getElementById("near_duplicate_max_shingles").value || "512"),
         quality_filter_mode: document.getElementById("quality_filter_mode").value,
         quality_min_chars: parseInt(document.getElementById("quality_min_chars").value || "24"),
         merge_lora_on_save: document.getElementById("merge_lora_on_save")
@@ -2245,6 +2268,16 @@ Hier folgt eine weitere Trainingszeile.
         document.getElementById("dataset_ready").textContent = fmtBool(
           s.dataset_ready ?? datasetMeta.done ?? datasetProgress.done
         );
+        document.getElementById("dataset_phase").textContent = fmtValue(datasetProgress.phase);
+        document.getElementById("dataset_workers").textContent = fmtValue(
+          datasetProgress.num_workers ?? datasetMeta.dataset_build?.num_workers
+        );
+        document.getElementById("dataset_rate").textContent =
+          typeof datasetProgress.samples_per_second === "number"
+            ? datasetProgress.samples_per_second.toFixed(1)
+            : "-";
+        document.getElementById("dataset_eta").textContent = fmtSeconds(datasetProgress.eta_seconds);
+        document.getElementById("dataset_cache_hit").textContent = fmtBool(datasetProgress.cache_hit);
 
         const cudaMem = s.cuda_memory || {};
         document.getElementById("cuda_allocated_mb").textContent = fmtMb(cudaMem.allocated_mb);

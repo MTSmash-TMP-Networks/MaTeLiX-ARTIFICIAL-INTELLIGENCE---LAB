@@ -1,4 +1,5 @@
 import unittest
+from unittest import mock
 import pickle
 import re
 import tempfile
@@ -20,12 +21,18 @@ try:
         StructuredChatSample,
         TokenizedShardIterableDataset,
         TrainConfig,
+        _build_root_depth_lookup,
+        _tokenize_dataset_batch,
         audit_dataset,
+        audit_dataset_cached,
         apply_token_mixture_weights,
         build_examples_stream,
         build_token_batch_plan,
+        compute_shard_cache_dir,
         count_examples_fast,
+        estimate_examples_from_audit,
         iter_accumulation_batches,
+        resolve_dataset_num_workers,
         tokenize_text_examples,
     )
 except ModuleNotFoundError as exc:  # Allows source-only environments without PyTorch.
@@ -111,6 +118,150 @@ class TrainingCoreTests(unittest.TestCase):
         scratch_cfg.normalize()
         self.assertTrue(scratch_cfg.include_prompt_loss)
         self.assertEqual(scratch_cfg.warmup_ratio, 0.02)
+
+    def test_audit_counts_replace_an_extra_csv_scan(self):
+        cfg = TrainConfig(
+            model_dir="model", csv_path="data.csv", mixed_training=True,
+            training_phase="mixed",
+        )
+        cfg.normalize()
+        report = {
+            "usable_assistant_samples": 7,
+            "usable_mixed_text_samples": 5,
+        }
+        self.assertEqual(estimate_examples_from_audit(cfg, report), 12)
+        cfg.training_phase = "pretrain"
+        self.assertEqual(estimate_examples_from_audit(cfg, report), 5)
+        cfg.training_phase = "sft"
+        self.assertEqual(estimate_examples_from_audit(cfg, report), 7)
+
+    def test_mixed_stream_loads_structured_csv_once(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            csv_path = Path(tmp) / "mixed.csv"
+            csv_path.write_text(
+                "id,parent_id,system,Benutzer,Kontext,Assistentin,Text\n"
+                "1,,System,Frage,,Antwort,Freier Text\n"
+                "2,1,,Folgefrage,,Antwort 2,Mehr Text\n",
+                encoding="utf-8",
+            )
+            cfg = TrainConfig(
+                model_dir="model", csv_path=str(csv_path),
+                template_mode="dialogplus", mixed_training=True,
+            )
+            cfg.normalize()
+            import matelix_ddp_worker as worker
+            with mock.patch.object(
+                worker, "_load_thread_rows", wraps=worker._load_thread_rows,
+            ) as loader:
+                samples = list(worker.build_examples_stream(cfg))
+            self.assertEqual(len(samples), 4)
+            self.assertEqual(loader.call_count, 1)
+
+    def test_thread_roots_and_depths_are_path_compressed(self):
+        rows = [
+            {"id": "3", "parent_id": "2"},
+            {"id": "1", "parent_id": ""},
+            {"id": "2", "parent_id": "1"},
+        ]
+        id2row = {row["id"]: row for row in rows}
+        lookup = _build_root_depth_lookup(rows, id2row)
+        self.assertEqual(lookup["1"], ("1", 0))
+        self.assertEqual(lookup["2"], ("1", 1))
+        self.assertEqual(lookup["3"], ("1", 2))
+
+    def test_dataset_worker_auto_selection_and_shared_cache_root(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            csv_path = root / "plain.csv"
+            csv_path.write_text("text\nHallo Welt\n", encoding="utf-8")
+            cache_root = root / "shared-cache"
+            cfg = TrainConfig(
+                model_dir="remote/model",
+                csv_path=str(csv_path),
+                output_dir=str(root / "runs" / "run-1"),
+                dataset_cache_dir=str(cache_root),
+                dataset_num_workers=-1,
+            )
+            cfg.normalize()
+            with mock.patch("matelix_ddp_worker.os.cpu_count", return_value=32):
+                self.assertEqual(resolve_dataset_num_workers(cfg, 10_000), 8)
+            self.assertEqual(resolve_dataset_num_workers(cfg, 100), 1)
+            self.assertEqual(compute_shard_cache_dir(cfg).parent, cache_root.resolve())
+
+    def test_dataset_audit_is_reused_across_run_directories(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            csv_path = root / "plain.csv"
+            csv_path.write_text("text\nHallo Welt\n", encoding="utf-8")
+            cfg = TrainConfig(
+                model_dir="remote/model",
+                csv_path=str(csv_path),
+                template_mode="plain",
+                dataset_cache_dir=str(root / "cache"),
+            )
+            cfg.normalize()
+            (root / "run-1").mkdir()
+            (root / "run-2").mkdir()
+            first_report = audit_dataset_cached(cfg, root / "run-1")
+            with mock.patch(
+                "matelix_ddp_worker.audit_dataset",
+                side_effect=AssertionError("Audit should come from cache"),
+            ):
+                second_report = audit_dataset_cached(cfg, root / "run-2")
+            self.assertEqual(first_report, second_report)
+            self.assertTrue((root / "run-2" / "dataset_audit.json").is_file())
+
+    def test_parallel_tokenizer_batch_matches_serial_output(self):
+        from tokenizers import Tokenizer, models, pre_tokenizers
+        from transformers import PreTrainedTokenizerFast
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tokenizer_dir = Path(tmp) / "tokenizer"
+            backend = Tokenizer(models.WordLevel(
+                {"[UNK]": 0, "<eos>": 1, "<pad>": 2, "Hallo": 3, "Welt": 4},
+                unk_token="[UNK]",
+            ))
+            backend.pre_tokenizer = pre_tokenizers.Whitespace()
+            tokenizer = PreTrainedTokenizerFast(
+                tokenizer_object=backend,
+                unk_token="[UNK]",
+                eos_token="<eos>",
+                pad_token="<pad>",
+            )
+            tokenizer.save_pretrained(tokenizer_dir)
+            items = [
+                PlainTextSample("Hallo Welt", "doc:1"),
+                PlainTextSample("Hallo", "doc:2"),
+            ]
+            options = {
+                "max_seq_length": 8,
+                "chunk_long_texts": True,
+                "text_chunk_overlap": 1,
+                "text_chunk_min_tokens": 1,
+                "append_eos_to_text": True,
+                "template_mode": "plain",
+                "max_history_turns": None,
+                "include_prompt_loss": True,
+            }
+            spec = {
+                "cache_key": str(tokenizer_dir),
+                "tokenizer_source": str(tokenizer_dir),
+                "template_mode": "plain",
+                "force_template": True,
+                "ngram_tokens": [],
+            }
+            parallel = _tokenize_dataset_batch(items, spec, options)
+            serial = [
+                tokenize_text_examples(
+                    item, tokenizer, 8,
+                    chunk_long_texts=True,
+                    text_chunk_overlap=1,
+                    text_chunk_min_tokens=1,
+                    append_eos_to_text=True,
+                )
+                for item in items
+            ]
+            self.assertEqual(parallel, serial)
 
     def test_fixed_scheduler_uses_exact_plan_and_loads_legacy_state(self):
         parameter = torch.nn.Parameter(torch.tensor(1.0))

@@ -1,5 +1,16 @@
 # Changelog
 
+## 8.4.0 - 2026-07-13
+
+### Changed
+
+- dataset audit, scratch tokenizer and tokenized shards now use a shared input-signature cache across runs
+- first-time tokenization uses an automatic bounded CPU worker pool with synchronous fallback
+- mixed CSV input is loaded once per build instead of three times, and audit counts replace redundant scans
+- N-gram analysis is reused from the dataset cache instead of running again during model initialization
+- long-document SimHash work is deterministically bounded while preserving approximate near-duplicate detection
+- dataset build phase, worker count, throughput, ETA and cache hits are visible in the Web UI
+
 ## 8.3.0 - 2026-07-13
 
 ### Added

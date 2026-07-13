@@ -34,11 +34,13 @@ import signal
 import sys
 import time
 import traceback
+import threading
 import unicodedata
 from contextlib import nullcontext
+from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, fields
 from pathlib import Path
-from typing import Any, Dict, Iterator, List, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, Iterator, List, Optional, Sequence, Tuple
 
 os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
 os.environ.setdefault("PYTHONUNBUFFERED", "1")
@@ -109,6 +111,7 @@ class TrainConfig:
     deduplicate_exact: bool = True
     near_duplicate_action: str = "warn"
     near_duplicate_threshold: float = 0.92
+    near_duplicate_max_shingles: int = 512
     quality_filter_mode: str = "warn"
     quality_min_chars: int = 24
 
@@ -192,6 +195,9 @@ class TrainConfig:
 
     use_dataset_cache: bool = True
     rebuild_dataset_cache: bool = False
+    dataset_cache_dir: Optional[str] = None
+    dataset_num_workers: int = -1
+    dataset_tokenize_batch_size: int = 32
     tokenized_shard_size: int = 5000
 
     ngram_max: int = 12
@@ -262,6 +268,7 @@ class TrainConfig:
         if self.near_duplicate_action not in {"off", "warn", "exclude"}:
             raise ValueError("near_duplicate_action muss off, warn oder exclude sein")
         self.near_duplicate_threshold = min(0.999, max(0.5, float(self.near_duplicate_threshold)))
+        self.near_duplicate_max_shingles = max(32, int(self.near_duplicate_max_shingles))
         self.quality_filter_mode = str(self.quality_filter_mode or "warn").strip().lower()
         if self.quality_filter_mode not in {"off", "warn", "exclude"}:
             raise ValueError("quality_filter_mode muss off, warn oder exclude sein")
@@ -327,6 +334,14 @@ class TrainConfig:
         self.persistent_workers = bool(self.persistent_workers)
         self.use_dataset_cache = bool(self.use_dataset_cache)
         self.rebuild_dataset_cache = bool(self.rebuild_dataset_cache)
+        self.dataset_cache_dir = (
+            str(Path(self.dataset_cache_dir).expanduser())
+            if self.dataset_cache_dir else None
+        )
+        self.dataset_num_workers = min(32, max(-1, int(self.dataset_num_workers)))
+        self.dataset_tokenize_batch_size = min(
+            1024, max(1, int(self.dataset_tokenize_batch_size))
+        )
         self.tokenized_shard_size = max(100, int(self.tokenized_shard_size))
         self.ngram_max = max(2, int(self.ngram_max))
         self.ngram_top_k = max(1, int(self.ngram_top_k))
@@ -706,21 +721,56 @@ def _resolve_root_and_depth(
     return rid, depth
 
 
-def _iter_candidate_chains(csv_path: str) -> Iterator[Tuple[str, List[Dict[str, Any]]]]:
-    rows, id2row = _load_thread_rows(csv_path)
+def _build_root_depth_lookup(
+    rows: List[Dict[str, Any]], id2row: Dict[str, Dict[str, Any]],
+) -> Dict[str, Tuple[str, int]]:
+    """Resolve every thread root once with path compression."""
+    resolved: Dict[str, Tuple[str, int]] = {}
+    for row in rows:
+        start = normalize_id(row.get("id"))
+        if not start or start in resolved:
+            continue
+        path: List[str] = []
+        positions: Dict[str, int] = {}
+        current = start
+        while current and current in id2row and current not in resolved:
+            if current in positions:
+                cycle_nodes = path[positions[current]:]
+                cycle_root = min(cycle_nodes) if cycle_nodes else current
+                for node in cycle_nodes:
+                    resolved[node] = (cycle_root, 0)
+                break
+            positions[current] = len(path)
+            path.append(current)
+            parent = normalize_id(id2row[current].get("parent_id"))
+            if not parent or parent not in id2row:
+                resolved[current] = (current, 0)
+                break
+            current = parent
+
+        for node in reversed(path):
+            if node in resolved:
+                continue
+            parent = normalize_id(id2row[node].get("parent_id"))
+            parent_root, parent_depth = resolved.get(parent, (node, -1))
+            resolved[node] = (parent_root, parent_depth + 1)
+    return resolved
+
+
+def _iter_candidate_chains_from_rows(
+    rows: List[Dict[str, Any]],
+    id2row: Dict[str, Dict[str, Any]],
+    root_depth_lookup: Optional[Dict[str, Tuple[str, int]]] = None,
+) -> Iterator[Tuple[str, List[Dict[str, Any]]]]:
     candidates = [r for r in rows if (r.get("Assistentin") or "").strip() and r.get("id")]
     if not candidates:
         return
 
-    from functools import lru_cache
-
-    @lru_cache(maxsize=None)
-    def root_and_depth(rid: str) -> Tuple[str, int]:
-        return _resolve_root_and_depth(rid, id2row)
+    root_depth_lookup = root_depth_lookup or _build_root_depth_lookup(rows, id2row)
 
     threads: Dict[str, List[Tuple[int, int, Dict[str, Any]]]] = {}
     for r in candidates:
-        root_id, depth = root_and_depth(r.get("id", ""))
+        root_id, depth = root_depth_lookup.get(r.get("id", ""), ("", 0))
         threads.setdefault(root_id, []).append((depth, int(r["_rowidx"]), r))
 
     order = list(threads.keys())
@@ -744,8 +794,19 @@ def _iter_candidate_chains(csv_path: str) -> Iterator[Tuple[str, List[Dict[str, 
                 yield root_id, chain
 
 
-def chat_structured_iter(csv_path: str) -> Iterator[StructuredChatSample]:
-    for root_id, chain in _iter_candidate_chains(csv_path):
+def _iter_candidate_chains(csv_path: str) -> Iterator[Tuple[str, List[Dict[str, Any]]]]:
+    rows, id2row = _load_thread_rows(csv_path)
+    yield from _iter_candidate_chains_from_rows(rows, id2row)
+
+
+def _chat_structured_iter_from_rows(
+    rows: List[Dict[str, Any]],
+    id2row: Dict[str, Dict[str, Any]],
+    root_depth_lookup: Optional[Dict[str, Tuple[str, int]]] = None,
+) -> Iterator[StructuredChatSample]:
+    for root_id, chain in _iter_candidate_chains_from_rows(
+        rows, id2row, root_depth_lookup,
+    ):
         target_idx = len(chain) - 1
         answer = (chain[target_idx].get("Assistentin") or "").strip()
         if not answer:
@@ -779,13 +840,23 @@ def chat_structured_iter(csv_path: str) -> Iterator[StructuredChatSample]:
         )
 
 
+def chat_structured_iter(csv_path: str) -> Iterator[StructuredChatSample]:
+    rows, id2row = _load_thread_rows(csv_path)
+    yield from _chat_structured_iter_from_rows(rows, id2row)
+
+
 def dialogplus_structured_iter(csv_path: str) -> Iterator[StructuredChatSample]:
     for item in chat_structured_iter(csv_path):
         yield item
 
 
-def build_mixed_split_groups(csv_path: str, column_name: str) -> Dict[str, str]:
-    rows, id2row = _load_thread_rows(csv_path)
+def _build_mixed_split_groups_from_rows(
+    rows: List[Dict[str, Any]],
+    id2row: Dict[str, Dict[str, Any]],
+    column_name: str,
+    root_depth_lookup: Optional[Dict[str, Tuple[str, int]]] = None,
+) -> Dict[str, str]:
+    root_depth_lookup = root_depth_lookup or _build_root_depth_lookup(rows, id2row)
     parents: Dict[str, str] = {}
 
     def find(node: str) -> str:
@@ -807,7 +878,7 @@ def build_mixed_split_groups(csv_path: str, column_name: str) -> Dict[str, str]:
         text_node = "text:" + hashlib.sha256(text.encode("utf-8")).hexdigest()
         find(text_node)
         rid = normalize_id(row.get("id"))
-        root_id, _ = _resolve_root_and_depth(rid, id2row) if rid else ("", 0)
+        root_id, _ = root_depth_lookup.get(rid, ("", 0)) if rid else ("", 0)
         if root_id:
             union(f"thread:{root_id}", text_node)
 
@@ -824,6 +895,11 @@ def build_mixed_split_groups(csv_path: str, column_name: str) -> Dict[str, str]:
     return node_to_group
 
 
+def build_mixed_split_groups(csv_path: str, column_name: str) -> Dict[str, str]:
+    rows, id2row = _load_thread_rows(csv_path)
+    return _build_mixed_split_groups_from_rows(rows, id2row, column_name)
+
+
 def remap_structured_split_keys(
     samples: Iterator[StructuredChatSample], split_groups: Dict[str, str],
 ) -> Iterator[StructuredChatSample]:
@@ -832,24 +908,35 @@ def remap_structured_split_keys(
         yield sample
 
 
-def mixed_text_iter(
-    csv_path: str, column_name: str, split_groups: Optional[Dict[str, str]] = None,
+def _mixed_text_iter_from_rows(
+    rows: List[Dict[str, Any]],
+    id2row: Dict[str, Dict[str, Any]],
+    column_name: str,
+    split_groups: Optional[Dict[str, str]] = None,
+    root_depth_lookup: Optional[Dict[str, Tuple[str, int]]] = None,
 ) -> Iterator[PlainTextSample]:
-    rows, id2row = _load_thread_rows(csv_path)
     split_groups = split_groups or {}
+    root_depth_lookup = root_depth_lookup or _build_root_depth_lookup(rows, id2row)
     for row in rows:
         text = (row.get(column_name) or "").strip()
         if not text:
             continue
         text_node = "text:" + hashlib.sha256(text.encode("utf-8")).hexdigest()
         rid = normalize_id(row.get("id"))
-        root_id, _ = _resolve_root_and_depth(rid, id2row) if rid else ("", 0)
+        root_id, _ = root_depth_lookup.get(rid, ("", 0)) if rid else ("", 0)
         thread_node = f"thread:{root_id}" if root_id else ""
         split_key = split_groups.get(
             text_node,
             split_groups.get(thread_node, thread_node or text_node),
         )
         yield PlainTextSample(text=text, split_key=split_key)
+
+
+def mixed_text_iter(
+    csv_path: str, column_name: str, split_groups: Optional[Dict[str, str]] = None,
+) -> Iterator[PlainTextSample]:
+    rows, id2row = _load_thread_rows(csv_path)
+    yield from _mixed_text_iter_from_rows(rows, id2row, column_name, split_groups)
 
 
 def interleave_examples(*iterables: Iterator[Any]) -> Iterator[Any]:
@@ -902,17 +989,23 @@ def quality_issues_for_example(
     return issues
 
 
-def _simhash64(text: str) -> int:
+def _simhash64(text: str, max_shingles: int = 512) -> int:
     words = re.findall(r"\w+", normalize_for_dedup(text), flags=re.UNICODE)
     if not words:
         return 0
     width = 5 if len(words) >= 5 else max(1, len(words))
-    shingles = (
-        [" ".join(words[index:index + width]) for index in range(len(words) - width + 1)]
-        or [" ".join(words)]
-    )
+    shingle_count = max(1, len(words) - width + 1)
+    sample_count = min(shingle_count, max(32, int(max_shingles)))
+    if sample_count >= shingle_count:
+        shingle_indexes = range(shingle_count)
+    else:
+        shingle_indexes = (
+            (sample_index * shingle_count) // sample_count
+            for sample_index in range(sample_count)
+        )
     vector = [0] * 64
-    for shingle in shingles:
+    for index in shingle_indexes:
+        shingle = " ".join(words[index:index + width])
         value = int.from_bytes(
             hashlib.blake2b(shingle.encode("utf-8"), digest_size=8).digest(),
             "big",
@@ -929,9 +1022,12 @@ def _simhash64(text: str) -> int:
 class NearDuplicateTracker:
     """Bounded LSH tracker for approximate near-duplicate detection."""
 
-    def __init__(self, threshold: float, bucket_limit: int = 256):
+    def __init__(
+        self, threshold: float, bucket_limit: int = 256, max_shingles: int = 512,
+    ):
         self.max_hamming = max(1, int(round((1.0 - float(threshold)) * 64)))
         self.bucket_limit = max(16, int(bucket_limit))
+        self.max_shingles = max(32, int(max_shingles))
         self.hashes: List[int] = []
         self.group_keys: List[Optional[str]] = []
         self.bands: Dict[Tuple[int, int], List[int]] = defaultdict(list)
@@ -939,7 +1035,7 @@ class NearDuplicateTracker:
     def add_and_find(
         self, text: str, group_key: Optional[str] = None,
     ) -> Tuple[bool, Optional[str]]:
-        value = _simhash64(text)
+        value = _simhash64(text, self.max_shingles)
         candidate_ids: set[int] = set()
         for band in range(4):
             band_value = (value >> (band * 16)) & 0xFFFF
@@ -1036,17 +1132,17 @@ def build_examples_stream(cfg: TrainConfig) -> Iterator[Any]:
             and _csv_has_column(cfg.csv_path, "Assistentin")
         )
         if has_structured_columns:
-            chat_examples = (
-                chat_structured_iter(cfg.csv_path)
-                if cfg.template_mode == "chat"
-                else dialogplus_structured_iter(cfg.csv_path)
-            )
             if cfg.mixed_training:
-                split_groups = build_mixed_split_groups(
-                    cfg.csv_path, cfg.mixed_text_column,
+                rows, id2row = _load_thread_rows(cfg.csv_path)
+                root_depth_lookup = _build_root_depth_lookup(rows, id2row)
+                chat_examples = _chat_structured_iter_from_rows(
+                    rows, id2row, root_depth_lookup,
                 )
-                text_examples = mixed_text_iter(
-                    cfg.csv_path, cfg.mixed_text_column, split_groups,
+                split_groups = _build_mixed_split_groups_from_rows(
+                    rows, id2row, cfg.mixed_text_column, root_depth_lookup,
+                )
+                text_examples = _mixed_text_iter_from_rows(
+                    rows, id2row, cfg.mixed_text_column, split_groups, root_depth_lookup,
                 )
                 if cfg.training_phase == "pretrain":
                     return text_examples
@@ -1056,6 +1152,11 @@ def build_examples_stream(cfg: TrainConfig) -> Iterator[Any]:
                     remap_structured_split_keys(chat_examples, split_groups),
                     text_examples,
                 )
+            chat_examples = (
+                chat_structured_iter(cfg.csv_path)
+                if cfg.template_mode == "chat"
+                else dialogplus_structured_iter(cfg.csv_path)
+            )
             return chat_examples
         if cfg.training_phase == "sft":
             raise ValueError(
@@ -1394,7 +1495,30 @@ def count_examples_fast(cfg: TrainConfig) -> int:
     return count
 
 
-def audit_dataset(cfg: TrainConfig, outdir: Path, is_main: bool) -> Dict[str, Any]:
+def estimate_examples_from_audit(cfg: TrainConfig, report: Dict[str, Any]) -> int:
+    """Use the already completed audit instead of scanning the CSV again."""
+    if not report:
+        return 0
+    if "usable_text_samples" in report:
+        return max(0, int(report.get("usable_text_samples", 0)))
+
+    assistant_samples = max(0, int(report.get("usable_assistant_samples", 0)))
+    mixed_text_samples = max(0, int(report.get("usable_mixed_text_samples", 0)))
+    if cfg.training_phase == "pretrain":
+        return mixed_text_samples
+    if cfg.training_phase == "sft":
+        return assistant_samples
+    if cfg.mixed_training:
+        return assistant_samples + mixed_text_samples
+    return assistant_samples
+
+
+def audit_dataset(
+    cfg: TrainConfig,
+    outdir: Path,
+    is_main: bool,
+    progress_cb: Optional[Callable[[int], None]] = None,
+) -> Dict[str, Any]:
     report: Dict[str, Any] = {
         "csv_path": str(Path(cfg.csv_path).expanduser().resolve()),
         "template_mode": cfg.template_mode,
@@ -1457,10 +1581,14 @@ def audit_dataset(cfg: TrainConfig, outdir: Path, is_main: bool) -> Dict[str, An
             quality_issue_counts: Counter[str] = Counter()
             near_duplicate_samples = 0
             potential_conflicting_answers = 0
-            near_tracker = NearDuplicateTracker(cfg.near_duplicate_threshold)
+            near_tracker = NearDuplicateTracker(
+                cfg.near_duplicate_threshold, max_shingles=cfg.near_duplicate_max_shingles,
+            )
             prompt_answers: Dict[str, set[str]] = defaultdict(set)
             for row in reader:
                 row_count += 1
+                if progress_cb is not None and (row_count == 1 or row_count % 1000 == 0):
+                    progress_cb(row_count)
                 rid = normalize_id(row.get("id"))
                 parent = normalize_id(row.get("parent_id"))
                 user = (row.get("Benutzer") or "").strip()
@@ -1588,9 +1716,13 @@ def audit_dataset(cfg: TrainConfig, outdir: Path, is_main: bool) -> Dict[str, An
             usable_count = empty_count = duplicate_count = 0
             near_duplicate_samples = 0
             quality_issue_counts: Counter[str] = Counter()
-            near_tracker = NearDuplicateTracker(cfg.near_duplicate_threshold)
+            near_tracker = NearDuplicateTracker(
+                cfg.near_duplicate_threshold, max_shingles=cfg.near_duplicate_max_shingles,
+            )
             for row in reader:
                 row_count += 1
+                if progress_cb is not None and (row_count == 1 or row_count % 1000 == 0):
+                    progress_cb(row_count)
                 value = (row.get(cfg.column_name) or "").strip()
                 if not value:
                     empty_count += 1
@@ -1639,31 +1771,97 @@ def audit_dataset(cfg: TrainConfig, outdir: Path, is_main: bool) -> Dict[str, An
     return report
 
 
-def get_first_raw_example_preview(cfg: TrainConfig) -> Tuple[str, str]:
-    try:
-        examples_iter = build_examples_stream(cfg)
-        first_item = next(examples_iter)
-    except StopIteration:
-        return "", ""
-    except Exception:
-        return "", ""
+def dataset_cache_root(cfg: TrainConfig) -> Path:
+    if cfg.dataset_cache_dir:
+        root = Path(cfg.dataset_cache_dir).expanduser().resolve()
+    else:
+        output_dir = Path(
+            cfg.output_dir or cfg.save_dir or "./training_outputs/worker_run"
+        ).expanduser().resolve()
+        root = output_dir.parent / "_dataset_cache"
+    root.mkdir(parents=True, exist_ok=True)
+    return root
 
+
+def dataset_audit_cache_path(cfg: TrainConfig) -> Path:
+    csv_path = Path(cfg.csv_path).expanduser().resolve()
+    csv_stat = csv_path.stat()
+    payload = {
+        "audit_schema": 2,
+        "csv_path": str(csv_path),
+        "csv_mtime_ns": int(csv_stat.st_mtime_ns),
+        "csv_size": int(csv_stat.st_size),
+        "template_mode": cfg.template_mode,
+        "column_name": cfg.column_name,
+        "mixed_training": bool(cfg.mixed_training),
+        "mixed_text_column": cfg.mixed_text_column,
+        "training_phase": cfg.training_phase,
+        "near_duplicate_action": cfg.near_duplicate_action,
+        "near_duplicate_threshold": float(cfg.near_duplicate_threshold),
+        "near_duplicate_max_shingles": int(cfg.near_duplicate_max_shingles),
+        "quality_min_chars": int(cfg.quality_min_chars),
+    }
+    key = hashlib.sha256(
+        json.dumps(payload, ensure_ascii=False, sort_keys=True).encode("utf-8")
+    ).hexdigest()[:24]
+    audit_dir = dataset_cache_root(cfg) / "audits"
+    audit_dir.mkdir(parents=True, exist_ok=True)
+    return audit_dir / f"audit_{key}.json"
+
+
+def audit_dataset_cached(
+    cfg: TrainConfig,
+    outdir: Path,
+    status_writer: Optional[JsonStatusWriter] = None,
+) -> Dict[str, Any]:
+    cache_path = dataset_audit_cache_path(cfg)
+    output_path = outdir / "dataset_audit.json"
+    if cfg.use_dataset_cache and cache_path.exists() and not cfg.rebuild_dataset_cache:
+        report = json.loads(cache_path.read_text(encoding="utf-8"))
+        _atomic_write_json(output_path, report)
+        LOGGER.info("Dataset-Audit aus gemeinsamem Cache geladen: %s", cache_path)
+        return report
+
+    def report_progress(rows: int) -> None:
+        if SHUTDOWN.stop:
+            raise RuntimeError("Dataset-Audit durch Stop-Signal abgebrochen.")
+        if status_writer is not None:
+            status_writer.write({
+                "running": True,
+                "status": "auditing_dataset",
+                "eta": f"Dataset-Audit: {rows} Zeilen geprüft",
+                "dataset_progress": {
+                    "phase": "audit",
+                    "seen_samples": int(rows),
+                    "expected_samples": 0,
+                    "done": False,
+                    "updated_at": time.time(),
+                },
+                "dataset_ready": False,
+            })
+
+    report = audit_dataset(cfg, outdir, True, progress_cb=report_progress)
+    if cfg.use_dataset_cache:
+        _atomic_write_json(cache_path, report)
+    return report
+
+
+def format_raw_example_preview(item: Any) -> Tuple[str, str]:
     try:
-        if isinstance(first_item, StructuredChatSample):
+        if isinstance(item, StructuredChatSample):
             parts = []
-            if first_item.system:
-                parts.append(f"[SYSTEM]\n{first_item.system}")
-            for t in first_item.turns:
-                parts.append(f"[{t.role.upper()}]\n{t.content}")
-            parts.append(f"[TARGET_ASSISTANT]\n{first_item.target_answer}")
+            if item.system:
+                parts.append(f"[SYSTEM]\n{item.system}")
+            for turn in item.turns:
+                parts.append(f"[{turn.role.upper()}]\n{turn.content}")
+            parts.append(f"[TARGET_ASSISTANT]\n{item.target_answer}")
             preview = "\n\n".join(parts)
-        elif isinstance(first_item, PlainTextSample):
-            preview = first_item.text
+        elif isinstance(item, PlainTextSample):
+            preview = item.text
         else:
-            preview = str(first_item)
+            preview = str(item)
     except Exception:
         preview = ""
-
     return preview[:4000], preview[:20000]
 
 
@@ -1675,7 +1873,7 @@ def iter_tokenizer_training_texts(cfg: TrainConfig) -> Iterator[str]:
 
 
 def prepare_scratch_tokenizer_if_requested(
-    cfg: TrainConfig, outdir: Path, ctx: DistContext,
+    cfg: TrainConfig, outdir: Path, ctx: DistContext, example_count: Optional[int] = None,
 ) -> None:
     if cfg.resume:
         cfg.tokenizer_dir = str(Path(cfg.resume).expanduser().resolve())
@@ -1687,44 +1885,56 @@ def prepare_scratch_tokenizer_if_requested(
             "train_scratch_tokenizer ist nur zusammen mit train_from_scratch erlaubt"
         )
 
-    tokenizer_dir = outdir / "scratch_tokenizer"
+    tokenizer_dir = (
+        compute_scratch_tokenizer_cache_dir(cfg)
+        if cfg.use_dataset_cache else outdir / "scratch_tokenizer"
+    )
     error_path = outdir / "scratch_tokenizer_error.txt"
     if ctx.is_main:
         error_path.unlink(missing_ok=True)
         try:
-            base_tokenizer = AutoTokenizer.from_pretrained(
-                cfg.tokenizer_dir or cfg.model_dir,
-                trust_remote_code=False,
-                use_fast=True,
+            cache_complete = (
+                (tokenizer_dir / "training_report.json").is_file()
+                and (tokenizer_dir / "tokenizer_config.json").is_file()
             )
-            if not hasattr(base_tokenizer, "train_new_from_iterator"):
-                raise RuntimeError("Der gewählte Tokenizer unterstützt kein Scratch-Training")
-            example_count = count_examples_fast(cfg)
-            trained_tokenizer = base_tokenizer.train_new_from_iterator(
-                iter_tokenizer_training_texts(cfg),
-                vocab_size=cfg.scratch_tokenizer_vocab_size,
-                length=max(1, example_count),
-            )
-            prepare_tokenizer(
-                trained_tokenizer,
-                template_mode=cfg.template_mode,
-                force_template=bool(cfg.force_template),
-            )
-            tokenizer_dir.mkdir(parents=True, exist_ok=True)
-            trained_tokenizer.save_pretrained(tokenizer_dir)
-            _atomic_write_json(tokenizer_dir / "training_report.json", {
-                "source": cfg.tokenizer_dir or cfg.model_dir,
-                "vocab_size_requested": int(cfg.scratch_tokenizer_vocab_size),
-                "vocab_size_effective": int(len(trained_tokenizer)),
-                "examples_seen_estimate": int(example_count),
-                "training_phase": cfg.training_phase,
-            })
-            LOGGER.info(
-                "Scratch-Tokenizer trainiert | source=%s vocab=%s path=%s",
-                cfg.tokenizer_dir or cfg.model_dir,
-                len(trained_tokenizer),
-                tokenizer_dir,
-            )
+            if cache_complete and not cfg.rebuild_dataset_cache:
+                LOGGER.info("Scratch-Tokenizer aus gemeinsamem Cache geladen: %s", tokenizer_dir)
+            else:
+                if tokenizer_dir.exists():
+                    shutil.rmtree(tokenizer_dir, ignore_errors=True)
+                tokenizer_dir.mkdir(parents=True, exist_ok=True)
+                base_tokenizer = AutoTokenizer.from_pretrained(
+                    cfg.tokenizer_dir or cfg.model_dir,
+                    trust_remote_code=False,
+                    use_fast=True,
+                )
+                if not hasattr(base_tokenizer, "train_new_from_iterator"):
+                    raise RuntimeError("Der gewählte Tokenizer unterstützt kein Scratch-Training")
+                example_count = int(example_count or count_examples_fast(cfg))
+                trained_tokenizer = base_tokenizer.train_new_from_iterator(
+                    iter_tokenizer_training_texts(cfg),
+                    vocab_size=cfg.scratch_tokenizer_vocab_size,
+                    length=max(1, example_count),
+                )
+                prepare_tokenizer(
+                    trained_tokenizer,
+                    template_mode=cfg.template_mode,
+                    force_template=bool(cfg.force_template),
+                )
+                trained_tokenizer.save_pretrained(tokenizer_dir)
+                _atomic_write_json(tokenizer_dir / "training_report.json", {
+                    "source": cfg.tokenizer_dir or cfg.model_dir,
+                    "vocab_size_requested": int(cfg.scratch_tokenizer_vocab_size),
+                    "vocab_size_effective": int(len(trained_tokenizer)),
+                    "examples_seen_estimate": int(example_count),
+                    "training_phase": cfg.training_phase,
+                })
+                LOGGER.info(
+                    "Scratch-Tokenizer trainiert | source=%s vocab=%s path=%s",
+                    cfg.tokenizer_dir or cfg.model_dir,
+                    len(trained_tokenizer),
+                    tokenizer_dir,
+                )
         except Exception as exc:
             error_path.write_text(
                 f"{exc.__class__.__name__}: {exc}\n\n{traceback.format_exc()}",
@@ -1738,16 +1948,69 @@ def prepare_scratch_tokenizer_if_requested(
     cfg.tokenizer_dir = str(tokenizer_dir)
 
 
+def tokenizer_source_signature(source: str) -> Dict[str, Any]:
+    source_path = Path(source).expanduser()
+    if not source_path.exists() or not source_path.is_dir():
+        return {"kind": "model_id", "value": str(source)}
+
+    tokenizer_files = (
+        "tokenizer.json",
+        "tokenizer_config.json",
+        "special_tokens_map.json",
+        "added_tokens.json",
+        "vocab.json",
+        "merges.txt",
+        "spiece.model",
+        "tokenizer.model",
+        "sentencepiece.bpe.model",
+    )
+    file_digests: Dict[str, str] = {}
+    for filename in tokenizer_files:
+        path = source_path / filename
+        if not path.is_file():
+            continue
+        digest = hashlib.sha256()
+        with open(path, "rb") as handle:
+            for block in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(block)
+        file_digests[filename] = digest.hexdigest()
+    if not file_digests:
+        return {"kind": "local_path", "value": str(source_path.resolve())}
+    return {"kind": "local_tokenizer", "files": file_digests}
+
+
+def compute_scratch_tokenizer_cache_dir(cfg: TrainConfig) -> Path:
+    csv_path = Path(cfg.csv_path).expanduser().resolve()
+    csv_stat = csv_path.stat()
+    payload = {
+        "scratch_tokenizer_schema": 1,
+        "csv_path": str(csv_path),
+        "csv_mtime_ns": int(csv_stat.st_mtime_ns),
+        "csv_size": int(csv_stat.st_size),
+        "source": tokenizer_source_signature(cfg.tokenizer_dir or cfg.model_dir),
+        "template_mode": cfg.template_mode,
+        "column_name": cfg.column_name,
+        "mixed_training": bool(cfg.mixed_training),
+        "mixed_text_column": cfg.mixed_text_column,
+        "training_phase": cfg.training_phase,
+        "vocab_size": int(cfg.scratch_tokenizer_vocab_size),
+    }
+    key = hashlib.sha256(
+        json.dumps(payload, ensure_ascii=False, sort_keys=True).encode("utf-8")
+    ).hexdigest()[:24]
+    return dataset_cache_root(cfg) / "tokenizers" / f"scratch_{key}"
+
+
 def compute_shard_cache_dir(cfg: TrainConfig) -> Path:
     csv_path = Path(cfg.csv_path).expanduser().resolve()
     csv_stat = csv_path.stat()
 
     payload = {
-        "cache_schema": 3,
+        "cache_schema": 4,
         "csv_path": str(csv_path),
-        "csv_mtime": int(csv_stat.st_mtime),
+        "csv_mtime_ns": int(csv_stat.st_mtime_ns),
         "csv_size": int(csv_stat.st_size),
-        "model_dir": str(Path(cfg.model_dir).expanduser().resolve()),
+        "tokenizer_source": tokenizer_source_signature(cfg.tokenizer_dir or cfg.model_dir),
         "template_mode": cfg.template_mode,
         "column_name": cfg.column_name,
         "mixed_training": bool(cfg.mixed_training),
@@ -1762,9 +2025,9 @@ def compute_shard_cache_dir(cfg: TrainConfig) -> Path:
         "deduplicate_exact": bool(cfg.deduplicate_exact),
         "near_duplicate_action": cfg.near_duplicate_action,
         "near_duplicate_threshold": float(cfg.near_duplicate_threshold),
+        "near_duplicate_max_shingles": int(cfg.near_duplicate_max_shingles),
         "quality_filter_mode": cfg.quality_filter_mode,
         "quality_min_chars": int(cfg.quality_min_chars),
-        "tokenizer_dir": cfg.tokenizer_dir,
         "val_split": float(cfg.val_split),
         "split_seed": int(cfg.split_seed),
         "max_seq_length": int(cfg.max_seq_length),
@@ -1786,9 +2049,7 @@ def compute_shard_cache_dir(cfg: TrainConfig) -> Path:
         "ngram_max_tokens_per_text": int(cfg.ngram_max_tokens_per_text),
     }
     key = hashlib.sha256(json.dumps(payload, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()[:24]
-    cache_root = Path(cfg.output_dir or cfg.save_dir or "./training_outputs/worker_run").expanduser().resolve() / "dataset_cache"
-    cache_root.mkdir(parents=True, exist_ok=True)
-    return cache_root / f"shards_{key}"
+    return dataset_cache_root(cfg) / f"shards_{key}"
 
 
 def shard_file_path(cache_dir: Path, shard_idx: int) -> Path:
@@ -1809,6 +2070,10 @@ def dataset_meta_path(cache_dir: Path) -> Path:
 
 def dataset_progress_path(cache_dir: Path) -> Path:
     return cache_dir / "_dataset_progress.json"
+
+
+def dataset_preview_path(cache_dir: Path) -> Path:
+    return cache_dir / "_dataset_preview.json"
 
 
 def _atomic_write_json(path: Path, payload: Dict[str, Any]) -> None:
@@ -1893,13 +2158,36 @@ def _write_dataset_progress(
     shard_idx: int,
     done: bool,
     status_writer: Optional[JsonStatusWriter] = None,
+    expected_samples: int = 0,
+    started_at: Optional[float] = None,
+    num_workers: int = 1,
+    phase: str = "tokenizing",
+    processed_samples: Optional[int] = None,
 ) -> None:
+    processed = int(seen_samples if processed_samples is None else processed_samples)
+    elapsed_seconds = max(0.0, time.time() - started_at) if started_at else 0.0
+    samples_per_second = (
+        float(processed) / elapsed_seconds if elapsed_seconds > 0.0 else 0.0
+    )
+    remaining_samples = max(0, int(expected_samples) - processed)
+    eta_seconds = (
+        float(remaining_samples) / samples_per_second
+        if samples_per_second > 0.0 and expected_samples > 0 else None
+    )
     payload = {
         "seen_samples": int(seen_samples),
+        "processed_samples": processed,
         "tokenized_samples": int(tokenized_samples),
         "skipped_samples": int(skipped_samples),
         "num_shards_written": int(shard_idx),
         "done": bool(done),
+        "phase": str(phase),
+        "expected_samples": int(expected_samples),
+        "num_workers": int(num_workers),
+        "elapsed_seconds": float(elapsed_seconds),
+        "samples_per_second": float(samples_per_second),
+        "eta_seconds": eta_seconds,
+        "cache_hit": False,
         "updated_at": time.time(),
     }
     _atomic_write_json(dataset_progress_path(cache_dir), payload)
@@ -1907,7 +2195,13 @@ def _write_dataset_progress(
         status_writer.write({
             "running": True,
             "status": "dataset_ready" if done else "building_dataset",
-            "eta": "Dataset vollständig aufgebaut" if done else "Dataset wird vollständig aufgebaut",
+            "eta": (
+                "Dataset vollständig aufgebaut"
+                if done else (
+                    f"Dataset-Aufbau: {format_eta(eta_seconds)}"
+                    if eta_seconds is not None else "Dataset wird vollständig aufgebaut"
+                )
+            ),
             "dataset_progress": payload,
             "dataset_ready": bool(done),
             "total_samples_real": int(tokenized_samples) if done else None,
@@ -1928,10 +2222,81 @@ def _histogram_percentile(histogram: Counter[int], quantile: float) -> int:
     return int(max(histogram))
 
 
+_DATASET_TOKENIZER_LOCAL = threading.local()
+
+
+def resolve_dataset_num_workers(cfg: TrainConfig, estimated_samples: int = 0) -> int:
+    if cfg.dataset_num_workers >= 0:
+        return max(1, int(cfg.dataset_num_workers))
+    if 0 < int(estimated_samples) < 256:
+        return 1
+    cpu_count = max(1, os.cpu_count() or 1)
+    return min(8, max(1, cpu_count // 2))
+
+
+def _get_dataset_thread_tokenizer(spec: Dict[str, Any]) -> Any:
+    cache_key = str(spec["cache_key"])
+    if getattr(_DATASET_TOKENIZER_LOCAL, "cache_key", None) == cache_key:
+        return _DATASET_TOKENIZER_LOCAL.tokenizer
+
+    tokenizer = AutoTokenizer.from_pretrained(
+        spec["tokenizer_source"],
+        trust_remote_code=False,
+        use_fast=True,
+        local_files_only=True,
+    )
+    prepare_tokenizer(
+        tokenizer,
+        template_mode=spec["template_mode"],
+        force_template=bool(spec["force_template"]),
+    )
+    ngram_tokens = list(spec.get("ngram_tokens") or [])
+    if ngram_tokens:
+        tokenizer.add_tokens(ngram_tokens, special_tokens=False)
+
+    _DATASET_TOKENIZER_LOCAL.cache_key = cache_key
+    _DATASET_TOKENIZER_LOCAL.tokenizer = tokenizer
+    return tokenizer
+
+
+def _tokenize_dataset_item(
+    item: Any, tokenizer: Any, options: Dict[str, Any],
+) -> List[Dict[str, Any]]:
+    if isinstance(item, (PlainTextSample, str)):
+        return tokenize_text_examples(
+            item,
+            tokenizer,
+            int(options["max_seq_length"]),
+            chunk_long_texts=bool(options["chunk_long_texts"]),
+            text_chunk_overlap=int(options["text_chunk_overlap"]),
+            text_chunk_min_tokens=int(options["text_chunk_min_tokens"]),
+            append_eos_to_text=bool(options["append_eos_to_text"]),
+        )
+
+    dialog_sample = tokenize_example(
+        item=item,
+        tokenizer=tokenizer,
+        max_seq_length=int(options["max_seq_length"]),
+        template_mode=str(options["template_mode"]),
+        max_history_turns=options.get("max_history_turns"),
+        include_prompt_loss=bool(options["include_prompt_loss"]),
+    )
+    return [dialog_sample] if dialog_sample is not None else []
+
+
+def _tokenize_dataset_batch(
+    items: List[Any], tokenizer_spec: Dict[str, Any], options: Dict[str, Any],
+) -> List[List[Dict[str, Any]]]:
+    tokenizer = _get_dataset_thread_tokenizer(tokenizer_spec)
+    return [_tokenize_dataset_item(item, tokenizer, options) for item in items]
+
+
 def build_shard_dataset(
     cfg_dict: Dict[str, Any],
     cache_dir_str: str,
     status_writer: Optional[JsonStatusWriter] = None,
+    preview_writer: Optional[JsonPreviewWriter] = None,
+    estimated_samples: int = 0,
 ) -> None:
     try:
         cfg = TrainConfig(**cfg_dict)
@@ -1965,18 +2330,37 @@ def build_shard_dataset(
             csv_path=cfg.csv_path,
         )
 
-        ngram_state = build_or_load_ngram_state(
-            tokenizer=tokenizer,
-            cfg=ngram_cfg,
-            outdir=cache_dir,
-            rebuild=bool(cfg.rebuild_dataset_cache),
-            progress_cb=lambda stage, current, total: LOGGER.info(
+        def report_ngram_progress(stage: str, current: int, total: int) -> None:
+            if SHUTDOWN.stop:
+                raise RuntimeError("N-Gram-Analyse durch Stop-Signal abgebrochen.")
+            LOGGER.info(
                 "NGRAM Fortschritt [%s]: %s/%s (%.1f%%)",
                 stage,
                 current,
                 total,
                 (100.0 * current / max(1, total)),
-            ),
+            )
+            if status_writer is not None:
+                status_writer.write({
+                    "running": True,
+                    "status": "building_ngrams",
+                    "eta": f"N-Gram-Analyse: {current}/{total}",
+                    "dataset_progress": {
+                        "phase": "ngrams",
+                        "seen_samples": int(current),
+                        "expected_samples": int(total),
+                        "done": False,
+                        "updated_at": time.time(),
+                    },
+                    "dataset_ready": False,
+                })
+
+        ngram_state = build_or_load_ngram_state(
+            tokenizer=tokenizer,
+            cfg=ngram_cfg,
+            outdir=cache_dir,
+            rebuild=bool(cfg.rebuild_dataset_cache),
+            progress_cb=report_ngram_progress,
         )
 
         shard_size = int(cfg.tokenized_shard_size)
@@ -1985,6 +2369,7 @@ def build_shard_dataset(
         total_samples = 0
         skipped_samples = 0
         seen_samples = 0
+        completed_source_samples = 0
         raw_samples_by_type: Counter[str] = Counter()
         tokenized_segments_by_type: Counter[str] = Counter()
         output_samples_by_type: Counter[str] = Counter()
@@ -1998,7 +2383,9 @@ def build_shard_dataset(
         chunks_created = 0
         length_histogram: Counter[int] = Counter()
         seen_fingerprints: set[str] = set()
-        near_tracker = NearDuplicateTracker(cfg.near_duplicate_threshold)
+        near_tracker = NearDuplicateTracker(
+            cfg.near_duplicate_threshold, max_shingles=cfg.near_duplicate_max_shingles,
+        )
         packer = ShortTextPacker(cfg.pack_target_length) if cfg.pack_short_texts else None
 
         current_samples: List[Dict[str, Any]] = []
@@ -2010,6 +2397,34 @@ def build_shard_dataset(
             sort_buffer_size = shard_size
 
         examples_iter = build_examples_stream(cfg)
+        build_started_at = time.time()
+        effective_dataset_workers = resolve_dataset_num_workers(cfg, estimated_samples)
+        tokenize_batch_size = max(1, int(cfg.dataset_tokenize_batch_size))
+        tokenizer_spec = {
+            "tokenizer_source": tokenizer_source,
+            "template_mode": cfg.template_mode,
+            "force_template": bool(cfg.force_template),
+            "ngram_tokens": list(ngram_state.tokens if ngram_state is not None else []),
+        }
+        tokenizer_spec["cache_key"] = hashlib.sha256(
+            json.dumps(tokenizer_spec, ensure_ascii=False, sort_keys=True).encode("utf-8")
+        ).hexdigest()
+        tokenize_options = {
+            "max_seq_length": int(cfg.max_seq_length),
+            "chunk_long_texts": bool(cfg.chunk_long_texts),
+            "text_chunk_overlap": int(cfg.text_chunk_overlap),
+            "text_chunk_min_tokens": int(cfg.text_chunk_min_tokens),
+            "append_eos_to_text": bool(cfg.append_eos_to_text),
+            "template_mode": cfg.template_mode,
+            "max_history_turns": cfg.max_history_turns,
+            "include_prompt_loss": bool(cfg.include_prompt_loss),
+        }
+        LOGGER.info(
+            "Dataset-Tokenisierung | workers=%s batch_size=%s estimated_samples=%s",
+            effective_dataset_workers,
+            tokenize_batch_size,
+            estimated_samples,
+        )
 
         def queue_output_sample(sample: Dict[str, Any]) -> None:
             nonlocal pending_samples, current_samples, shard_idx, global_start, total_samples
@@ -2047,93 +2462,27 @@ def build_shard_dataset(
                     shard_idx=shard_idx,
                     done=False,
                     status_writer=status_writer,
+                    expected_samples=estimated_samples,
+                    started_at=build_started_at,
+                    num_workers=effective_dataset_workers,
+                    processed_samples=completed_source_samples,
                 )
 
-        _write_dataset_progress(
-            cache_dir,
-            seen_samples=0,
-            tokenized_samples=0,
-            skipped_samples=0,
-            shard_idx=0,
-            done=False,
-            status_writer=status_writer,
-        )
-
-        for item in examples_iter:
-            if SHUTDOWN.stop:
-                raise RuntimeError("Dataset-Aufbau durch Stop-Signal abgebrochen.")
-            seen_samples += 1
-            sample_type = "dialog" if isinstance(item, StructuredChatSample) else "text"
-            raw_samples_by_type[sample_type] += 1
-            canonical_text = canonical_example_text(item)
-            source_split_key = (
-                item.split_key
-                if isinstance(item, (StructuredChatSample, PlainTextSample))
-                else "text:" + hashlib.sha256(canonical_text.encode("utf-8")).hexdigest()
-            )
-            normalized_text = normalize_for_dedup(canonical_text)
-            fingerprint = hashlib.sha256(normalized_text.encode("utf-8")).hexdigest()
-            issues = quality_issues_for_example(item, cfg.quality_min_chars)
-            quality_issue_counts.update(issues)
-
-            if cfg.deduplicate_exact and fingerprint in seen_fingerprints:
-                skipped_samples += 1
-                exact_duplicates_removed += 1
-                skipped_reasons["exact_duplicate"] += 1
-                write_periodic_progress()
-                continue
-            seen_fingerprints.add(fingerprint)
-
-            if issues and cfg.quality_filter_mode == "exclude":
-                skipped_samples += 1
-                skipped_reasons["quality_filter"] += 1
-                write_periodic_progress()
-                continue
-
-            is_near_duplicate = False
-            near_representative_split_key: Optional[str] = None
-            if cfg.near_duplicate_action != "off":
-                is_near_duplicate, near_representative_split_key = near_tracker.add_and_find(
-                    canonical_text,
-                    source_split_key,
-                )
-                if is_near_duplicate:
-                    near_duplicates_found += 1
-            if is_near_duplicate and cfg.near_duplicate_action == "exclude":
-                skipped_samples += 1
-                skipped_reasons["near_duplicate"] += 1
-                write_periodic_progress()
-                continue
-
-            if isinstance(item, (PlainTextSample, str)):
-                samples = tokenize_text_examples(
-                    item,
-                    tokenizer,
-                    int(cfg.max_seq_length),
-                    chunk_long_texts=bool(cfg.chunk_long_texts),
-                    text_chunk_overlap=int(cfg.text_chunk_overlap),
-                    text_chunk_min_tokens=int(cfg.text_chunk_min_tokens),
-                    append_eos_to_text=bool(cfg.append_eos_to_text),
-                )
+        def process_tokenized_result(
+            samples: List[Dict[str, Any]],
+            near_representative_split_key: Optional[str],
+            sample_type: str,
+        ) -> None:
+            nonlocal skipped_samples, chunks_created, completed_source_samples
+            completed_source_samples += 1
+            if sample_type == "text":
                 chunks_created += max(0, len(samples) - 1)
-            else:
-                dialog_sample = tokenize_example(
-                    item=item,
-                    tokenizer=tokenizer,
-                    max_seq_length=int(cfg.max_seq_length),
-                    template_mode=cfg.template_mode,
-                    max_history_turns=cfg.max_history_turns,
-                    include_prompt_loss=bool(cfg.include_prompt_loss),
-                )
-                samples = [dialog_sample] if dialog_sample is not None else []
-
             if not samples:
                 skipped_samples += 1
                 skipped_reasons[
                     "oversize_text" if sample_type == "text" else "oversize_dialog"
                 ] += 1
-                write_periodic_progress()
-                continue
+                return
 
             tokenized_segments_by_type[sample_type] += len(samples)
             for sample in samples:
@@ -2152,7 +2501,157 @@ def build_shard_dataset(
                 for output_sample in output_samples:
                     queue_output_sample(output_sample)
 
-            write_periodic_progress()
+        executor: Optional[ThreadPoolExecutor] = None
+        pending_work: List[
+            Tuple[Future[List[List[Dict[str, Any]]]], List[Tuple[Any, Optional[str], str]]]
+        ] = []
+        tokenization_batch: List[Tuple[Any, Optional[str], str]] = []
+        tokenizer_fallback_batches = 0
+
+        if effective_dataset_workers > 1:
+            executor = ThreadPoolExecutor(
+                max_workers=effective_dataset_workers,
+                thread_name_prefix="dataset-tokenizer",
+            )
+
+        def submit_tokenization_batch() -> None:
+            nonlocal tokenization_batch
+            if not tokenization_batch:
+                return
+            metadata = tokenization_batch
+            tokenization_batch = []
+            if executor is None:
+                for item, near_key, sample_type in metadata:
+                    samples = _tokenize_dataset_item(item, tokenizer, tokenize_options)
+                    process_tokenized_result(samples, near_key, sample_type)
+                return
+            future = executor.submit(
+                _tokenize_dataset_batch,
+                [item for item, _near_key, _sample_type in metadata],
+                tokenizer_spec,
+                tokenize_options,
+            )
+            pending_work.append((future, metadata))
+
+        def consume_tokenization_batch() -> None:
+            nonlocal tokenizer_fallback_batches
+            future, metadata = pending_work.pop(0)
+            try:
+                batch_results = future.result()
+            except Exception as exc:
+                tokenizer_fallback_batches += 1
+                LOGGER.warning(
+                    "Parallele Dataset-Tokenisierung fehlgeschlagen; Batch läuft synchron weiter: %s",
+                    exc,
+                )
+                batch_results = [
+                    _tokenize_dataset_item(item, tokenizer, tokenize_options)
+                    for item, _near_key, _sample_type in metadata
+                ]
+            for (_item, near_key, sample_type), samples in zip(metadata, batch_results):
+                process_tokenized_result(samples, near_key, sample_type)
+            _write_dataset_progress(
+                cache_dir,
+                seen_samples=seen_samples,
+                tokenized_samples=total_samples,
+                skipped_samples=skipped_samples,
+                shard_idx=shard_idx,
+                done=False,
+                status_writer=status_writer,
+                expected_samples=estimated_samples,
+                started_at=build_started_at,
+                num_workers=effective_dataset_workers,
+                processed_samples=completed_source_samples,
+            )
+
+        _write_dataset_progress(
+            cache_dir,
+            seen_samples=0,
+            tokenized_samples=0,
+            skipped_samples=0,
+            shard_idx=0,
+            done=False,
+            status_writer=status_writer,
+            expected_samples=estimated_samples,
+            started_at=build_started_at,
+            num_workers=effective_dataset_workers,
+            processed_samples=completed_source_samples,
+        )
+
+        preview_saved = False
+        try:
+            for item in examples_iter:
+                if SHUTDOWN.stop:
+                    raise RuntimeError("Dataset-Aufbau durch Stop-Signal abgebrochen.")
+                seen_samples += 1
+                if not preview_saved:
+                    preview, preview_full = format_raw_example_preview(item)
+                    preview_payload = {"preview": preview, "preview_full": preview_full}
+                    _atomic_write_json(dataset_preview_path(cache_dir), preview_payload)
+                    if preview_writer is not None:
+                        preview_writer.write(preview, preview_full)
+                    preview_saved = True
+
+                sample_type = "dialog" if isinstance(item, StructuredChatSample) else "text"
+                raw_samples_by_type[sample_type] += 1
+                canonical_text = canonical_example_text(item)
+                source_split_key = (
+                    item.split_key
+                    if isinstance(item, (StructuredChatSample, PlainTextSample))
+                    else "text:" + hashlib.sha256(canonical_text.encode("utf-8")).hexdigest()
+                )
+                normalized_text = normalize_for_dedup(canonical_text)
+                fingerprint = hashlib.sha256(normalized_text.encode("utf-8")).hexdigest()
+                issues = quality_issues_for_example(item, cfg.quality_min_chars)
+                quality_issue_counts.update(issues)
+
+                if cfg.deduplicate_exact and fingerprint in seen_fingerprints:
+                    skipped_samples += 1
+                    completed_source_samples += 1
+                    exact_duplicates_removed += 1
+                    skipped_reasons["exact_duplicate"] += 1
+                    write_periodic_progress()
+                    continue
+                seen_fingerprints.add(fingerprint)
+
+                if issues and cfg.quality_filter_mode == "exclude":
+                    skipped_samples += 1
+                    completed_source_samples += 1
+                    skipped_reasons["quality_filter"] += 1
+                    write_periodic_progress()
+                    continue
+
+                is_near_duplicate = False
+                near_representative_split_key: Optional[str] = None
+                if cfg.near_duplicate_action != "off":
+                    is_near_duplicate, near_representative_split_key = near_tracker.add_and_find(
+                        canonical_text,
+                        source_split_key,
+                    )
+                    if is_near_duplicate:
+                        near_duplicates_found += 1
+                if is_near_duplicate and cfg.near_duplicate_action == "exclude":
+                    skipped_samples += 1
+                    completed_source_samples += 1
+                    skipped_reasons["near_duplicate"] += 1
+                    write_periodic_progress()
+                    continue
+
+                tokenization_batch.append(
+                    (item, near_representative_split_key, sample_type)
+                )
+                if len(tokenization_batch) >= tokenize_batch_size:
+                    submit_tokenization_batch()
+                if len(pending_work) >= max(1, effective_dataset_workers * 2):
+                    consume_tokenization_batch()
+                write_periodic_progress()
+
+            submit_tokenization_batch()
+            while pending_work:
+                consume_tokenization_batch()
+        finally:
+            if executor is not None:
+                executor.shutdown(wait=True, cancel_futures=True)
 
         if packer is not None:
             for output_sample in packer.flush():
@@ -2182,6 +2681,10 @@ def build_shard_dataset(
             shard_idx=shard_idx,
             done=True,
             status_writer=status_writer,
+            expected_samples=estimated_samples,
+            started_at=build_started_at,
+            num_workers=effective_dataset_workers,
+            processed_samples=completed_source_samples,
         )
 
         meta = {
@@ -2223,6 +2726,15 @@ def build_shard_dataset(
             "use_ngrams": bool(cfg.use_ngrams),
             "ngram_summary": ngram_summary_text(ngram_state),
             "ngram_selected_count": int((ngram_state.stats or {}).get("selected_count", 0)) if ngram_state else 0,
+            "dataset_build": {
+                "num_workers": int(effective_dataset_workers),
+                "tokenize_batch_size": int(tokenize_batch_size),
+                "fallback_batches": int(tokenizer_fallback_batches),
+                "elapsed_seconds": float(time.time() - build_started_at),
+                "samples_per_second": float(
+                    seen_samples / max(1e-9, time.time() - build_started_at)
+                ),
+            },
         }
         _atomic_write_json(dataset_meta_path(cache_dir), meta)
         _atomic_write_json(dataset_ready_path(cache_dir), {"done": True})
@@ -2240,6 +2752,8 @@ def prepare_shard_dataset(
     cache_dir: Path,
     ctx: DistContext,
     status_writer: Optional[JsonStatusWriter] = None,
+    preview_writer: Optional[JsonPreviewWriter] = None,
+    estimated_samples: int = 0,
 ) -> None:
     if not ctx.is_main:
         return
@@ -2260,6 +2774,13 @@ def prepare_shard_dataset(
         LOGGER.info("Vollständig gebautes Dataset bereits vorhanden: %s", cache_dir)
         if status_writer is not None:
             cached_progress = read_json_if_exists(progress_file) or {}
+            cached_progress.update({
+                "phase": "cache",
+                "cache_hit": True,
+                "done": True,
+                "updated_at": time.time(),
+            })
+            _atomic_write_json(progress_file, cached_progress)
             cached_meta = read_json_if_exists(dataset_meta_path(cache_dir)) or {}
             status_writer.write({
                 "running": True,
@@ -2271,16 +2792,29 @@ def prepare_shard_dataset(
                 "total_samples_real": cached_meta.get("total_samples"),
                 "skipped_samples": cached_meta.get("skipped_samples"),
             })
+        cached_preview = read_json_if_exists(dataset_preview_path(cache_dir)) or {}
+        if preview_writer is not None and cached_preview:
+            preview_writer.write(
+                str(cached_preview.get("preview") or ""),
+                str(cached_preview.get("preview_full") or ""),
+            )
         return
 
     for p in cache_dir.glob("shard_*.pkl"):
         p.unlink(missing_ok=True)
     done_file.unlink(missing_ok=True)
     dataset_meta_path(cache_dir).unlink(missing_ok=True)
+    dataset_preview_path(cache_dir).unlink(missing_ok=True)
     progress_file.unlink(missing_ok=True)
 
     LOGGER.info("Baue tokenisiertes Dataset vollständig vor dem Training: %s", cache_dir)
-    build_shard_dataset(cfg.__dict__.copy(), str(cache_dir), status_writer=status_writer)
+    build_shard_dataset(
+        cfg.__dict__.copy(),
+        str(cache_dir),
+        status_writer=status_writer,
+        preview_writer=preview_writer,
+        estimated_samples=estimated_samples,
+    )
     LOGGER.info("Dataset vollständig gebaut: %s", cache_dir)
 
 
@@ -2888,7 +3422,9 @@ def apply_training_mode(model: nn.Module, cfg: TrainConfig) -> nn.Module:
     return model
 
 
-def build_model_and_tokenizer(cfg: TrainConfig, ctx: DistContext):
+def build_model_and_tokenizer(
+    cfg: TrainConfig, ctx: DistContext, ngram_cache_dir: Optional[Path] = None,
+):
     resume_dir = Path(cfg.resume).expanduser().resolve() if cfg.resume else None
     tokenizer_source = (
         str(resume_dir)
@@ -2927,8 +3463,12 @@ def build_model_and_tokenizer(cfg: TrainConfig, ctx: DistContext):
     ngram_state = build_or_load_ngram_state(
         tokenizer=tokenizer,
         cfg=ngram_cfg,
-        outdir=Path(cfg.output_dir or cfg.save_dir or "./training_outputs/worker_run"),
-        rebuild=bool(cfg.rebuild_dataset_cache),
+        outdir=(
+            Path(ngram_cache_dir)
+            if ngram_cache_dir is not None
+            else Path(cfg.output_dir or cfg.save_dir or "./training_outputs/worker_run")
+        ),
+        rebuild=False if ngram_cache_dir is not None else bool(cfg.rebuild_dataset_cache),
         progress_cb=lambda stage, current, total: LOGGER.info(
             "NGRAM Fortschritt [%s]: %s/%s (%.1f%%)",
             stage,
@@ -4060,7 +4600,15 @@ def main() -> int:
             if ctx.is_main:
                 audit_error_path.unlink(missing_ok=True)
                 try:
-                    dataset_audit_report = audit_dataset(cfg, outdir, True)
+                    status_writer.write({
+                        "running": True,
+                        "status": "auditing_dataset",
+                        "eta": "Dataset wird geprüft (Cache wird verwendet, falls vorhanden)",
+                        "dataset_ready": False,
+                    })
+                    dataset_audit_report = audit_dataset_cached(
+                        cfg, outdir, status_writer=status_writer,
+                    )
                 except Exception as exc:
                     audit_error_path.write_text(
                         f"{exc.__class__.__name__}: {exc}\n\n{traceback.format_exc()}",
@@ -4115,33 +4663,76 @@ def main() -> int:
                 )
             dataset_audit_report = {"enabled": False, "ok": True}
 
-        prepare_scratch_tokenizer_if_requested(cfg, outdir, ctx)
-
-        total_samples_est = count_examples_fast(cfg)
+        total_samples_est = estimate_examples_from_audit(cfg, dataset_audit_report)
+        if total_samples_est <= 0:
+            total_samples_est = count_examples_fast(cfg)
         if total_samples_est <= 0:
             raise RuntimeError("Kein Trainingssample gefunden.")
 
-        if ctx.is_main:
-            try:
-                preview, preview_full = get_first_raw_example_preview(cfg)
-                if preview_writer is not None and (preview or preview_full):
-                    preview_writer.write(preview, preview_full)
-            except Exception:
-                pass
+        if ctx.is_main and cfg.train_scratch_tokenizer and not cfg.resume:
+            status_writer.write({
+                "running": True,
+                "status": "building_tokenizer",
+                "eta": "Scratch-Tokenizer wird aufgebaut oder aus Cache geladen",
+                "dataset_progress": {
+                    "phase": "scratch_tokenizer",
+                    "seen_samples": 0,
+                    "expected_samples": int(total_samples_est),
+                    "done": False,
+                    "updated_at": time.time(),
+                },
+                "dataset_ready": False,
+            })
+        prepare_scratch_tokenizer_if_requested(
+            cfg, outdir, ctx, example_count=total_samples_est,
+        )
 
-        cache_dir = compute_shard_cache_dir(cfg)
+        cache_path_state = outdir / "dataset_cache_path.json"
+        cache_path_error = outdir / "dataset_cache_path_error.txt"
+        if ctx.is_main:
+            cache_path_state.unlink(missing_ok=True)
+            cache_path_error.unlink(missing_ok=True)
+            try:
+                cache_dir = compute_shard_cache_dir(cfg)
+                _atomic_write_json(cache_path_state, {"cache_dir": str(cache_dir)})
+            except Exception as exc:
+                cache_path_error.write_text(
+                    f"{exc.__class__.__name__}: {exc}\n\n{traceback.format_exc()}",
+                    encoding="utf-8",
+                )
+        barrier(ctx)
+        if cache_path_error.exists():
+            raise RuntimeError(cache_path_error.read_text(encoding="utf-8"))
+        if not ctx.is_main:
+            cache_dir = Path(
+                json.loads(cache_path_state.read_text(encoding="utf-8"))["cache_dir"]
+            )
+
         if ctx.is_main:
             status_writer.write({
                 "running": True,
                 "status": "building_dataset",
                 "eta": "Dataset wird vollständig aufgebaut",
                 "csv_total_samples_est": int(total_samples_est),
+                "dataset_cache_dir": str(cache_dir),
             })
-            prepare_shard_dataset(cfg, cache_dir, ctx, status_writer=status_writer)
+            prepare_shard_dataset(
+                cfg,
+                cache_dir,
+                ctx,
+                status_writer=status_writer,
+                preview_writer=preview_writer,
+                estimated_samples=total_samples_est,
+            )
         wait_for_dataset_ready(cache_dir)
 
         barrier(ctx)
-        model, tokenizer, fp16, bf16, ngram_state = build_model_and_tokenizer(cfg, ctx)
+        if ctx.is_main:
+            cache_path_state.unlink(missing_ok=True)
+            cache_path_error.unlink(missing_ok=True)
+        model, tokenizer, fp16, bf16, ngram_state = build_model_and_tokenizer(
+            cfg, ctx, ngram_cache_dir=cache_dir,
+        )
 
         serialized_plan_path = outdir / "batch_plan_state.pkl"
         plan_error_path = outdir / "batch_plan_error.txt"
