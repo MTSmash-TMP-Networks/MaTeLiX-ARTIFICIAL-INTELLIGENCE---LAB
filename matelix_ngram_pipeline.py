@@ -69,6 +69,7 @@ class NgramConfig:
     column_name: str = "text"
     mixed_training: bool = False
     mixed_text_column: str = "Text"
+    training_phase: str = "custom"
     csv_path: str = ""
 
     # Overlap / Konsistenz
@@ -198,35 +199,38 @@ def iter_training_texts(
     column_name: str,
     mixed_training: bool = False,
     mixed_text_column: str = "Text",
+    training_phase: str = "custom",
 ) -> Iterable[str]:
     mode = (template_mode or "chat").strip().lower()
+    phase = (training_phase or "custom").strip().lower()
 
     if mode in {"chat", "dialogplus"}:
-        for chain in _iter_candidate_chains(csv_path):
-            parts: List[str] = []
-            target_idx = len(chain) - 1
-            if target_idx < 0:
-                continue
+        if phase != "pretrain":
+            for chain in _iter_candidate_chains(csv_path):
+                parts: List[str] = []
+                target_idx = len(chain) - 1
+                if target_idx < 0:
+                    continue
 
-            system_text = (chain[0].get("system") or "").strip()
-            if system_text:
-                parts.append(system_text)
+                system_text = (chain[0].get("system") or "").strip()
+                if system_text:
+                    parts.append(system_text)
 
-            for j in range(target_idx + 1):
-                row = chain[j]
-                user = (row.get("Benutzer") or "").strip()
-                ctx = (row.get("Kontext") or "").strip()
-                asst = (row.get("Assistentin") or "").strip()
+                for j in range(target_idx + 1):
+                    row = chain[j]
+                    user = (row.get("Benutzer") or "").strip()
+                    ctx = (row.get("Kontext") or "").strip()
+                    asst = (row.get("Assistentin") or "").strip()
 
-                if user:
-                    parts.append(f"{ctx}\n{user}".strip() if ctx else user)
-                if asst:
-                    parts.append(asst)
+                    if user:
+                        parts.append(f"{ctx}\n{user}".strip() if ctx else user)
+                    if asst:
+                        parts.append(asst)
 
-            text = "\n".join(p for p in parts if p.strip()).strip()
-            if text:
-                yield text
-        if mixed_training:
+                text = "\n".join(p for p in parts if p.strip()).strip()
+                if text:
+                    yield text
+        if mixed_training and phase != "sft":
             with open(csv_path, "r", encoding="utf-8") as f:
                 reader = csv.DictReader(f)
                 for row in reader:
@@ -417,6 +421,7 @@ def collect_ngram_candidates(
         cfg.column_name,
         cfg.mixed_training,
         cfg.mixed_text_column,
+        cfg.training_phase,
     ):
         scanned_samples += 1
         if scanned_samples > max_samples:
