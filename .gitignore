@@ -1,0 +1,6 @@
+__pycache__/
+*.py[cod]
+.venv/
+datasets/
+training_outputs/
+*.log
